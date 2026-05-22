@@ -1,0 +1,7 @@
+{
+  "name": "houston",
+  "description": "Mac menubar app — live context % per Claude session, Start-mission spawning, per-server dev-server controls, and a Settings-driven onboarding flow. Successor to the local Next.js Mission Control dashboard, now packaged for distribution.",
+  "status": "active",
+  "stack": ["Electron", "Next.js 16", "React 19", "Tailwind 4", "TypeScript"],
+  "notes": "Houston's UI is now a 4-tab popover (Projects / Servers / Skills / Settings) with a full Settings store: terminal emulator, projects folder, and tab-vs-window spawn mode are all user-configurable via onboarding and the Settings tab. Log/End mission buttons were removed because the Ghostty focus-race made them unreliable; replaced with a Start dev / Open in browser hover action, and Start mission now keystrokes /rename so the spawned tab is titled with the project name. Next: resolve Terminal.app's macOS Sequoia tab-creation limitation (currently falls back to a new window) — workaround is setting macOS's 'Prefer tabs when opening documents' to Always, or switching to iTerm2."
+}
