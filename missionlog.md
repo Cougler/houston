@@ -191,3 +191,31 @@ Houston's UI is now a 4-tab popover (Projects / Servers / Skills / Settings) wit
 - Carried over from prior sessions: `tray@2x.png` (44×44), `icon.icns` for the bundle, Swift helper for Ghostty AX targeting (would unblock proper tab-targeting + future log/end mission revival), and an end-to-end DMG build test.
 
 ---
+
+## 2026-05-25 — Packaging Houston: DMG build, app:// protocol handler, git workflow integration
+
+Houston is packaged and code-signed as Houston.app via electron-builder, with a custom 1024×1024 app icon embedded and a custom `app://` protocol handler in `electron/main.js` so the Next.js export's root-relative CSS/JS/image paths resolve under `file://`. The skill layer now wraps git around every mission — `/start-mission` auto fast-forward pulls (and offers to init+push fresh repos), end-mission drafts a commit message from the diff and pushes — and Houston itself is live as a private repo at `Cougler/houston`. Next: install the latest DMG, walk through onboarding in the packaged build, and commit + push this session's app-side changes (protocol handler, app icon, sync-icon swap).
+
+**Done this session:**
+- Pushed Houston to GitHub as `Cougler/houston` (private). One consolidated commit (27 files, 8767 insertions) plus `gh repo create --source=. --remote=origin --push`.
+- `~/.claude/skills/start-mission/SKILL.md` — added new step 2 ("Check git setup") with three branches: no `.git` (offer init + push), `.git` but no remote (offer push), both set up (fall through). Pre-flight scans for `.env*` / `*.pem` / `credentials*` / `id_rsa*` before staging. Added new step 3 ("Pull latest from git") with a five-case decision tree (up-to-date / behind-only / ahead-only / diverged / no-upstream). Renumbered everything below.
+- `~/.claude/CLAUDE.md` — `End Mission` step 4 (commit + push) inserted between the `.mc.json` update and `log-session.py`. Drafts message from diff + status note, asks once, commits with `Co-Authored-By` trailer, pushes (`-u origin HEAD` if no upstream). Skips entirely on no-remote projects.
+- Packaged the app: `npm run build` → `dist/Houston-0.1.0-arm64.dmg` (189 MB, signed with Apple Development cert).
+- Tray icons regenerated from `public/tray@2x.png` (224×236 master): `sips -Z 22` → `electron/icons/tray.png` (21×22); `sips -Z 44` → `electron/icons/tray@2x.png` (41×44). Earlier hand-placed `tray@2x.png` from a different glyph was removed first.
+- Added `mac.icon: "public/icon.png"` to `package.json` `build` block. electron-builder auto-converts the 1024×1024 PNG to `.icns` and embeds in `Contents/Resources/icon.icns` — "default Electron icon is used" warning gone.
+- **Fixed broken styles in the packaged build.** Root-relative paths from Next's static export (`/_next/static/...`, `/houstonlogo.png`) don't resolve under `file://`. Fix in `electron/main.js`:
+  - Registered `app://` as a privileged scheme (`{ standard: true, secure: true, supportFetchAPI: true }`) at module load time, before `app.whenReady`.
+  - Inside `whenReady`, `protocol.handle("app", request => net.fetch(pathToFileURL(path.join(PROD_OUT_DIR, decodeURIComponent(new URL(request.url).pathname))).toString()))`.
+  - Switched `win.loadFile(PROD_INDEX)` → `win.loadURL("app://-/index.html")` and `onboardingWin.loadFile(PROD_ONBOARDING)` → `onboardingWin.loadURL("app://-/onboarding/index.html")`.
+  - Replaced `PROD_INDEX` / `PROD_ONBOARDING` constants with a single `PROD_OUT_DIR`; added `pathToFileURL` import from `node:url`.
+- `app/page.tsx` `SyncIcon` — swapped hand-rolled 16-viewBox arcs for Lucide's `refresh-cw` paths (viewBox 24, strokeWidth 2). Same two-arc shape, proper proportions, full arrowheads.
+- Confirmed the dock-launcher pattern: `LSUIElement: true` keeps Houston out of the dock/Cmd-Tab by default, but the user can drag Houston.app onto the dock as a persistent "Keep in Dock" shortcut (no running-indicator dot, since LSUIElement suppresses it).
+
+**Up next:**
+- **End-to-end packaged-app test**: install latest DMG → onboarding (terminal + folder pickers) → tray icon sharpness on Retina → Settings persistence across relaunches → active-session detection → Start mission → dev/browser hover buttons → app icon in Finder + DMG window + About dialog.
+- **Commit + push this session's app-side changes** via the new `/end-mission` flow: protocol handler refactor in `main.js`, `mac.icon` line in `package.json`, `SyncIcon` swap in `page.tsx`, regenerated `electron/icons/tray.png` + `tray@2x.png`, new `public/icon.png` + updated `public/tray@2x.png`.
+- **Verify the new start-mission git-setup step** on a project that has no remote (e.g., `~/Apps/mission-control` if it doesn't have one yet) — confirms the `gh repo create` branch end-to-end.
+- **Single-instance lock** (`app.requestSingleInstanceLock()`) if dock-launcher clicks while running spawn duplicate instances.
+- Carried over: Terminal.app Sequoia tab limitation, `concurrently -k` not auto-restarting Electron on `electron/*.js` edits, Swift helper for Ghostty AX targeting, possible `.icns` polish if the auto-generated one looks off in any context.
+
+---

@@ -617,7 +617,6 @@ function ActiveSessionRow({
 }) {
   const pct = session.contextPct;
   const pctColor = ctxColor(pct);
-  const ago = session.startedAt ? timeAgo(session.startedAt) : null;
   const [starting, setStarting] = useState(false);
 
   const startDev = async () => {
@@ -670,17 +669,41 @@ function ActiveSessionRow({
               className="text-[12px] truncate tabular-nums mt-0.5"
               style={{ color: "var(--muted)" }}
             >
-              {ago ? `${ago} • ` : ""}Context used:{" "}
-              <span style={{ color: pctColor, fontWeight: 600 }}>{pct}%</span>
+              Next request: ~{formatTokens(session.contextSize)} tokens
             </div>
           </div>
-          <span
-            className="flex-shrink-0"
-            style={{ color: "var(--dim)" }}
-            aria-hidden
-          >
-            <ChevronRightIcon />
-          </span>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span
+              className="relative overflow-hidden"
+              style={{
+                width: 72,
+                height: 5,
+                borderRadius: 999,
+                background: "color-mix(in srgb, var(--muted) 18%, transparent)",
+              }}
+              role="progressbar"
+              aria-valuenow={pct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Context used: ${pct}%`}
+            >
+              <span
+                className="block h-full"
+                style={{
+                  width: `${Math.min(100, Math.max(0, pct))}%`,
+                  background: pctColor,
+                  borderRadius: 999,
+                  transition: "width 200ms ease",
+                }}
+              />
+            </span>
+            <span
+              className="text-[12px] tabular-nums"
+              style={{ color: pctColor, fontWeight: 600, minWidth: 28 }}
+            >
+              {pct}%
+            </span>
+          </div>
         </div>
         {session.cwd && (
           <div
@@ -793,18 +816,6 @@ function RowItem({
       {children}
     </div>
   );
-}
-
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 function formatTokens(n: number): string {
@@ -1268,18 +1279,18 @@ function SyncIcon({ spinning }: { spinning: boolean }) {
     <svg
       width="14"
       height="14"
-      viewBox="0 0 16 16"
+      viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.6"
+      strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
       style={spinning ? { animation: "spin 0.9s linear infinite" } : undefined}
     >
-      <path d="M13.5 7a5.5 5.5 0 0 0-9.6-2.7" />
-      <path d="M13.5 2v3h-3" />
-      <path d="M2.5 9a5.5 5.5 0 0 0 9.6 2.7" />
-      <path d="M2.5 14v-3h3" />
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M3 21v-5h5" />
     </svg>
   );
 }

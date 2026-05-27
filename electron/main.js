@@ -1,12 +1,20 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, dialog } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, dialog, protocol, net } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 
 const isDev = process.env.NODE_ENV === "development";
 const DEV_URL = "http://localhost:3401";
-const PROD_INDEX = path.join(__dirname, "..", "out", "index.html");
-const PROD_ONBOARDING = path.join(__dirname, "..", "out", "onboarding", "index.html");
+const PROD_OUT_DIR = path.join(__dirname, "..", "out");
+
+// Register app:// before app is ready so the protocol handler is available at load time.
+// Root-relative paths in the Next.js export (e.g. /_next/static/..., /houstonlogo.png) resolve
+// to filesystem root under file://, which breaks all CSS/JS/images. Mapping them through app://
+// lets us anchor them to the bundled out/ directory.
+protocol.registerSchemesAsPrivileged([
+  { scheme: "app", privileges: { standard: true, secure: true, supportFetchAPI: true } },
+]);
 
 const WINDOW_WIDTH = 445;
 const WINDOW_HEIGHT = 751;
@@ -38,7 +46,7 @@ function createWindow() {
   if (isDev) {
     win.loadURL(DEV_URL);
   } else {
-    win.loadFile(PROD_INDEX);
+    win.loadURL("app://-/index.html");
   }
 
   win.on("blur", () => {
@@ -137,7 +145,7 @@ function createOnboardingWindow() {
   if (isDev) {
     onboardingWin.loadURL(DEV_URL + "/onboarding");
   } else {
-    onboardingWin.loadFile(PROD_ONBOARDING);
+    onboardingWin.loadURL("app://-/onboarding/index.html");
   }
 
   // Show the dock icon while onboarding is open so the user can cmd-tab back
@@ -394,6 +402,14 @@ ipcMain.handle("settings:set", (_e, patch) => {
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  protocol.handle("app", (request) => {
+    const url = new URL(request.url);
+    let pathname = decodeURIComponent(url.pathname);
+    if (!pathname || pathname === "/") pathname = "/index.html";
+    const filePath = path.join(PROD_OUT_DIR, pathname);
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+
   if (process.platform === "darwin" && app.dock) {
     app.dock.hide();
   }
