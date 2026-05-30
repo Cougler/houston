@@ -19,4 +19,10 @@ contextBridge.exposeInMainWorld("mc", {
   pickDirectory: (opts) => ipcRenderer.invoke("dialog:pickDirectory", opts || {}),
   startMission: (projectPath, terminal, mode) =>
     ipcRenderer.invoke("mission:start", { projectPath, terminal, mode }),
+  checkPermissions: (terminals) =>
+    ipcRenderer.invoke("permissions:check", { terminals }),
+  requestPermissions: (terminals) =>
+    ipcRenderer.invoke("permissions:request", { terminals }),
+  openPermissionsSettings: (pane) =>
+    ipcRenderer.invoke("permissions:openSettings", pane),
 });

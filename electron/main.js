@@ -1,8 +1,11 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, dialog, protocol, net } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, dialog, protocol, net, systemPreferences } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const { pathToFileURL } = require("node:url");
+
+const execFileP = promisify(execFile);
 
 const isDev = process.env.NODE_ENV === "development";
 const DEV_URL = "http://localhost:3401";
@@ -132,8 +135,12 @@ function createOnboardingWindow() {
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    title: "Welcome to Houston",
+    title: "",
     backgroundColor: "#ffffff",
+    // Hide the title bar but keep the native traffic-light controls floating
+    // over our white canvas — matches the Figma's clean-white window chrome.
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 14, y: 14 },
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -147,6 +154,10 @@ function createOnboardingWindow() {
   } else {
     onboardingWin.loadURL("app://-/onboarding/index.html");
   }
+
+  // Block Next.js's <title>Houston</title> from bubbling up to the OS window
+  // title — we want the chrome to feel borderless and unlabeled.
+  onboardingWin.on("page-title-updated", (e) => e.preventDefault());
 
   // Show the dock icon while onboarding is open so the user can cmd-tab back
   // to it if they click away. Re-hide on close to return to menubar-only mode.
@@ -375,9 +386,115 @@ ipcMain.handle("mission:start", async (_e, payload) => {
     if (!projectPath) return { ok: false, error: "missing projectPath" };
     if (win) win.hide();
     const s = settings.read(app);
-    const chosen = terminal || s.terminal || "Ghostty";
+    const chosen = terminal || (s.terminals && s.terminals[0]) || "Ghostty";
     const spawnMode = mode === "tab" || mode === "window" ? mode : s.spawnMode || "window";
     return await startMission(projectPath, chosen, spawnMode);
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+});
+
+// ── Permissions ───────────────────────────────────────────────────────────────
+//
+// macOS requires two permissions for Houston's mission spawning to work:
+//   - Accessibility: needed to issue System Events keystrokes (Cmd+T, typing
+//     /start-mission). Without it, osascript calls into System Events silently
+//     no-op — Ghostty focuses but nothing else happens.
+//   - Automation (per target app): needed to send Apple Events to a specific
+//     terminal app. macOS scopes Automation grants per (caller bundle, target
+//     bundle) pair. We probe with a benign `get name`; first call triggers the
+//     macOS prompt, subsequent denials throw with errAEEventNotPermitted (-1743).
+//
+// Neither permission can be granted programmatically. We can only (a) trigger
+// the native prompt the first time, and (b) deep-link to System Settings if the
+// user already denied.
+
+// Probe Automation by sending a no-op Apple Event. Returns true if granted,
+// false if denied/prompted-and-canceled. Note: on a truly first ask, macOS
+// shows the prompt and the call blocks briefly until the user picks.
+async function probeAutomation(targetApp) {
+  try {
+    await execFileP("osascript", ["-e", `tell application "${targetApp}" to get name`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle("permissions:check", async (_e, payload) => {
+  const terminals = Array.isArray(payload?.terminals) ? payload.terminals : [];
+  const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+  const automation = {};
+  for (const t of terminals) {
+    automation[t] = await probeAutomation(t);
+  }
+  const s = settings.read(app);
+  return {
+    accessibility,
+    automation,
+    permissionsRequestedAt: s.permissionsRequestedAt ?? null,
+  };
+});
+
+// "Allow permissions" CTA. Behavior depends on prior state:
+//   - First call (permissionsRequestedAt == null): trigger native prompts for
+//     Accessibility and Automation (one per selected terminal), then mark
+//     requestedAt so future calls take the deep-link path.
+//   - Subsequent calls with anything still missing: deep-link to System
+//     Settings. We open Accessibility first (more common), then Automation
+//     if any terminals are missing.
+ipcMain.handle("permissions:request", async (_e, payload) => {
+  const terminals = Array.isArray(payload?.terminals) ? payload.terminals : [];
+  const s = settings.read(app);
+  const firstAsk = s.permissionsRequestedAt == null;
+
+  if (firstAsk) {
+    // isTrustedAccessibilityClient(true) shows the native prompt (with an
+    // "Open System Settings" button) if not already granted. It's
+    // non-blocking — returns the current grant state immediately.
+    systemPreferences.isTrustedAccessibilityClient(true);
+    // Trigger Automation prompts. Each probe blocks until the user dismisses
+    // the prompt. We do them in parallel so the prompts queue up rather than
+    // forcing one-at-a-time interaction.
+    await Promise.all(terminals.map((t) => probeAutomation(t)));
+    settings.write(app, { permissionsRequestedAt: Date.now() });
+  } else {
+    // Re-check state. If anything is still missing, deep-link to Settings.
+    const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+    const automation = {};
+    for (const t of terminals) automation[t] = await probeAutomation(t);
+    const anyAutomationMissing = Object.values(automation).some((v) => !v);
+    if (!accessibility) {
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+      );
+    } else if (anyAutomationMissing) {
+      await shell.openExternal(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+      );
+    }
+  }
+
+  // Always return a fresh state.
+  const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+  const automation = {};
+  for (const t of terminals) automation[t] = await probeAutomation(t);
+  return {
+    accessibility,
+    automation,
+    firstAsk,
+    permissionsRequestedAt: settings.read(app).permissionsRequestedAt ?? null,
+  };
+});
+
+ipcMain.handle("permissions:openSettings", async (_e, pane) => {
+  const target =
+    pane === "automation"
+      ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+      : "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+  try {
+    await shell.openExternal(target);
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }

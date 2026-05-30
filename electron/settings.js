@@ -5,9 +5,10 @@ const HOME = process.env.HOME || "";
 const SUPPORTED_TERMINALS = ["Ghostty", "Terminal", "iTerm2"];
 const SUPPORTED_SPAWN_MODES = ["tab", "window"];
 const DEFAULTS = {
-  terminal: "Ghostty",
+  terminals: ["Ghostty"],
   projectsDir: path.join(HOME, "Apps"),
   spawnMode: "window",
+  permissionsRequestedAt: null,
 };
 
 function settingsPath(app) {
@@ -21,30 +22,44 @@ function expandHome(p) {
   return p;
 }
 
+function normalizeTerminals(obj) {
+  // Migrate legacy single-terminal field to terminals[].
+  if (Array.isArray(obj.terminals)) {
+    const filtered = obj.terminals.filter((t) => SUPPORTED_TERMINALS.includes(t));
+    return filtered.length ? filtered : [DEFAULTS.terminals[0]];
+  }
+  if (typeof obj.terminal === "string" && SUPPORTED_TERMINALS.includes(obj.terminal)) {
+    return [obj.terminal];
+  }
+  return [...DEFAULTS.terminals];
+}
+
 function read(app) {
+  let obj = {};
   try {
     const raw = fs.readFileSync(settingsPath(app), "utf-8");
-    const obj = JSON.parse(raw);
-    const merged = { ...DEFAULTS, ...obj };
-    merged.projectsDir = expandHome(merged.projectsDir);
-    return merged;
+    obj = JSON.parse(raw);
   } catch {
-    return { ...DEFAULTS };
+    // First run / corrupt — fall through with defaults.
   }
+  const merged = { ...DEFAULTS, ...obj };
+  merged.terminals = normalizeTerminals(merged);
+  merged.projectsDir = expandHome(merged.projectsDir);
+  // The legacy `terminal` field is no longer used; drop it so it doesn't drift.
+  delete merged.terminal;
+  return merged;
 }
 
 function write(app, patch) {
   const current = read(app);
   const next = { ...current, ...patch };
-  if (next.terminal && !SUPPORTED_TERMINALS.includes(next.terminal)) {
-    next.terminal = DEFAULTS.terminal;
-  }
+  next.terminals = normalizeTerminals(next);
   if (next.spawnMode && !SUPPORTED_SPAWN_MODES.includes(next.spawnMode)) {
     next.spawnMode = DEFAULTS.spawnMode;
   }
   // Terminal.app's tab APIs are broken on macOS Sequoia (see known issues in
-  // CLAUDE.md), so force window mode whenever the active terminal is Terminal.
-  if (next.terminal === "Terminal") {
+  // CLAUDE.md), so force window mode whenever Terminal is the primary.
+  if (next.terminals[0] === "Terminal") {
     next.spawnMode = "window";
   }
   if (next.projectsDir) {
@@ -53,6 +68,7 @@ function write(app, patch) {
       next.projectsDir = DEFAULTS.projectsDir;
     }
   }
+  delete next.terminal;
   try {
     fs.mkdirSync(app.getPath("userData"), { recursive: true });
     fs.writeFileSync(settingsPath(app), JSON.stringify(next, null, 2));

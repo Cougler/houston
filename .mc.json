@@ -3,6 +3,6 @@
   "description": "Mac menubar app — live context % per Claude session, Start-mission spawning, per-server dev-server controls, and a Settings-driven onboarding flow. Successor to the local Next.js Mission Control dashboard, now packaged for distribution.",
   "status": "active",
   "stack": ["Electron", "Next.js 16", "React 19", "Tailwind 4", "TypeScript"],
-  "notes": "Active project rows in Houston's Projects tab now show a context progress bar where the chevron used to be, with the % beside it and a 'Next request: ~XXk tokens' secondary line. The mission lifecycle is consolidated — /log-mission is folded into the global End Mission flow and Mission Control coupling (the log-session.py call) is removed entirely. Next: install the freshly built DMG (rebuilt this session) and walk through onboarding to verify the new row layout in the packaged build.",
+  "notes": "Houston's onboarding flow has been rewritten to match the linked Figma design — a clean white window with hidden title bar, an animated Welcome screen that auto-advances, and a top-bar chrome (Back / step dots / Skip) with a floating circular arrow as Continue. Background art (rocket+smoke on Welcome, astronaut bottom-right on Projects-folder + Terminal-apps) lives in a dedicated z-0 layer with SVG aspect ratios restored, multi-terminal selection + permissions step are wired in, and step content is vertically centered. Next: fully restart Electron (main-process changes don't hot-reload) and walk through the new flow end-to-end.",
   "url": "https://github.com/Cougler/houston"
 }

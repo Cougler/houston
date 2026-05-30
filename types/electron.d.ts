@@ -1,5 +1,18 @@
 import type { DashboardData, ActiveSession, InjectResult, ProjectDetail, DevServer, SkillDetail } from "@/lib/types";
 
+type HoustonSettings = {
+  terminals: string[];
+  projectsDir: string;
+  spawnMode: "tab" | "window";
+  permissionsRequestedAt: number | null;
+};
+
+type PermissionsSnapshot = {
+  accessibility: boolean;
+  automation: Record<string, boolean>;
+  permissionsRequestedAt: number | null;
+};
+
 declare global {
   interface Window {
     mc: {
@@ -15,12 +28,12 @@ declare global {
       hide: () => Promise<void>;
       clearServerCache: (cwd: string) => Promise<{ ok: boolean; cleared?: string[]; error?: string }>;
       startDevServer: (projectPath: string) => Promise<{ ok: boolean; pid?: number; logPath?: string; error?: string }>;
-      getSettings: () => Promise<{ terminal: string; projectsDir: string; spawnMode: "tab" | "window" }>;
+      getSettings: () => Promise<HoustonSettings>;
       setSettings: (
-        patch: Partial<{ terminal: string; projectsDir: string; spawnMode: "tab" | "window" }>
+        patch: Partial<HoustonSettings>
       ) => Promise<{
         ok: boolean;
-        settings?: { terminal: string; projectsDir: string; spawnMode: "tab" | "window" };
+        settings?: HoustonSettings;
         error?: string;
       }>;
       getTerminalStatus: () => Promise<{ Ghostty: boolean; Terminal: boolean; iTerm2: boolean }>;
@@ -30,6 +43,9 @@ declare global {
         terminal?: string,
         mode?: "tab" | "window"
       ) => Promise<InjectResult>;
+      checkPermissions: (terminals: string[]) => Promise<PermissionsSnapshot>;
+      requestPermissions: (terminals: string[]) => Promise<PermissionsSnapshot & { firstAsk?: boolean }>;
+      openPermissionsSettings: (pane: "accessibility" | "automation") => Promise<InjectResult>;
     };
   }
 }

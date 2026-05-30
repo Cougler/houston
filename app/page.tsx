@@ -1803,10 +1803,12 @@ function ExternalLinkIcon() {
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 type SettingsShape = {
-  terminal: string;
+  terminals: string[];
   projectsDir: string;
   spawnMode: "tab" | "window";
 };
+
+const ALL_TERMINALS = ["Ghostty", "Terminal", "iTerm2"] as const;
 
 function SettingsView() {
   const [settings, setSettingsState] = useState<SettingsShape | null>(null);
@@ -1834,11 +1836,11 @@ function SettingsView() {
 
   const update = async (patch: Partial<SettingsShape>) => {
     // Terminal.app doesn't reliably tab-spawn on macOS Sequoia, so picking
-    // Terminal forces window mode. Apply optimistically so the UI snaps
-    // before the IPC round-trip, and send the combined patch so the store
-    // sees both fields atomically.
+    // Terminal as primary forces window mode. Apply optimistically so the UI
+    // snaps before the IPC round-trip, and send the combined patch so the
+    // store sees both fields atomically.
     const finalPatch: Partial<SettingsShape> =
-      patch.terminal === "Terminal"
+      patch.terminals && patch.terminals[0] === "Terminal"
         ? { ...patch, spawnMode: "window" }
         : patch;
     if (settings) {
@@ -1852,6 +1854,21 @@ function SettingsView() {
     }
   };
 
+  const toggleTerminal = (t: string) => {
+    if (!settings) return;
+    const has = settings.terminals.includes(t);
+    let next: string[];
+    if (has) {
+      // Refuse to leave the user with zero selected — Start mission would
+      // have nothing to spawn into.
+      if (settings.terminals.length === 1) return;
+      next = settings.terminals.filter((x) => x !== t);
+    } else {
+      next = [...settings.terminals, t];
+    }
+    update({ terminals: next });
+  };
+
   const pickProjectsDir = async () => {
     const r = await window.mc?.pickDirectory({
       title: "Choose your projects folder",
@@ -1863,21 +1880,27 @@ function SettingsView() {
   if (loadError) return <Empty>{loadError}</Empty>;
   if (!settings) return <Empty>Loading…</Empty>;
 
-  const terminalLocked = settings.terminal === "Terminal";
+  const primary = settings.terminals[0] ?? "Ghostty";
+  const terminalLocked = primary === "Terminal";
 
   return (
     <div className="flex flex-col pb-6">
-      <Section label="Terminal emulator">
+      <Section label="Terminal emulators">
         <CardGroup>
-          {(["Ghostty", "Terminal", "iTerm2"] as const).map((t) => (
+          {ALL_TERMINALS.map((t) => (
             <SettingsTerminalRow
               key={t}
               name={t}
+              sub={
+                settings.terminals[0] === t && settings.terminals.length > 1
+                  ? "Primary — used to spawn new sessions"
+                  : undefined
+              }
               status={
                 installed ? (installed[t] ? "installed" : "not-installed") : undefined
               }
-              selected={settings.terminal === t}
-              onSelect={() => update({ terminal: t })}
+              selected={settings.terminals.includes(t)}
+              onSelect={() => toggleTerminal(t)}
             />
           ))}
         </CardGroup>
@@ -1890,15 +1913,15 @@ function SettingsView() {
             sub={
               terminalLocked
                 ? "Not supported by Terminal.app — opens a new window instead"
-                : `Opens a new tab in your current ${settings.terminal} window`
+                : `Opens a new tab in your current ${primary} window`
             }
             selected={settings.spawnMode === "tab" && !terminalLocked}
             disabled={terminalLocked}
             onSelect={() => update({ spawnMode: "tab" })}
           />
           <SettingsTerminalRow
-            name={`New ${settings.terminal} window`}
-            sub={`Always opens a fresh ${settings.terminal} window`}
+            name={`New ${primary} window`}
+            sub={`Always opens a fresh ${primary} window`}
             selected={settings.spawnMode === "window"}
             onSelect={() => update({ spawnMode: "window" })}
           />
