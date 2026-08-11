@@ -153,7 +153,10 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 - **Sessions die with Houston.** Accepted tradeoff — same as sessions dying with
   Ghostty today. To make them survive, launch `tmux new-session -A -s
   houston-<project>` instead of the bare shell; that's the whole change.
-- **Not a git repo.** No `.git`, so `/push` won't work until it's initialised.
+- **Repo: `Cougler/houston` (private).** The Electron app's history lives in
+  the same repo — the Swift rewrite is grafted on top of it (`29de87b` is the
+  last Electron commit), so the old code stays reachable without a separate
+  archive repo.
 
 ## History — deliberately removed, don't re-add
 Houston began as a port of an Electron menubar app. Deleted 2026-08-11 (~3,200
