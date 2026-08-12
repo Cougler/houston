@@ -50,14 +50,24 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 - `SidebarTable.swift` — `NSTableView` wrapped in `NSViewRepresentable` with
   SwiftUI rows in `NSHostingView`.
 - `TerminalSessionManager` / `TerminalPaneView` — panes and the libghostty
-  surfaces. A project owns a *list* of panes arranged in an `NSSplitView`
-  tree (`roots[path]`): ⌘D / ⇧⌘D wrap the focused pane's view in a new
-  split, ⇧⌘W unwraps. The tree is frames + autoresizing (no constraints),
-  so re-parenting on selection change stays a no-op for the PTYs. Split
-  commands resolve their target via first responder; right-click focuses
-  the clicked pane first (`HoustonTerminalView`), which is what makes the
-  terminal context menu act on the pane under the cursor. Ghostty's view
-  never consults `NSView.menu` — the context menu needs that subclass.
+  surfaces. A project owns a list of `TerminalTab`s (`tabs[path]`): the
+  first is its main terminal, extras appear as nested "name · N" sidebar
+  rows (`SidebarSelection.shell`), each tab owning its own view tree.
+  Within a tab, ⌘D / ⇧⌘D wrap the focused pane's view in an `NSSplitView`,
+  ⇧⌘W unwraps (a tab's last pane closing closes the tab). Trees are frames
+  + autoresizing (no constraints), so re-parenting on selection change
+  stays a no-op for the PTYs. Split commands resolve their target via
+  first responder, then the displayed tab (`activeTabID`); right-click
+  focuses the clicked pane first (`HoustonTerminalView`), which is what
+  makes the terminal context menu act on the pane under the cursor.
+  Ghostty's view never consults `NSView.menu` — the context menu needs
+  that subclass.
+- `StatusLineFeed` / `StatusBarView` — the native status bar under the
+  terminal (model menu → `/model`, context bar, rate-limit meters), fed by
+  the statusline hook (see Gotchas). `MCPStatusStore` adds MCP health via
+  `claude mcp list` plus one-click `login`/`logout`, all shelled off-main.
+- `EmptyStateView` — the no-selection artwork: a slow solar system, star
+  field, and occasional comet, all plain SwiftUI animation.
 - `ProcessDetect` / `AgentDetect` / `DevServerDetect` — everything Houston knows
   about the machine. All three sit on `ProcScan`, the one implementation of the
   `ps` snapshot, pid→cwd lookup, and parent-chain walk.
@@ -92,6 +102,13 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   row's id is also a `String`; with a `String?` selection, clicking a server set
   the selection to `"<pid>:<port>"` and Houston opened a shell in a directory of
   that name. `pane(for:)` also refuses non-directories as a backstop.
+- **An empty `projectsDirs` must read back as empty.** Treating it as
+  "unset → default `~/Apps`" meant removing the last sidebar folder silently
+  resurrected it on the next settings read.
+- **Anything a sidebar row's content reads must be in its `contentKey`.** The
+  Active header's "+" menu reads the selection; with a title-only key the
+  header never re-hosted and the menu kept the selection captured at launch
+  (nil), so its per-project item never appeared.
 - **One layer draws each highlight.** Selection *and* hover are both drawn by
   `RowChrome`; `table.selectionHighlightStyle = .none`. Every highlight bug in
   this sidebar (three separate times) was two layers drawing the same thing with
@@ -150,6 +167,30 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   in the base `TerminalConfiguration` so they hold across themes, and
   `controller.setTheme` restyles running shells. The ghostty surface tracks
   the appearance itself — no manual color-scheme plumbing.
+- **`sendText` is a paste, not typing.** `ghostty_surface_text` delivers text
+  as a bracketed paste, so zsh leaves a pasted trailing `\n` sitting
+  highlighted in the line editor instead of executing it — `claude\n` just sat
+  at the prompt. `TerminalPane.send` peels a trailing newline off and delivers
+  it as the `text:\r` binding action, which writes the CR raw to the pty like
+  a real Return keypress.
+- **The Claude statusline command must be single-quoted.** Claude Code hands
+  `statusLine.command` to `sh -c`, and Houston's feed script lives under
+  `Application Support` — unquoted, the shell executed
+  `/Users/…/Library/Application`, the status line silently blanked, and the
+  feed never ran. `StatusLineFeed.statusLineCommand` wraps the path in quotes;
+  the state check accepts both forms.
+- **The status bar's data comes from Claude's own statusline hook, not
+  transcripts.** `StatusLineFeed` (with user consent — it rewrites
+  `~/.claude/settings.json`, backing the old value up for restore) installs a
+  script that dumps the statusline JSON payload to
+  `Application Support/Houston/statusline/<HOUSTON_PANE>.json` and prints
+  nothing, which blanks the in-terminal status row *and* suppresses the hint
+  badges. The payload carries the model's real context-window size (no
+  `contextWindow(for:)` guessing), session cost, and account rate limits.
+  Claude re-runs the hook on events (assistant message, /compact, permission
+  mode change), **not** on a timer, and a *running* session keeps its cached
+  command until its next real interaction — don't expect an installed feed to
+  take over an idle session.
 - **Sessions die with Houston.** Accepted tradeoff — same as sessions dying with
   Ghostty today. To make them survive, launch `tmux new-session -A -s
   houston-<project>` instead of the bare shell; that's the whole change.
@@ -176,10 +217,10 @@ lines):
 - Verify keyboard nav (arrows, type-ahead) in the sidebar — the reason for the
   `NSTableView` wrapper, not yet confirmed by hand.
 - Terminal focus after switching panes is unverified.
-- The replicated design (2026-08-11) has no context-% UI and no bottom status
-  strip; `ContextBar` + `formatTokens` (Components.swift) and `Theme.Context`
-  are kept but unreferenced, awaiting the design for that surface. The session
-  data pipeline (`ProcessDetect` → `ActiveSessionStore`) still runs and is
-  still used for selection pruning.
+- The bottom status strip exists now: `StatusBarView` under the terminal,
+  fed by `StatusLineFeed`/`StatusLineStore` (see Gotchas), reusing
+  `ContextBar` + `formatTokens` + `Theme.Context`. The transcript-based
+  pipeline (`ProcessDetect` → `ActiveSessionStore`) still runs and is still
+  used for selection pruning; the status bar does not use it.
 - The header's Skills button opens `~/.claude/skills` in Finder as a
   placeholder — the design doesn't define its behaviour.

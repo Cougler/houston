@@ -2,6 +2,63 @@
 
 ---
 
+## 2026-08-12 — Native Claude status bar, terminal tabs, MCP controls, solar-system empty state
+
+Houston now has a native status bar for Claude sessions — model picker (drives `/model`), context bar with the model's true window size, account rate-limit meters, and an MCP menu with health dots and one-click OAuth — all fed by a statusline script that also blanks Claude's in-terminal bar (with consent and a restorable backup). Projects grew nested terminal tabs in the sidebar, Add Folder now distinguishes projects from folders-of-projects, and the empty state is an animated solar system. Next: live with the status bar and MCP auth day-to-day and see what breaks.
+
+**Done this session:**
+- Status bar pipeline: `StatusLineFeed` swaps the user's statusLine for a script that dumps the JSON payload per pane (`HOUSTON_PANE`-keyed) and prints nothing; consent alert, backup + gear-menu restore, `StatusLineStore` poll, `StatusBarView`
+- Status bar UI: model dropdown (types `/model` into the exact pane), context bar, per-limit meters (Session / All models / per-model), lines ±, cost
+- MCP: `MCPStatusStore` shells `claude mcp list` (off-main, cached, 45s timeout); menu shows per-server health, ⚠ rows run `claude mcp login` (browser OAuth), ✓ rows tuck Log Out behind a submenu, ✗ rows open `/mcp`
+- Fixed the play button never launching agents: `sendText` is a bracketed paste, so a pasted trailing `\n` sat highlighted in zsh — trailing newlines now go through the `text:\r` binding action
+- Fixed the statusline command dying silently: `Application Support` needs single-quoting through `sh -c`
+- Nested terminal tabs: `TerminalTab` model, `.shell` selection case, "name · N" rows, per-tab claude badges attributed via the feed, header ✕ / ⇧⌘W / context-menu close semantics
+- Sidebar: Terminals→Active and Folders→Projects renames, smart Add Folder (project → pinned row, folder → group), `shippingbox` glyphs on project rows, folder chevron at far right, tightened padding, + menu (shell here / home), empty-section affordances (New Terminal, Open Folder…)
+- Empty state: solar system (8 planets, real order/colors, slow individual periods, ringed Saturn), 36-star twinkling field, comet fly-through every 12–24s; title bar hidden when nothing is selected
+- Fixed removing the last sidebar folder resurrecting `~/Apps` (empty projectsDirs read as unset) and the Active header's stale + menu (selection missing from contentKey)
+
+**Up next:**
+- Use the status bar in anger: model switching, MCP login/logout, meters against real limits
+- Consider worktree-per-tab for parallel agents on one repo (the real value behind "remote repo" features)
+- Sidebar keyboard nav (arrows, type-ahead) — still never hand-verified
+
+**Handoff:**
+- The user's global Claude statusline is now Houston's feed script — other terminals show a blank status row by design; the original is backed up at `~/Library/Application Support/Houston/statusline-backup.json` and restorable from the sidebar gear menu.
+- Already-running claude sessions keep their cached statusline command until their next real interaction — a freshly enabled feed won't take over an idle session.
+- Hand-unverified: MCP Authenticate/Log Out buttons (parser was verified against real `claude mcp list` output; the actions themselves weren't clicked), model-menu sends, and nested-tab edge cases. The per-model (Fable) meter only appears if the payload carries such a key — unconfirmed on this account.
+- The Houston debug binary was left running deliberately (user was testing); no web dev server belongs to this project.
+
+---
+
+## 2026-08-11 — Figma redesign, git panel, splits, harness icons; repo on GitHub
+
+Houston now matches the Figma design in light and dark, with split panes, a skills panel, a three-stage git panel (uncommitted → committed → synced, with commit detail and file diffs), collapsible multi-folder projects, and a Terminals sidebar whose rows show a git-status dot on the left and the running harness's real logo on the right. The repo is live at Cougler/houston with the Electron history preserved under the Swift rewrite — but everything after that initial push is still uncommitted. Next: push the day's UI work and eyeball the new light-mode logo variants and git dots.
+
+**Done this session:**
+- Cleanup/efficiency pass: shared `ProcScan` for ps/lsof, transcript tail-reads, off-main agent scans, dead code removed
+- Sidebar flicker fixed twice over: `inferringMoves()` row diffing + synchronous pane creation in `select(_:)` + terminal boot fade-in
+- Replicated the Figma design (node 326:73), then made every token adaptive light/dark with a System/Light/Dark setting and ghostty terminal theme picker (footer gear)
+- Split panes as NSSplitView trees (⌘D/⇧⌘D/⇧⌘W, terminal right-click menu)
+- Skills panel (agent-gated, types `/skill ` into the pane) and empty state with helmet watermark + recent-project quick-open
+- Git panel: three-stage pipeline view, commit detail page, uncommitted file diff page, open-in-editor (VS Code), per-row status dots in the sidebar
+- Harness dropdown detects installed CLIs and offers consented install commands; Pi added
+- Sidebar restructure: Terminals section (merged Active/Shells), Folders with open/closed folder icons, server-rack icons, real harness logos with light/dark variants
+- `.mc.json` gitignored and untracked across 18 repos; houston `git init` grafted onto the old Electron repo (`Cougler/houston`) and pushed
+
+**Up next:**
+- `/push` the day's work — everything after commit `e13a4a4` is uncommitted
+- Visually check the new light-mode logo variants and per-row git dots
+- Verify sidebar keyboard nav (arrows, type-ahead) by hand — still never confirmed
+
+**Handoff:**
+- The Houston debug binary was left running deliberately (user was actively testing); no web dev server belongs to this project.
+- Agent logo assets live in `Resources/icons` as `<Name>.png` + optional `<Name> - light/dark.png`; the convention is enforced by `AgentIconCache`. The old 525px `OpenCode.png` is stale but harmless.
+- Grok (`@vibe-kit/grok-cli`) and Pi (`@mariozechner/pi`) install commands are community package names the user hasn't verified — they run only after a confirm dialog that shows the command.
+- `/Users/aaroncougle` (whole home dir) is in `projectsDirs` — possibly an accident from accessibility-driven test clicks; remove via right-click → Remove from Sidebar if unwanted.
+- Everything visual was verified by screenshot; interaction testing was done via AXPress, which cannot hover — hover styling and keyboard nav remain hand-unverified.
+
+---
+
 ## 2026-08-11 — Embedded terminals via libghostty; Houston becomes a desktop app
 
 Houston is now a native desktop app that hosts its own terminals: a sidebar lists projects, open shells, running agents and dev servers, and selecting a project opens a real shell in that directory via libghostty. The Electron-era popover UI, onboarding flow, and AppleScript spawn path are gone, taking the codebase from ~6,200 to ~2,700 lines. Next is hands-on verification — sidebar keyboard navigation and whether the flicker fix holds in real use.

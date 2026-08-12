@@ -73,6 +73,15 @@ enum GitDetect {
         )
     }
 
+    /// Cheap per-row status for the sidebar dot.
+    static func rowStatus(projectPath: String) -> GitRowStatus {
+        guard git(["rev-parse", "--is-inside-work-tree"], in: projectPath) == "true" else {
+            return .none
+        }
+        let porcelain = git(["status", "--porcelain"], in: projectPath) ?? ""
+        return porcelain.isEmpty ? .clean : .dirty
+    }
+
     /// Everything about one commit, for the panel's detail page.
     static func commitDetail(sha: String, in projectPath: String) -> GitCommitDetail? {
         guard let meta = git(

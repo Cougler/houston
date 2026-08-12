@@ -56,8 +56,23 @@ final class TerminalPane: Identifiable, ObservableObject {
     /// Write UTF-8 straight to the pty. This is the embedded replacement for
     /// System Events keystrokes — no Accessibility permission, no focus race,
     /// and it cannot land in the wrong window.
+    ///
+    /// `sendText` delivers text as a *paste* (`ghostty_surface_text`), and
+    /// zsh's bracketed paste turns a pasted trailing "\n" into buffer content
+    /// instead of executing it — the command just sat highlighted at the
+    /// prompt. A trailing newline is therefore delivered separately through
+    /// the `text:\r` binding action, which writes the CR raw to the pty, the
+    /// same byte a Return keypress produces.
     func send(_ text: String) {
-        view.sendText(text)
+        guard text.hasSuffix("\n") else {
+            view.sendText(text)
+            return
+        }
+        let body = String(text.dropLast())
+        if !body.isEmpty { view.sendText(body) }
+        if !view.performBindingAction("text:\\r") {
+            view.sendText("\r")
+        }
     }
 
     /// Ends the session and frees the surface.
@@ -75,6 +90,7 @@ final class TerminalPane: Identifiable, ObservableObject {
     func teardown() {
         view.controller = nil
         view.removeFromSuperview()
+        StatusLineFeed.removeSnapshot(paneID: id.uuidString)
     }
 }
 
@@ -87,6 +103,8 @@ final class TerminalPane: Identifiable, ObservableObject {
 /// re-parent existing surfaces instead of tearing down PTYs.
 struct TerminalHostView: NSViewRepresentable {
     let path: String?
+    /// Which of the project's tabs to show; nil is its first.
+    var tabID: UUID?
 
     func makeNSView(context: Context) -> NSView {
         // Shared, manager-owned — see TerminalSessionManager.paneContainer for
@@ -95,6 +113,6 @@ struct TerminalHostView: NSViewRepresentable {
     }
 
     func updateNSView(_ container: NSView, context: Context) {
-        TerminalSessionManager.shared.mountRoot(for: path, in: container)
+        TerminalSessionManager.shared.mountRoot(for: path, tab: tabID, in: container)
     }
 }

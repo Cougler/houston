@@ -19,14 +19,34 @@ import SwiftUI
 /// new split alongside a fresh pane, closing a split unwraps it. The tree is
 /// plain AppKit (frames + autoresizing), so re-parenting on selection change
 /// stays a no-op for the PTYs.
+/// One sidebar terminal for a project: an independent view tree holding a
+/// pane or an `NSSplitView` arrangement of panes. A project's first tab is
+/// its main terminal; additional tabs appear as nested "Shell N" rows under
+/// it in the sidebar, each hosting its own shell in the same directory.
+@MainActor
+final class TerminalTab: Identifiable {
+    nonisolated let id = UUID()
+    let projectPath: String
+    /// The mountable view: the tab's pane, or its split tree.
+    let root: NSView
+    /// Panes living inside this tab (grows via ⌘D splits).
+    fileprivate(set) var panes: [TerminalPane]
+
+    fileprivate init(projectPath: String, root: NSView, panes: [TerminalPane]) {
+        self.projectPath = projectPath
+        self.root = root
+        self.panes = panes
+    }
+}
+
 @MainActor
 final class TerminalSessionManager: NSObject, ObservableObject {
 
     static let shared = TerminalSessionManager()
 
-    /// Every pane per project path, in creation order. A project with any
-    /// panes has a shell; the panes' on-screen arrangement lives in `roots`.
-    @Published private(set) var panes: [String: [TerminalPane]] = [:]
+    /// Every project's terminal tabs, in creation order. A project with any
+    /// tabs has a shell; each tab owns its own on-screen view tree.
+    @Published private(set) var tabs: [String: [TerminalTab]] = [:]
 
     /// Which coding agent is running in each project's panes, by path.
     /// Refreshed by polling the process tree, so it reflects
@@ -39,12 +59,13 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     /// published (nothing renders from it).
     var activeProjectPath: String?
 
+    /// The displayed tab within that project (nil means its first tab).
+    /// Also set by the window on selection change.
+    var activeTabID: UUID?
+
     /// Launchable agents whose CLI is actually installed — what the header's
     /// harness dropdown offers. Empty until detection completes.
     @Published private(set) var installedAgents: [CodingAgent] = []
-
-    /// Per-project root view holding the pane view or the split tree.
-    private var roots: [String: NSView] = [:]
 
     private var agentTimer: Timer?
     private var agentScanInFlight = false
@@ -123,13 +144,29 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         _controller?.setTheme(Self.resolvedTheme(named: name))
     }
 
-    // MARK: - Panes
+    // MARK: - Tabs
 
     /// Opens a project's shell if it has none. Idempotent: clicking back to a
-    /// project re-attaches to its existing panes rather than opening more.
+    /// project re-attaches to its existing tabs rather than opening more.
     @discardableResult
     func pane(for projectPath: String) -> TerminalPane? {
-        if let existing = panes[projectPath]?.first { return existing }
+        if let existing = tabs[projectPath]?.first?.panes.first { return existing }
+        guard let tab = makeTab(projectPath) else { return nil }
+        tabs[projectPath] = [tab]
+        return tab.panes.first
+    }
+
+    /// A further shell in the same directory, as its own sidebar row nested
+    /// under the project's terminal. Only meaningful once the project has one.
+    @discardableResult
+    func newTab(in projectPath: String) -> TerminalTab? {
+        guard tabs[projectPath]?.isEmpty == false,
+              let tab = makeTab(projectPath) else { return nil }
+        tabs[projectPath]?.append(tab)
+        return tab
+    }
+
+    private func makeTab(_ projectPath: String) -> TerminalTab? {
         // Defensive: only ever open a shell in a real directory. A sidebar row
         // whose selection tag wasn't a path once got this far and spawned a
         // shell with a bogus cwd.
@@ -142,21 +179,19 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         pane.view.contextMenu = terminalContextMenu(path: projectPath)
         let root = NSView()
         fill(root, with: pane.view)
-        roots[projectPath] = root
-        panes[projectPath] = [pane]
         revealAfterBoot(pane)
-        return pane
+        return TerminalTab(projectPath: projectPath, root: root, panes: [pane])
     }
 
     func hasPane(for projectPath: String) -> Bool {
-        !(panes[projectPath]?.isEmpty ?? true)
+        !(tabs[projectPath]?.isEmpty ?? true)
     }
 
     /// Runs an agent's CLI in the project's focused pane, opening a shell if
     /// needed. Explicit by design — see `controller`.
     func start(_ agent: CodingAgent, in projectPath: String) {
         guard let binary = agent.binary else { return }
-        if panes[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
+        if tabs[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
         actionPane(in: projectPath)?.send(binary + "\n")
     }
 
@@ -167,15 +202,17 @@ final class TerminalSessionManager: NSObject, ObservableObject {
 
     // MARK: - Splits
 
-    /// Splits the focused pane: a fresh shell opens beside (`vertical`) or
-    /// below it, and takes keyboard focus — Ghostty's behaviour.
+    /// Splits the focused pane within its tab: a fresh shell opens beside
+    /// (`vertical`) or below it, and takes keyboard focus — Ghostty's
+    /// behaviour.
     func split(path: String? = nil, vertical: Bool) {
         guard let path = path ?? activeProjectPath,
+              let tab = actionTab(in: path),
               let target = actionPane(in: path) else { return }
 
         let newPane = TerminalPane(projectPath: path, controller: controller)
         newPane.view.contextMenu = terminalContextMenu(path: path)
-        panes[path]?.append(newPane)
+        tab.panes.append(newPane)
 
         let targetView = target.view
         let splitView = NSSplitView()
@@ -200,13 +237,14 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         }
     }
 
-    /// Closes the focused split, unwrapping its `NSSplitView` when only one
-    /// cell remains. Closing the last pane closes the project's shell.
+    /// Closes the focused split within its tab, unwrapping its `NSSplitView`
+    /// when only one cell remains. Closing a tab's last pane closes the tab;
+    /// closing the project's last tab closes its shell entirely.
     func closeFocusedSplit(path: String? = nil) {
         guard let path = path ?? activeProjectPath,
-              let list = panes[path], !list.isEmpty else { return }
-        guard list.count > 1 else {
-            closePane(for: path)
+              let tab = actionTab(in: path) else { return }
+        guard tab.panes.count > 1 else {
+            closeTab(path: path, tabID: tab.id)
             return
         }
         guard let target = actionPane(in: path) else { return }
@@ -221,46 +259,68 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             }
         }
         target.teardown()
-        panes[path]?.removeAll { $0 === target }
-        if let next = panes[path]?.last {
+        tab.panes.removeAll { $0 === target }
+        if let next = tab.panes.last {
             DispatchQueue.main.async {
                 next.view.window?.makeFirstResponder(next.view)
             }
         }
     }
 
-    /// Ends every pane of a project and releases its surfaces.
+    /// Ends one tab and releases its surfaces. The last tab going ends the
+    /// project's shell.
+    func closeTab(path: String, tabID: UUID) {
+        guard var list = tabs[path],
+              let index = list.firstIndex(where: { $0.id == tabID }) else { return }
+        let tab = list.remove(at: index)
+        tab.panes.forEach { $0.teardown() }
+        tab.root.removeFromSuperview()
+        if list.isEmpty {
+            tabs.removeValue(forKey: path)
+        } else {
+            tabs[path] = list
+        }
+    }
+
+    /// Ends every tab of a project and releases its surfaces.
     func closePane(for projectPath: String) {
-        guard let list = panes[projectPath] else { return }
-        list.forEach { $0.teardown() }
-        roots[projectPath]?.removeFromSuperview()
-        roots.removeValue(forKey: projectPath)
-        panes.removeValue(forKey: projectPath)
+        guard let list = tabs[projectPath] else { return }
+        for tab in list {
+            tab.panes.forEach { $0.teardown() }
+            tab.root.removeFromSuperview()
+        }
+        tabs.removeValue(forKey: projectPath)
     }
 
     // MARK: - Mounting
 
-    /// Shows a project's pane tree inside `container` (the shared
-    /// `paneContainer`). Re-parenting an existing root is a no-op for the
-    /// running PTYs.
-    func mountRoot(for path: String?, in container: NSView) {
-        guard let path, let root = roots[path] else {
+    /// Shows one tab's pane tree inside `container` (the shared
+    /// `paneContainer`); nil `tabID` means the project's first tab.
+    /// Re-parenting an existing root is a no-op for the running PTYs.
+    func mountRoot(for path: String?, tab tabID: UUID?, in container: NSView) {
+        guard let path, let tab = resolveTab(path: path, id: tabID) else {
             container.subviews.forEach { $0.removeFromSuperview() }
             return
         }
-        if root.superview === container { return }
+        if tab.root.superview === container { return }
         container.subviews.forEach { $0.removeFromSuperview() }
-        fill(container, with: root)
+        fill(container, with: tab.root)
 
-        // The terminal claims focus on a project's first display only —
+        // The terminal claims focus on a tab's first display only —
         // re-grabbing on every selection yanked focus out of the sidebar the
         // instant a row was clicked, so arrow-key navigation never worked.
-        if let first = panes[path]?.first, !first.hasAutoFocused {
+        if let first = tab.panes.first, !first.hasAutoFocused {
             first.hasAutoFocused = true
             DispatchQueue.main.async {
                 first.view.window?.makeFirstResponder(first.view)
             }
         }
+    }
+
+    private func resolveTab(path: String, id: UUID?) -> TerminalTab? {
+        guard let list = tabs[path] else { return nil }
+        guard let id else { return list.first }
+        return list.first { $0.id == id }
     }
 
     // MARK: - Internals
@@ -300,17 +360,31 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         return menu
     }
 
-    /// The pane a split/close/send should act on: the one holding keyboard
-    /// focus, else the most recently created.
+    /// The tab a split/close/send should act on: the one holding keyboard
+    /// focus, else the displayed one, else the project's first.
+    private func actionTab(in path: String) -> TerminalTab? {
+        let list = tabs[path] ?? []
+        if let responder = paneContainer.window?.firstResponder as? NSView,
+           let focused = list.first(where: { responder.isDescendant(of: $0.root) }) {
+            return focused
+        }
+        if let activeTabID, let displayed = list.first(where: { $0.id == activeTabID }) {
+            return displayed
+        }
+        return list.first
+    }
+
+    /// The pane within that tab: the one holding keyboard focus, else the
+    /// most recently created.
     private func actionPane(in path: String) -> TerminalPane? {
-        let list = panes[path] ?? []
-        if let responder = roots[path]?.window?.firstResponder as? NSView,
-           let focused = list.first(where: {
+        guard let tab = actionTab(in: path) else { return nil }
+        if let responder = paneContainer.window?.firstResponder as? NSView,
+           let focused = tab.panes.first(where: {
                responder === $0.view || responder.isDescendant(of: $0.view)
            }) {
             return focused
         }
-        return list.last
+        return tab.panes.last
     }
 
     /// Frame-based fill — the whole tree uses autoresizing, so views can move
@@ -354,7 +428,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     /// binary appears so the dropdown unmarks it.
     func install(_ agent: CodingAgent, in projectPath: String) {
         guard let command = agent.installCommand else { return }
-        if panes[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
+        if tabs[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
         actionPane(in: projectPath)?.send(command + "\n")
         Task.detached(priority: .utility) {
             for _ in 0..<24 {
@@ -380,7 +454,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     /// The scan shells out to `ps` and `lsof`, so it runs detached — on the
     /// main thread it stalled the UI for the duration of both, every tick.
     private func refreshAgents() {
-        let paths = Set(panes.keys)
+        let paths = Set(tabs.keys)
         guard !paths.isEmpty else {
             if !agents.isEmpty { agents = [:] }
             return

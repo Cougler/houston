@@ -7,6 +7,8 @@ final class ActiveSessionStore: ObservableObject {
     @Published private(set) var sessions: [ActiveSession] = []
     @Published private(set) var projectGroups: [ProjectGroup] = []
     @Published private(set) var projectsDirs: [String] = HoustonSettings.defaults.projectsDirs
+    /// Single projects added directly to the sidebar (never expanded).
+    @Published private(set) var pinnedProjects: [String] = []
 
     private var sessionTimer: Timer?
     private var settingsTimer: Timer?
@@ -59,6 +61,9 @@ final class ActiveSessionStore: ObservableObject {
         if s.projectsDirs != projectsDirs {
             projectsDirs = s.projectsDirs
             refresh()
+        }
+        if s.pinnedProjects != pinnedProjects {
+            pinnedProjects = s.pinnedProjects
         }
     }
 }

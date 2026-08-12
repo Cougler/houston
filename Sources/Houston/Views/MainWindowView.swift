@@ -9,13 +9,24 @@ import SwiftUI
 /// and Houston tried to open a shell in a directory of that name. Modelling the
 /// two kinds of row as distinct cases makes that unrepresentable.
 enum SidebarSelection: Hashable {
-    /// A project directory — hosts a terminal.
+    /// A project directory — hosts a terminal (the project's first tab).
     case project(String)
+    /// An extra terminal tab of a project, shown nested under its row.
+    case shell(path: String, tab: UUID)
     /// A running dev server, by `DevServer.id`.
     case server(String)
 
     var projectPath: String? {
-        if case let .project(path) = self { return path }
+        switch self {
+        case let .project(path): path
+        case let .shell(path, _): path
+        case .server: nil
+        }
+    }
+
+    /// The specific tab to display; nil means the project's first.
+    var tabID: UUID? {
+        if case let .shell(_, tab) = self { return tab }
         return nil
     }
 }
@@ -33,6 +44,8 @@ struct MainWindowView: View {
     @StateObject private var store = ActiveSessionStore()
     @StateObject private var servers = DevServerStore()
     @StateObject private var git = GitStatusStore()
+    @StateObject private var statusFeed = StatusLineStore()
+    @StateObject private var mcp = MCPStatusStore()
     @ObservedObject private var terminals = TerminalSessionManager.shared
     @State private var selection: SidebarSelection?
     /// Agent the header's split button launches; the chevron menu changes it.
@@ -47,12 +60,18 @@ struct MainWindowView: View {
     @State private var pendingInstall: CodingAgent?
     /// Mirror of the settings file, for the footer gear's checkmarks.
     @State private var settings = HoustonSettings.read()
+    /// Whether Houston's feed script is Claude's configured statusline.
+    @State private var statusFeedInstalled = StatusLineFeed.state == .houston
+    /// Consent dialog for taking over the Claude statusline.
+    @State private var showStatusPrompt = false
+    /// The automatic offer fires at most once per launch.
+    @State private var statusPromptOffered = false
     /// Project folders currently collapsed, persisted in settings.
     @State private var collapsedFolders = Set(HoustonSettings.read().collapsedFolders)
 
     /// Clearance for the traffic lights, which float over the sidebar now that
     /// the title bar is transparent and full-size.
-    private let trafficLightInset: CGFloat = 36
+    private let trafficLightInset: CGFloat = 48
 
     /// Sidebar width, dragged by the divider below.
     @State private var sidebarWidth: CGFloat = Theme.sidebarWidth
@@ -81,6 +100,8 @@ struct MainWindowView: View {
         .onAppear {
             store.start()
             servers.start()
+            git.start()
+            statusFeed.start()
             terminals.startAgentPolling()
             terminals.detectInstalledAgents()
             if let path = ProcessInfo.processInfo.environment["HOUSTON_TEST_PANE"] {
@@ -88,17 +109,52 @@ struct MainWindowView: View {
             }
         }
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
+        .onChange(of: terminalPaths) { _, paths in git.watchRows(Set(paths)) }
         .onChange(of: selection) { _, newValue in
             showSkills = false
             showGit = false
             terminals.activeProjectPath = newValue?.projectPath
+            terminals.activeTabID = newValue?.tabID
             git.watch(newValue?.projectPath)
+        }
+        // A nested shell closing (⇧⌘W, context menu) must not strand the
+        // selection on a dead tab — fall back to the project's main terminal.
+        .onChange(of: allTabIDs) { _, ids in
+            guard case let .shell(path, tab) = selection, !ids.contains(tab) else { return }
+            selection = terminals.hasPane(for: path) ? .project(path) : nil
         }
         // Keep the launch selection pointing at something that exists.
         .onChange(of: terminals.installedAgents) { _, installed in
             if !installed.contains(launchAgent), let first = installed.first {
                 launchAgent = first
             }
+        }
+        // A claude session appearing is the moment the status bar becomes
+        // relevant — offer the takeover once, unless previously declined.
+        .onChange(of: terminals.agents) { _, agents in
+            guard agents.values.contains(.claude),
+                  !statusFeedInstalled,
+                  !settings.statusLinePromptDeclined,
+                  !statusPromptOffered else { return }
+            statusPromptOffered = true
+            showStatusPrompt = true
+        }
+        .alert("Show Claude's status in Houston?", isPresented: $showStatusPrompt) {
+            Button("Enable") {
+                statusFeedInstalled = StatusLineFeed.install()
+            }
+            Button("Not Now", role: .cancel) {
+                updateSettings { $0.statusLinePromptDeclined = true }
+            }
+        } message: {
+            Text(
+                "Houston can show each Claude session's model, context and cost in a "
+                + "native bar under the terminal — and blank out Claude's own status "
+                + "line inside it.\n\nThis replaces the statusLine command in "
+                + "~/.claude/settings.json. Your current one is backed up and can be "
+                + "restored anytime from the sidebar's gear menu. Running sessions "
+                + "switch over at their next response."
+            )
         }
     }
 
@@ -150,32 +206,57 @@ struct MainWindowView: View {
         .background(Theme.background)
     }
 
+    /// Opens the directory picker and registers the choice. A folder that is
+    /// itself a project (has `.git`, `package.json`, an `.xcodeproj`, …) is
+    /// pinned as a single row; anything else becomes a parent group whose
+    /// subdirectories are listed. One button, both intents — and a project
+    /// can never be exploded into its `src`/`node_modules` innards.
+    private func addFolder() {
+        guard let picked = Actions.pickDirectory(
+            title: "Add a folder",
+            defaultPath: store.projectsDirs.first
+        ) else { return }
+        updateSettings {
+            if ProjectList.isProject(picked) {
+                if !$0.pinnedProjects.contains(picked) {
+                    $0.pinnedProjects.append(picked)
+                }
+            } else if !$0.projectsDirs.contains(picked) {
+                $0.projectsDirs.append(picked)
+            }
+        }
+        store.settingsChanged()
+    }
+
+    /// Sidebar action rows ("New Terminal", "Open Folder…").
+    private func runAction(_ key: String) {
+        switch key {
+        case "new-terminal": select(.project(NSHomeDirectory()))
+        case "open-folder": addFolder()
+        default: break
+        }
+    }
+
     private var sidebarFooter: some View {
         HStack(spacing: 0) {
-            Button {
-                if let picked = Actions.pickDirectory(
-                    title: "Add a projects folder",
-                    defaultPath: store.projectsDirs.first
-                ) {
-                    updateSettings {
-                        if !$0.projectsDirs.contains(picked) {
-                            $0.projectsDirs.append(picked)
-                        }
+            // Until a folder exists this affordance lives up in the Folders
+            // section instead.
+            if !store.projectsDirs.isEmpty || !store.pinnedProjects.isEmpty {
+                Button {
+                    addFolder()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.text)
+                        Text("Add Folder...")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Theme.text)
                     }
-                    store.settingsChanged()
+                    .contentShape(Rectangle())
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.text)
-                    Text("Add Folder...")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             Spacer(minLength: 8)
 
@@ -211,6 +292,19 @@ struct MainWindowView: View {
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
+            }
+
+            Divider()
+
+            if statusFeedInstalled {
+                Button("Disable Claude Status Bar") {
+                    StatusLineFeed.restore()
+                    statusFeedInstalled = false
+                }
+            } else {
+                Button("Enable Claude Status Bar…") {
+                    showStatusPrompt = true
+                }
             }
         } label: {
             Image(systemName: "gearshape")
@@ -259,11 +353,42 @@ struct MainWindowView: View {
 
     private var detailColumn: some View {
         VStack(spacing: 0) {
-            topPanel
-            Rectangle().fill(Theme.borderHeader).frame(height: 1)
+            // The empty state stands alone — no title bar over it.
+            if selection != nil {
+                topPanel
+                Rectangle().fill(Theme.borderHeader).frame(height: 1)
+            }
             detailContent
+            if let snapshot = activeSnapshot, let path = selection?.projectPath {
+                StatusBarView(
+                    snapshot: snapshot,
+                    mcp: mcp.statuses[path],
+                    mcpAuthInFlight: mcp.authInFlight,
+                    onSelectModel: { modelArg in
+                        switchModel(to: modelArg, snapshot: snapshot)
+                    },
+                    onManageMCP: { sendToSnapshotPane("/mcp\n", snapshot: snapshot) },
+                    onRefreshMCP: { mcp.refresh(path: path) },
+                    onAuthenticateMCP: { mcp.login(server: $0, path: path) },
+                    onLogoutMCP: { mcp.logout(server: $0, path: path) }
+                )
+                .onAppear { mcp.refreshIfStale(path: path) }
+            }
         }
         .background(Theme.background)
+    }
+
+    /// The feed snapshot the status bar shows: the freshest one among the
+    /// displayed tab's panes, gated on an agent actually running so a
+    /// leftover dump can't outlive its session. Nil hides the bar.
+    private var activeSnapshot: StatusLineSnapshot? {
+        guard let path = selection?.projectPath,
+              terminals.agents[path] != nil,
+              let list = terminals.tabs[path] else { return nil }
+        let tab = selection?.tabID.flatMap { id in list.first { $0.id == id } } ?? list.first
+        return (tab?.panes ?? [])
+            .compactMap { statusFeed.snapshots[$0.id.uuidString] }
+            .max { $0.updatedAt < $1.updatedAt }
     }
 
     /// Title + path on the left, actions on the right. Replaces
@@ -443,7 +568,7 @@ struct MainWindowView: View {
 
     private var headerTitle: String {
         switch selection {
-        case let .project(path): name(of: path)
+        case let .project(path), let .shell(path, _): name(of: path)
         case let .server(id):
             servers.devServers.first { $0.id == id }
                 .map { $0.project ?? $0.command } ?? "Server"
@@ -453,7 +578,7 @@ struct MainWindowView: View {
 
     private var headerSubtitle: String? {
         switch selection {
-        case let .project(path): path
+        case let .project(path), let .shell(path, _): path
         case let .server(id):
             servers.devServers.first { $0.id == id }
                 .map { "localhost:" + String($0.port) }
@@ -464,10 +589,10 @@ struct MainWindowView: View {
     @ViewBuilder
     private var detailContent: some View {
         switch selection {
-        case let .project(path):
+        case let .project(path), let .shell(path, _):
             if terminals.hasPane(for: path) {
                 ZStack(alignment: .topTrailing) {
-                    TerminalHostView(path: path)
+                    TerminalHostView(path: path, tabID: selection?.tabID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // Floats over the terminal; the agent-gate mirrors the
                     // button so the card leaves with the session.
@@ -514,14 +639,7 @@ struct MainWindowView: View {
                 )
             }
         case .none:
-            EmptyStateView(
-                recentProjects: Array(
-                    store.projectGroups.flatMap(\.projects)
-                        .sorted { $0.modifiedMs > $1.modifiedMs }
-                        .prefix(3)
-                ),
-                onOpen: { select(.project($0.path)) }
-            )
+            EmptyStateView()
         }
     }
 
@@ -534,22 +652,25 @@ struct MainWindowView: View {
         store.sessions.filter(\.isHoustonOwned)
     }
 
-    /// Panes with an agent running in them, from `AgentDetect`'s process scan
-    /// rather than session files — instant, and works for agents that write no
-    /// session file at all.
-    private var activePaths: [String] {
-        terminals.agents.keys.sorted(by: byName)
+    /// Every open terminal's project, alphabetical — one Terminals section.
+    /// Whether a row is a bare shell or an agent session is told by its icon,
+    /// so starting an agent swaps the icon in place instead of moving the row.
+    private var terminalPaths: [String] {
+        terminals.tabs.keys.sorted(by: byName)
     }
 
-    private var shellPaths: [String] {
-        let active = Set(terminals.agents.keys)
-        return terminals.panes.keys.filter { !active.contains($0) }.sorted(by: byName)
+    /// Every live tab id, for pruning a selection whose tab closed.
+    private var allTabIDs: Set<UUID> {
+        Set(terminals.tabs.values.flatMap { $0.map(\.id) })
     }
 
-    /// Projects that already have a shell or agent live in Active/Shells, not
-    /// under their folder.
+    /// Projects that already have a shell or agent live in Active, not under
+    /// their folder — and a pinned project keeps its own row rather than
+    /// doubling up inside a group that happens to contain it.
     private func idlePaths(in group: ProjectGroup) -> [String] {
-        let taken = Set(terminals.agents.keys).union(terminals.panes.keys)
+        let taken = Set(terminals.agents.keys)
+            .union(terminals.tabs.keys)
+            .union(store.pinnedProjects)
         return group.projects.map(\.path).filter { !taken.contains($0) }
     }
 
@@ -558,13 +679,24 @@ struct MainWindowView: View {
             .localizedCaseInsensitiveCompare((b as NSString).lastPathComponent) == .orderedAscending
     }
 
-    /// The flattened row list the table renders, in the design's section
-    /// order: Active, Servers, Shells, Projects.
+    /// The flattened row list the table renders: Terminals, Servers, Projects.
     private var entries: [SidebarEntry] {
         var out: [SidebarEntry] = []
-        if !activePaths.isEmpty {
-            out.append(.header("Active"))
-            out += activePaths.map { .row(id: .project($0), title: name(of: $0)) }
+        out.append(.header("Active"))
+        // Empty section: a spelled-out affordance instead of the header "+"
+        // (which hides until a terminal exists).
+        if terminalPaths.isEmpty {
+            out.append(.action(key: "new-terminal", title: "New Terminal"))
+        }
+        for path in terminalPaths {
+            out.append(.row(id: .project(path), title: name(of: path)))
+            // Extra tabs nest under the project's row, numbered with it.
+            for (index, tab) in (terminals.tabs[path] ?? []).enumerated().dropFirst() {
+                out.append(.row(
+                    id: .shell(path: path, tab: tab.id),
+                    title: "\(name(of: path)) · \(index + 1)"
+                ))
+            }
         }
         if !servers.devServers.isEmpty {
             out.append(.header("Servers"))
@@ -572,11 +704,17 @@ struct MainWindowView: View {
                 .row(id: .server($0.id), title: $0.project ?? $0.command)
             }
         }
-        // Always present, even empty — its "+" is how a home shell is opened.
-        out.append(.header("Shells"))
-        out += shellPaths.map { .row(id: .project($0), title: name(of: $0)) }
-        if !store.projectGroups.isEmpty {
+        // No folders configured yet: the section leads with its own "Open
+        // Folder…" affordance; once one exists the action lives in the footer.
+        let taken = Set(terminals.agents.keys).union(terminals.tabs.keys)
+        let idlePinned = store.pinnedProjects.filter { !taken.contains($0) }
+        if store.projectsDirs.isEmpty, store.pinnedProjects.isEmpty {
             out.append(.header("Projects"))
+            out.append(.action(key: "open-folder", title: "Open Folder…"))
+        } else if !store.projectGroups.isEmpty || !idlePinned.isEmpty {
+            out.append(.header("Projects"))
+            // Pinned single projects: their own rows, never expanded.
+            out += idlePinned.map { .row(id: .project($0), title: name(of: $0)) }
             for group in store.projectGroups {
                 out.append(.folder(path: group.path, name: group.name))
                 if !collapsedFolders.contains(group.path) {
@@ -602,15 +740,62 @@ struct MainWindowView: View {
         path == NSHomeDirectory() ? "~" : (path as NSString).lastPathComponent
     }
 
+    /// Types into the exact pane the status snapshot came from — the feed
+    /// keys payloads by pane id, so the command can't land in a sibling
+    /// shell.
+    private func sendToSnapshotPane(_ text: String, snapshot: StatusLineSnapshot) {
+        guard let path = selection?.projectPath,
+              let pane = (terminals.tabs[path] ?? [])
+                  .flatMap(\.panes)
+                  .first(where: { $0.id.uuidString == snapshot.paneID })
+        else { return }
+        pane.send(text)
+    }
+
+    private func switchModel(to arg: String, snapshot: StatusLineSnapshot) {
+        sendToSnapshotPane("/model \(arg)\n", snapshot: snapshot)
+    }
+
+    /// The agent running in a *specific* nested shell, told by the statusline
+    /// feed: a claude session writes a payload keyed by its pane's id, so a
+    /// snapshot for one of the tab's panes means claude is initialized right
+    /// there. Gated on the project-level scan so a leftover payload file
+    /// can't badge a shell after every agent under the path has exited.
+    private func shellAgent(path: String, tab tabID: UUID) -> CodingAgent? {
+        guard terminals.agents[path] != nil,
+              let tab = terminals.tabs[path]?.first(where: { $0.id == tabID }),
+              tab.panes.contains(where: { statusFeed.snapshots[$0.id.uuidString] != nil })
+        else { return nil }
+        return .claude
+    }
+
+    /// The agent badge for a project's main row. The process scan is
+    /// per-path, so once extra tabs exist it can't say *which* shell runs
+    /// claude — attribute it to the main tab only if one of its panes has a
+    /// feed snapshot, same as the nested rows. Non-claude agents write no
+    /// feed, so they stay on the main row rather than vanishing.
+    private func primaryAgent(path: String) -> CodingAgent? {
+        guard let agent = terminals.agents[path] else { return nil }
+        let list = terminals.tabs[path] ?? []
+        guard agent == .claude, list.count > 1, let first = list.first else { return agent }
+        let initialized = first.panes.contains {
+            statusFeed.snapshots[$0.id.uuidString] != nil
+        }
+        return initialized ? .claude : nil
+    }
+
     private func height(for entry: SidebarEntry) -> CGFloat {
         switch entry {
         case .header:
-            return 21
-        case .folder:
+            // Tall enough for the Terminals header's 24pt "+" chip, with the
+            // extra space above acting as the gap between sections.
+            return 32
+        case .folder, .action:
             return 26
         case let .row(id, _):
             if case .server = id { return 42 }
-            if case let .project(path) = id, state(for: path) == .idle { return 28 }
+            if case .shell = id { return 28 }
+            if case let .project(path) = id, !terminals.hasPane(for: path) { return 28 }
             return 32
         }
     }
@@ -626,38 +811,70 @@ struct MainWindowView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.heading)
                 Spacer(minLength: 0)
-                // A shell that belongs to no project — it opens in `~`.
-                if title == "Shells" {
-                    Button {
-                        select(.project(NSHomeDirectory()))
+                // New-terminal menu: a split beside the current terminal, or
+                // a fresh shell that belongs to no project (opens in `~`).
+                // Hidden while no terminal is open — the section shows a
+                // spelled-out "New Terminal" row instead.
+                if title == "Active", !terminalPaths.isEmpty {
+                    Menu {
+                        // A second shell in the selected terminal's directory
+                        // — its own nested row under that terminal.
+                        if let path = selection?.projectPath, terminals.hasPane(for: path) {
+                            Button("New shell in \(name(of: path))") {
+                                if let tab = terminals.newTab(in: path) {
+                                    select(.shell(path: path, tab: tab.id))
+                                }
+                            }
+                        }
+                        Button("New shell in home folder") {
+                            select(.project(NSHomeDirectory()))
+                        }
                     } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Theme.heading)
-                            .frame(width: 18, height: 18)
-                            .contentShape(Rectangle())
+                        HeaderPlusLabel()
                     }
+                    .menuStyle(.button)
                     .buttonStyle(.plain)
-                    .help("New shell in your home folder")
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("New terminal")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.leading, 16)
-            .padding(.trailing, 10)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
             .padding(.bottom, 2)
+
+        case let .action(key, title):
+            HStack(spacing: 8) {
+                Image(systemName: key == "open-folder" ? "folder.badge.plus" : "plus")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 16, height: 16)
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .modifier(RowChrome(hovered: hovered, selected: false))
+            .onTapGesture { runAction(key) }
 
         case let .folder(path, folderName):
             let collapsed = collapsedFolders.contains(path)
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.heading)
-                    .rotationEffect(collapsed ? .zero : .degrees(90))
+            HStack(spacing: 8) {
+                Image(systemName: collapsed ? "folder" : "folder.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 16, height: 16)
                 Text(folderName)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                // Disclosure state, far right.
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.heading)
             }
             .modifier(RowChrome(hovered: hovered, selected: false))
             .onTapGesture { toggleFolder(path) }
@@ -665,9 +882,22 @@ struct MainWindowView: View {
         case let .row(id, title):
             switch id {
             case let .project(path):
+                let active = terminals.hasPane(for: path)
                 SidebarRow(
                     name: title,
-                    state: state(for: path),
+                    agent: primaryAgent(path: path),
+                    hasTerminal: active,
+                    isProject: !active && ProjectKindCache.isProject(path),
+                    gitStatus: git.rowStatuses[path] ?? .none,
+                    hovered: hovered,
+                    selected: selection == id
+                )
+            case let .shell(path, tabID):
+                SidebarRow(
+                    name: title,
+                    agent: shellAgent(path: path, tab: tabID),
+                    hasTerminal: true,
+                    nested: true,
                     hovered: hovered,
                     selected: selection == id
                 )
@@ -689,7 +919,18 @@ struct MainWindowView: View {
     private func contentKey(for entry: SidebarEntry, hovered: Bool) -> String {
         switch entry {
         case let .header(title):
+            // The Terminals header's "+" menu offers a shell in the selected
+            // terminal's directory, so its content depends on the selection —
+            // without this in the key the header is never re-hosted and the
+            // menu keeps the selection it captured at launch (nil).
+            if title == "Active" {
+                let sel = selection?.projectPath
+                    .flatMap { terminals.hasPane(for: $0) ? $0 : nil } ?? "-"
+                return "h:\(title)|\(sel)|\(terminalPaths.isEmpty ? "-" : "t")"
+            }
             return "h:\(title)"
+        case let .action(key, _):
+            return "a:\(key)|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
             let collapsed = collapsedFolders.contains(path)
             return "f:\(folderName)|\(collapsed ? "c" : "-")|\(hovered ? "h" : "-")"
@@ -699,21 +940,21 @@ struct MainWindowView: View {
             case let .project(path):
                 return [
                     title,
-                    String(describing: state(for: path)),
+                    terminals.hasPane(for: path) ? "t" : "-",
+                    primaryAgent(path: path)?.label ?? "-",
+                    ProjectKindCache.isProject(path) ? "p" : "-",
+                    String(describing: git.rowStatuses[path] ?? .none),
                     selected ? "s" : "-",
                     hovered ? "h" : "-",
                 ].joined(separator: "|")
+            case let .shell(path, tab):
+                let agent = shellAgent(path: path, tab: tab)?.label ?? "-"
+                return "sh:\(title)|\(tab)|\(agent)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
             case let .server(sid):
                 let port = servers.devServers.first { $0.id == sid }.map { String($0.port) } ?? "-"
                 return "\(title)|\(port)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
             }
         }
-    }
-
-    private func state(for path: String) -> RowState {
-        if terminals.agents[path] != nil { return .active }
-        if terminals.hasPane(for: path) { return .shell }
-        return .idle
     }
 
     // MARK: - Context menus
@@ -734,6 +975,14 @@ struct MainWindowView: View {
         guard let id = entry.selection else { return nil }
         let menu = NSMenu()
         switch id {
+        case let .shell(path, tabID):
+            menu.addItem(ClosureMenuItem("Close Terminal") {
+                terminals.closeTab(path: path, tabID: tabID)
+            })
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem("Reveal in Finder") {
+                Actions.revealInFinder(path: path)
+            })
         case let .project(path):
             if terminals.hasPane(for: path) {
                 menu.addItem(ClosureMenuItem("Start Claude") { terminals.start(.claude, in: path) })
@@ -746,6 +995,13 @@ struct MainWindowView: View {
             menu.addItem(ClosureMenuItem("Reveal in Finder") {
                 Actions.revealInFinder(path: path)
             })
+            if store.pinnedProjects.contains(path) {
+                menu.addItem(.separator())
+                menu.addItem(ClosureMenuItem("Remove from Sidebar") {
+                    updateSettings { $0.pinnedProjects.removeAll { $0 == path } }
+                    store.settingsChanged()
+                })
+            }
         case let .server(sid):
             guard let server = servers.devServers.first(where: { $0.id == sid }) else { return nil }
             menu.addItem(ClosureMenuItem("Open in Browser") {
@@ -775,7 +1031,7 @@ struct MainWindowView: View {
     /// path (table click, quick-open, "+", server jump) runs in an event
     /// context where creating the pane synchronously is safe.
     private func select(_ target: SidebarSelection?) {
-        if let path = target?.projectPath {
+        if case let .project(path) = target {
             terminals.pane(for: path)
         }
         selection = target
@@ -789,11 +1045,17 @@ struct MainWindowView: View {
         )
     }
 
-    /// Rows that may hold the selection, in sidebar display order (Active
-    /// section first): something is running in them.
-    private var selectablePaths: [String] { activePaths + shellPaths }
+    /// Rows that may hold the selection, in sidebar display order: something
+    /// is running in them.
+    private var selectablePaths: [String] { terminalPaths }
 
     private func closeTerminal(_ path: String) {
+        // Header X on a nested shell ends just that tab; the tab-prune
+        // onChange moves the selection back to the project's main terminal.
+        if case let .shell(shellPath, tabID) = selection, shellPath == path {
+            terminals.closeTab(path: shellPath, tabID: tabID)
+            return
+        }
         let order = selectablePaths
         let index = order.firstIndex(of: path)
         let wasSelected = (selection == .project(path))
@@ -840,20 +1102,6 @@ struct HeaderButtonChrome: ViewModifier {
 
 // MARK: - Rows
 
-/// What a row's dot means.
-enum RowState {
-    case active, shell, server, idle
-
-    var color: Color {
-        switch self {
-        case .active: Theme.dotActive
-        case .shell: Theme.dotShell
-        case .server: Theme.dotServer
-        case .idle: .clear
-        }
-    }
-}
-
 /// Shared background for sidebar rows: the design's 220pt pill (8pt radius,
 /// 16pt inner padding) inset `Theme.rowInset` from the sidebar edges.
 ///
@@ -883,27 +1131,61 @@ private struct RowChrome: ViewModifier {
 
 struct SidebarRow: View {
     let name: String
-    let state: RowState
+    var agent: CodingAgent? = nil
+    var hasTerminal: Bool = false
+    /// An extra terminal tab nested under its project's row: indented, no
+    /// git dot (same repo as the parent), plain terminal glyph.
+    var nested: Bool = false
+    /// The row's directory is itself a project (has `.git`, a manifest, …)
+    /// rather than a plain folder — idle project rows get a project glyph.
+    var isProject: Bool = false
+    var gitStatus: GitRowStatus = .none
     var hovered: Bool = false
     var selected: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
-            // Idle (Projects) rows carry no dot; they indent instead — one
-            // level under their collapsible folder row.
-            if state != .idle {
+            // Active rows: git status dot on the left, session identity
+            // (agent logo or terminal glyph) on the right. Idle rows lead
+            // with a project glyph when they are projects, else indent.
+            if hasTerminal, !nested {
                 Circle()
-                    .fill(state.color)
+                    .fill(gitColor)
                     .frame(width: 6, height: 6)
+                    .help(gitHelp)
+            } else if !hasTerminal, isProject {
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 16, height: 16)
             }
             Text(name)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.text)
+                .font(.system(size: nested ? 12 : 13))
+                .foregroundStyle(nested ? Theme.textSecondary : Theme.text)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if hasTerminal {
+                TerminalRowIcon(agent: agent, size: nested ? 13 : 16)
+            }
         }
-        .padding(.leading, state == .idle ? 17 : 0)
+        .padding(.leading, nested ? 17 : (hasTerminal || isProject ? 0 : 17))
         .modifier(RowChrome(hovered: hovered, selected: selected))
+    }
+
+    private var gitColor: Color {
+        switch gitStatus {
+        case .none: Theme.dotShell
+        case .dirty: Color(hex: 0xD97706)
+        case .clean: Theme.dotActive
+        }
+    }
+
+    private var gitHelp: String {
+        switch gitStatus {
+        case .none: "Not a git repository"
+        case .dirty: "Uncommitted changes"
+        case .clean: "Working tree clean"
+        }
     }
 }
 
@@ -915,10 +1197,10 @@ struct ServerRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Circle()
-                .fill(RowState.server.color)
-                .frame(width: 6, height: 6)
-                .padding(.top, 5)
+            Image(systemName: "server.rack")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 16, height: 16)
             VStack(alignment: .leading, spacing: 1) {
                 Text(server.project ?? server.command)
                     .font(.system(size: 13, weight: .medium))
@@ -941,6 +1223,25 @@ struct ServerRow: View {
         }
         .padding(.vertical, 6)
         .modifier(RowChrome(hovered: hovered, selected: selected))
+    }
+}
+
+/// The Terminals header's "+": quiet glyph that gets the row-hover fill
+/// under the pointer.
+private struct HeaderPlusLabel: View {
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "plus")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Theme.heading)
+            .frame(width: 20, height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(hovered ? Theme.rowHovered : .clear)
+            )
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
     }
 }
 

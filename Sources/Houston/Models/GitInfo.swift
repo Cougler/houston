@@ -1,5 +1,15 @@
 import Foundation
 
+/// Glance-level git state for a sidebar row's status dot.
+enum GitRowStatus: Equatable {
+    /// Not a git repository.
+    case none
+    /// Uncommitted changes in the working tree.
+    case dirty
+    /// Working tree clean.
+    case clean
+}
+
 /// One uncommitted change in a working tree.
 struct GitChange: Equatable, Identifiable {
     enum Kind: Equatable {

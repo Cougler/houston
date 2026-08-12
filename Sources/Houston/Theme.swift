@@ -62,9 +62,9 @@ enum Theme {
 
     /// Default sidebar width (user-draggable around it).
     static let sidebarWidth: CGFloat = 239
-    /// Horizontal inset of a row pill from the sidebar edges (220pt pill in a
-    /// 239pt sidebar).
-    static let rowInset: CGFloat = 9
+    /// Horizontal inset of a row pill from the sidebar edges. The design's
+    /// 220pt-in-239pt pill (inset 9) read too padded in use; tightened to 5.
+    static let rowInset: CGFloat = 5
 
     // MARK: - Context bar
 

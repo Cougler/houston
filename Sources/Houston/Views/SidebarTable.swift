@@ -10,14 +10,19 @@ enum SidebarEntry: Identifiable, Hashable {
     case header(String)
     case folder(path: String, name: String)
     case row(id: SidebarSelection, title: String)
+    /// A clickable affordance inside a section (e.g. "New Terminal" while no
+    /// terminal is open) — like a folder, tappable but never *selected*.
+    case action(key: String, title: String)
 
     var id: String {
         switch self {
         case let .header(title): "header:\(title)"
         case let .folder(path, _): "folder:\(path)"
+        case let .action(key, _): "action:\(key)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"
+            case let .shell(_, tab): "shell:\(tab)"
             case let .server(sid): "server:\(sid)"
             }
         }

@@ -5,6 +5,9 @@ import Foundation
 struct HoustonSettings {
     /// Parent folders whose subdirectories are the sidebar's projects.
     var projectsDirs: [String]
+    /// Individual project folders added directly — shown as their own rows,
+    /// never expanded into their subdirectories.
+    var pinnedProjects: [String]
     /// Project folders currently collapsed in the sidebar.
     var collapsedFolders: [String]
     /// "system" | "light" | "dark".
@@ -12,13 +15,18 @@ struct HoustonSettings {
     /// A ghostty theme name for the terminal, or "" for Houston's default
     /// (design-matched light/dark).
     var terminalTheme: String
+    /// The user said "Not Now" to the status-bar offer — never re-prompt;
+    /// enabling stays available from the footer gear.
+    var statusLinePromptDeclined: Bool
 
     static var defaults: HoustonSettings {
         HoustonSettings(
             projectsDirs: ["~/Apps".expandingTildePath],
+            pinnedProjects: [],
             collapsedFolders: [],
             appearance: "system",
-            terminalTheme: ""
+            terminalTheme: "",
+            statusLinePromptDeclined: false
         )
     }
 
@@ -44,14 +52,20 @@ struct HoustonSettings {
         }
         var s = defaults
         // "projectsDirs" (array) with the pre-multi-folder "projectsDir"
-        // string as the migration fallback.
-        let candidates = (json["projectsDirs"] as? [String])
-            ?? (json["projectsDir"] as? String).map { [$0] }
-            ?? []
-        let dirs = candidates
-            .map(\.expandingTildePath)
-            .filter { ($0 as NSString).isAbsolutePath }
-        if !dirs.isEmpty { s.projectsDirs = dirs }
+        // string as the migration fallback. An empty array is an explicit
+        // choice and must stick — falling back to the default here meant
+        // removing the last folder silently resurrected ~/Apps.
+        if let candidates = (json["projectsDirs"] as? [String])
+            ?? (json["projectsDir"] as? String).map({ [$0] }) {
+            s.projectsDirs = candidates
+                .map(\.expandingTildePath)
+                .filter { ($0 as NSString).isAbsolutePath }
+        }
+        if let pinned = json["pinnedProjects"] as? [String] {
+            s.pinnedProjects = pinned
+                .map(\.expandingTildePath)
+                .filter { ($0 as NSString).isAbsolutePath }
+        }
         if let collapsed = json["collapsedFolders"] as? [String] {
             s.collapsedFolders = collapsed
         }
@@ -60,6 +74,9 @@ struct HoustonSettings {
         }
         if let t = json["terminalTheme"] as? String {
             s.terminalTheme = t
+        }
+        if let declined = json["statusLinePromptDeclined"] as? Bool {
+            s.statusLinePromptDeclined = declined
         }
         return s
     }
@@ -74,9 +91,11 @@ struct HoustonSettings {
             return [:]
         }()
         obj["projectsDirs"] = s.projectsDirs
+        obj["pinnedProjects"] = s.pinnedProjects
         obj["collapsedFolders"] = s.collapsedFolders
         obj["appearance"] = s.appearance
         obj["terminalTheme"] = s.terminalTheme
+        obj["statusLinePromptDeclined"] = s.statusLinePromptDeclined
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default
