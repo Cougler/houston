@@ -69,14 +69,50 @@ echo "→ codesign ($SIGN_ID)"
 codesign --force --deep --options runtime -s "$SIGN_ID" "$APP" 2>/dev/null \
   || codesign --force --deep -s "$SIGN_ID" "$APP"
 
-echo "→ DMG"
+echo "→ DMG (space-themed drag-to-Applications window)"
 STAGING="dist/dmg"
-mkdir -p "$STAGING"
+mkdir -p "$STAGING/.background"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
-rm -f dist/Houston.dmg
-hdiutil create -volname "Houston" -srcfolder "$STAGING" -ov -format UDZO \
-  dist/Houston.dmg >/dev/null
+cp scripts/dmg-background.png "$STAGING/.background/background.png"
+rm -f dist/Houston.dmg dist/Houston-rw.dmg
+# Read-write image first: Finder lays out the window (background, icon
+# positions, view options — saved into the volume's .DS_Store), then the
+# result is compressed. Regenerate the art with scripts/dmg-background.swift.
+hdiutil detach /Volumes/Houston >/dev/null 2>&1 || true
+hdiutil create -volname "Houston" -srcfolder "$STAGING" -ov -format UDRW \
+  -fs HFS+ -size 120m dist/Houston-rw.dmg >/dev/null
+hdiutil attach dist/Houston-rw.dmg -readwrite -noverify -noautoopen >/dev/null
+sleep 1
+osascript <<'OSA'
+tell application "Finder"
+  tell disk "Houston"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 140, 860, 588}
+    set viewOptions to the icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 96
+    -- Finder picks black/white label text from the background COLOR's
+    -- luminance; black here nudges labels white under the dark picture.
+    set background color of viewOptions to {0, 0, 0}
+    set background picture of viewOptions to file ".background:background.png"
+    set position of item "Houston.app" of container window to {165, 205}
+    set position of item "Applications" of container window to {495, 205}
+    close
+    open
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+OSA
+sync
+hdiutil detach /Volumes/Houston >/dev/null
+hdiutil convert dist/Houston-rw.dmg -format UDZO -o dist/Houston.dmg >/dev/null
+rm -f dist/Houston-rw.dmg
 rm -rf "$STAGING"
 
 # Notarize when signed with a real identity (skip for ad-hoc builds).
