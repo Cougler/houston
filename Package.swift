@@ -22,6 +22,7 @@ let package = Package(
             path: "Sources/Houston",
             resources: [
                 .copy("Resources/icons"),
+                .copy("Resources/skills"),
             ]
         )
     ]

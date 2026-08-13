@@ -41,6 +41,10 @@ final class TerminalPane: Identifiable, ObservableObject {
     /// after a click.
     var hasAutoFocused = false
 
+    /// Fired when the shell process ends (ctrl-D, `exit`) — the manager
+    /// closes this pane in response.
+    var onShellExit: (() -> Void)?
+
     init(projectPath: String, controller: TerminalController) {
         self.projectPath = projectPath
         let v = HoustonTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -51,6 +55,8 @@ final class TerminalPane: Identifiable, ObservableObject {
             envVars: TerminalEnvironment.surfaceEnv(paneID: id.uuidString)
         )
         view = v
+        // Weak on the view's side; the pane owns the view.
+        v.delegate = self
     }
 
     /// Write UTF-8 straight to the pty. This is the embedded replacement for
@@ -91,6 +97,13 @@ final class TerminalPane: Identifiable, ObservableObject {
         view.controller = nil
         view.removeFromSuperview()
         StatusLineFeed.removeSnapshot(paneID: id.uuidString)
+    }
+}
+
+extension TerminalPane: TerminalSurfaceCloseDelegate {
+    /// Ghostty's close-surface callback — the shell exited on its own.
+    func terminalDidClose(processAlive: Bool) {
+        onShellExit?()
     }
 }
 

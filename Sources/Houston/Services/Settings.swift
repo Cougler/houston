@@ -1,6 +1,14 @@
 import AppKit
 import Foundation
 
+extension Notification.Name {
+    /// Settings changed by a path outside MainWindowView (the menu-bar
+    /// Settings menu) — the window re-reads and applies.
+    static let houstonSettingsChanged = Notification.Name("HoustonSettingsChanged")
+    /// The menu bar asked for the Claude status-bar consent prompt.
+    static let houstonShowStatusFeedPrompt = Notification.Name("HoustonShowStatusFeedPrompt")
+}
+
 /// Houston's settings. Unknown keys in the JSON are preserved on write.
 struct HoustonSettings {
     /// Parent folders whose subdirectories are the sidebar's projects.
@@ -18,6 +26,15 @@ struct HoustonSettings {
     /// The user said "Not Now" to the status-bar offer — never re-prompt;
     /// enabling stays available from the footer gear.
     var statusLinePromptDeclined: Bool
+    /// The status bar is turned off entirely.
+    var statusBarDisabled: Bool
+    /// The status bar is collapsed to just the model.
+    var statusBarCollapsed: Bool
+    /// Status-bar items switched off individually. Known keys:
+    /// "model", "context", "mcp", "peak", "limits".
+    var statusBarHiddenItems: [String]
+    /// The first-launch welcome card has been dismissed.
+    var welcomeSeen: Bool
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -26,7 +43,11 @@ struct HoustonSettings {
             collapsedFolders: [],
             appearance: "system",
             terminalTheme: "",
-            statusLinePromptDeclined: false
+            statusLinePromptDeclined: false,
+            statusBarDisabled: false,
+            statusBarCollapsed: false,
+            statusBarHiddenItems: [],
+            welcomeSeen: false
         )
     }
 
@@ -78,6 +99,18 @@ struct HoustonSettings {
         if let declined = json["statusLinePromptDeclined"] as? Bool {
             s.statusLinePromptDeclined = declined
         }
+        if let disabled = json["statusBarDisabled"] as? Bool {
+            s.statusBarDisabled = disabled
+        }
+        if let barCollapsed = json["statusBarCollapsed"] as? Bool {
+            s.statusBarCollapsed = barCollapsed
+        }
+        if let hidden = json["statusBarHiddenItems"] as? [String] {
+            s.statusBarHiddenItems = hidden
+        }
+        if let seen = json["welcomeSeen"] as? Bool {
+            s.welcomeSeen = seen
+        }
         return s
     }
 
@@ -96,6 +129,10 @@ struct HoustonSettings {
         obj["appearance"] = s.appearance
         obj["terminalTheme"] = s.terminalTheme
         obj["statusLinePromptDeclined"] = s.statusLinePromptDeclined
+        obj["statusBarDisabled"] = s.statusBarDisabled
+        obj["statusBarCollapsed"] = s.statusBarCollapsed
+        obj["statusBarHiddenItems"] = s.statusBarHiddenItems
+        obj["welcomeSeen"] = s.welcomeSeen
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

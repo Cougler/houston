@@ -10,6 +10,10 @@ struct GitPanel: View {
     let projectPath: String
     /// Runs `git init` in the project's shell (non-repo state only).
     let onInitialize: () -> Void
+    /// Types `git switch <branch>` into the project's shell.
+    var onSwitchBranch: (String) -> Void = { _ in }
+    /// Prompts for a name and creates + switches to it.
+    var onNewBranch: () -> Void = {}
 
     private enum Page: Equatable {
         case list
@@ -49,7 +53,7 @@ struct GitPanel: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Theme.panelFill)
+                .fill(Theme.gitPanelFill)
                 .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -116,13 +120,41 @@ struct GitPanel: View {
     private func repoContent(_ info: GitInfo) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.heading)
-                Text(info.branchLabel)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
+                // Branch switcher: local branches plus New Branch…
+                Menu {
+                    ForEach(info.branches, id: \.self) { branch in
+                        Button {
+                            if branch != info.branchLabel { onSwitchBranch(branch) }
+                        } label: {
+                            if branch == info.branchLabel {
+                                Label(branch, systemImage: "checkmark")
+                            } else {
+                                Text(branch)
+                            }
+                        }
+                    }
+                    if !info.branches.isEmpty { Divider() }
+                    Button("New Branch…") { onNewBranch() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.heading)
+                        Text(info.branchLabel)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Theme.heading)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Switch or create a branch")
                 Spacer(minLength: 0)
                 if let remote = info.remoteURL {
                     HoverArrowButton(help: "Open on the remote") {

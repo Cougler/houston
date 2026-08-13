@@ -9,9 +9,15 @@ enum Theme {
     // MARK: - Surfaces
 
     /// Window / sidebar / detail background.
-    static let background = Color(light: 0xFFFFFF, dark: 0x1E1E1E)
+    static let background = Color(light: 0xEBEBEB, dark: 0x1E1E1E)
+    /// The empty state's sky — a step off the chrome in each direction:
+    /// darker than the sidebar in light mode, lighter in dark mode.
+    static let emptyStateBackground = Color(light: 0xE2E2E2, dark: 0x252525)
     /// Floating cards (skills panel).
     static let panelFill = Color(light: 0xFFFFFF, dark: 0x262626)
+    /// The git panel: pushed away from the chrome in both directions —
+    /// lighter than the UI in light mode, darker in dark.
+    static let gitPanelFill = Color(light: 0xFFFFFF, dark: 0x181818)
     /// The faded helmet on the empty state.
     static let watermark = Color(light: 0xEBEBEB, dark: 0x323232)
 
@@ -28,15 +34,28 @@ enum Theme {
     // MARK: - Borders
 
     /// Sidebar → detail split line.
-    static let borderSidebar = Color(light: 0xEDEDED, dark: 0x2B2B2B)
+    static let borderSidebar = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x2B2B2B))
     /// Header underline.
-    static let borderHeader = Color(light: 0xF1F1F1, dark: 0x292929)
+    static let borderHeader = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x292929))
     /// Sidebar footer top line.
-    static let borderFooter = Color(light: 0xEBEBEB, dark: 0x2B2B2B)
+    static let borderFooter = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x2B2B2B))
+    /// Solar-system orbit rings on the empty state.
+    static let orbitRing = Color(
+        light: .black.withAlphaComponent(0.10),
+        dark: NSColor(hex: 0x323232).withAlphaComponent(0.5)
+    )
 
     // MARK: - Controls
 
     static let buttonFill = Color(light: 0xF3F3F3, dark: 0x2C2C2C)
+    /// Header button while its menu/panel is open: dusty-rose accent — the
+    /// dark values are the design's; light is the same hue deepened to hold
+    /// contrast on the light chrome.
+    static let buttonActiveFill = Color(
+        light: NSColor(hex: 0xAD7370).withAlphaComponent(0.12),
+        dark: NSColor(hex: 0xC79491).withAlphaComponent(0.15)
+    )
+    static let buttonActiveStroke = Color(light: 0xAD7370, dark: 0xC79491)
     static let buttonStroke = Color(light: 0xE0E0E0, dark: 0x3D3D3D)
     /// Close button glyph — #FF685F in both appearances.
     static let closeRed = Color(hex: 0xFF685F)
@@ -114,6 +133,13 @@ extension Color {
     init(light: UInt32, dark: UInt32) {
         self.init(nsColor: NSColor(name: nil) { appearance in
             NSColor(hex: appearance.isDark ? dark : light)
+        })
+    }
+
+    /// A dynamic color from full NSColor values, for tokens that need alpha.
+    init(light: NSColor, dark: NSColor) {
+        self.init(nsColor: NSColor(name: nil) { appearance in
+            appearance.isDark ? dark : light
         })
     }
 }

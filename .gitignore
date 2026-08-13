@@ -2,3 +2,5 @@
 .DS_Store
 .mc.json
 nohup.out
+dist/
+.swiftpm/

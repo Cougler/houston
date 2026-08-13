@@ -10,6 +10,11 @@ enum SidebarEntry: Identifiable, Hashable {
     case header(String)
     case folder(path: String, name: String)
     case row(id: SidebarSelection, title: String)
+    /// A project's home row in the Projects library. Selecting it targets the
+    /// same `.project` selection as an Active row, but it has its own row
+    /// identity — so a running project stays put here (with a live dot) while
+    /// also being listed under Active, instead of jumping sections.
+    case library(path: String, title: String)
     /// A clickable affordance inside a section (e.g. "New Terminal" while no
     /// terminal is open) — like a folder, tappable but never *selected*.
     case action(key: String, title: String)
@@ -19,6 +24,7 @@ enum SidebarEntry: Identifiable, Hashable {
         case let .header(title): "header:\(title)"
         case let .folder(path, _): "folder:\(path)"
         case let .action(key, _): "action:\(key)"
+        case let .library(path, _): "library:\(path)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"
@@ -29,8 +35,11 @@ enum SidebarEntry: Identifiable, Hashable {
     }
 
     var selection: SidebarSelection? {
-        if case let .row(id, _) = self { return id }
-        return nil
+        switch self {
+        case let .row(id, _): return id
+        case let .library(path, _): return .project(path)
+        default: return nil
+        }
     }
 
     var isHeader: Bool {
@@ -38,11 +47,18 @@ enum SidebarEntry: Identifiable, Hashable {
         return false
     }
 
-    /// Only real rows can hold the selection — headers and folders can't,
-    /// which also keeps arrow-key navigation from parking on them.
+    /// Only real rows can hold the selection — headers and actions can't,
+    /// which also keeps arrow-key navigation from parking on them. Server
+    /// rows opted out too: clicking one pops a detail popover instead of
+    /// changing what the detail pane shows.
     var isSelectable: Bool {
-        if case .row = self { return true }
-        return false
+        switch self {
+        case let .row(id, _):
+            if case .server = id { return false }
+            return true
+        case .library: return true
+        default: return false
+        }
     }
 }
 

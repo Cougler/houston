@@ -30,3 +30,70 @@ func formatTokens(_ n: Int) -> String {
     if n < 1_000_000 { return "\(Int((Double(n) / 1_000).rounded()))k" }
     return String(format: "%.1fM", Double(n) / 1_000_000)
 }
+
+/// The server-rack glyph from `Resources/icons/servers.svg`, drawn as a path
+/// so it tints like an SF Symbol: two rounded units with power dashes,
+/// stroked at the SVG's 1.5pt (scaled from its 24pt box).
+struct ServerGlyph: View {
+    var color: Color
+    var size: CGFloat = 16
+
+    var body: some View {
+        ServerGlyphShape()
+            .stroke(
+                color,
+                style: StrokeStyle(
+                    lineWidth: 1.5 * size / 24,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+            .frame(width: size, height: size)
+    }
+}
+
+private struct ServerGlyphShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = rect.width / 24
+        var p = Path()
+        for y: CGFloat in [4.5, 13.5] {
+            p.addRoundedRect(
+                in: CGRect(x: 3 * s, y: y * s, width: 18 * s, height: 6 * s),
+                cornerSize: CGSize(width: 1.2 * s, height: 1.2 * s)
+            )
+            p.move(to: CGPoint(x: 6 * s, y: (y + 3) * s))
+            p.addLine(to: CGPoint(x: 8 * s, y: (y + 3) * s))
+        }
+        return p
+    }
+}
+
+/// A bundled SVG icon (Resources/icons/<name>.svg) rendered as a template
+/// image, so `foregroundStyle` tints it like an SF Symbol. NSImage decodes
+/// SVG natively on macOS 11+; the black fills become the tint mask.
+struct SVGIcon: View {
+    let name: String
+    var size: CGFloat = 14
+
+    var body: some View {
+        if let image = Self.template(named: name) {
+            Image(nsImage: image)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+        }
+    }
+
+    @MainActor private static var cache: [String: NSImage] = [:]
+
+    @MainActor private static func template(named name: String) -> NSImage? {
+        if let hit = cache[name] { return hit }
+        guard let url = Bundle.module.resourceURL?
+            .appendingPathComponent("icons/\(name).svg"),
+            let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        cache[name] = image
+        return image
+    }
+}

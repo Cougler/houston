@@ -46,6 +46,7 @@ struct MainWindowView: View {
     @StateObject private var git = GitStatusStore()
     @StateObject private var statusFeed = StatusLineStore()
     @StateObject private var mcp = MCPStatusStore()
+    @StateObject private var handoffs = HandoffCoordinator()
     @ObservedObject private var terminals = TerminalSessionManager.shared
     @State private var selection: SidebarSelection?
     /// Agent the header's split button launches; the chevron menu changes it.
@@ -58,8 +59,13 @@ struct MainWindowView: View {
     @State private var showGit = false
     /// Uninstalled harness the user picked — drives the install prompt.
     @State private var pendingInstall: CodingAgent?
+    /// The harness selector's popped menu, for its active chrome.
+    @State private var agentMenuOpen = false
+    @State private var agentMenuBox = MenuAnchorBox()
     /// Mirror of the settings file, for the footer gear's checkmarks.
     @State private var settings = HoustonSettings.read()
+    /// The server whose detail popover is open, by `DevServer.id`.
+    @State private var serverPopover: String?
     /// Whether Houston's feed script is Claude's configured statusline.
     @State private var statusFeedInstalled = StatusLineFeed.state == .houston
     /// Consent dialog for taking over the Claude statusline.
@@ -68,6 +74,8 @@ struct MainWindowView: View {
     @State private var statusPromptOffered = false
     /// Project folders currently collapsed, persisted in settings.
     @State private var collapsedFolders = Set(HoustonSettings.read().collapsedFolders)
+    /// First-launch welcome overlay, until dismissed once.
+    @State private var showWelcome = !HoustonSettings.read().welcomeSeen
 
     /// Clearance for the traffic lights, which float over the sidebar now that
     /// the title bar is transparent and full-size.
@@ -91,6 +99,15 @@ struct MainWindowView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .overlay {
+            if showWelcome {
+                WelcomeView {
+                    withAnimation(.easeOut(duration: 0.3)) { showWelcome = false }
+                    updateSettings { $0.welcomeSeen = true }
+                }
+                .transition(.opacity)
+            }
+        }
         // The titlebar region is a safe area, so without this the whole
         // layout starts ~30pt down: the split divider stopped short of the
         // top and every sidebar section sat lower than designed. Ignoring it
@@ -101,15 +118,20 @@ struct MainWindowView: View {
             store.start()
             servers.start()
             git.start()
+            git.watchRows(gitWatchSet)
             statusFeed.start()
             terminals.startAgentPolling()
             terminals.detectInstalledAgents()
+            // Ship the mission skills: copy any that are missing into
+            // ~/.claude/skills so Start Mission / Handoff / End Mission work
+            // on a machine that never had them.
+            Task.detached(priority: .utility) { HoustonSkills.installMissing() }
             if let path = ProcessInfo.processInfo.environment["HOUSTON_TEST_PANE"] {
                 Task { @MainActor in select(.project(path)) }
             }
         }
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
-        .onChange(of: terminalPaths) { _, paths in git.watchRows(Set(paths)) }
+        .onChange(of: gitWatchSet) { _, set in git.watchRows(set) }
         .onChange(of: selection) { _, newValue in
             showSkills = false
             showGit = false
@@ -128,6 +150,20 @@ struct MainWindowView: View {
             if !installed.contains(launchAgent), let first = installed.first {
                 launchAgent = first
             }
+        }
+        // The menu-bar Settings menu writes the settings file directly —
+        // re-read and apply whatever changed.
+        .onReceive(NotificationCenter.default.publisher(for: .houstonSettingsChanged)) { _ in
+            let new = HoustonSettings.read()
+            if new.terminalTheme != settings.terminalTheme {
+                terminals.applyTerminalTheme(named: new.terminalTheme)
+            }
+            settings = new
+            statusFeedInstalled = StatusLineFeed.state == .houston
+            store.settingsChanged()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .houstonShowStatusFeedPrompt)) { _ in
+            showStatusPrompt = true
         }
         // A claude session appearing is the moment the status bar becomes
         // relevant — offer the takeover once, unless previously declined.
@@ -158,10 +194,11 @@ struct MainWindowView: View {
         }
     }
 
-    /// Draggable split handle. 1pt line, 6pt hit area.
+    /// Draggable split handle — invisible now (no line between sidebar and
+    /// detail), but still the 6pt-wide resize grip.
     private var splitDivider: some View {
         Rectangle()
-            .fill(Theme.borderSidebar)
+            .fill(Color.clear)
             .frame(width: 1)
             .frame(maxHeight: .infinity)
             .overlay(
@@ -228,46 +265,133 @@ struct MainWindowView: View {
         store.settingsChanged()
     }
 
-    /// Sidebar action rows ("New Terminal", "Open Folder…").
+    /// Prompts for a terminal row's new name; empty input restores the
+    /// directory-based default.
+    private func renameTerminal(path: String, tabID: UUID) {
+        let current = terminals.tabs[path]?
+            .first { $0.id == tabID }?.customName ?? ""
+        guard let name = promptForText(
+            title: "Rename Terminal",
+            message: "Shown in the sidebar. Leave empty to restore the default name.",
+            placeholder: current.isEmpty ? self.name(of: path) : current
+        ) else { return }
+        terminals.renameTab(path: path, tabID: tabID, to: name)
+    }
+
+    /// Clones a repo into the projects folder — visibly, in the home shell,
+    /// so credential prompts and progress land where the user can see them —
+    /// then pins the result when the clone finishes.
+    private func cloneRepository() {
+        guard let url = promptForText(
+            title: "Clone Repository",
+            message: "HTTPS or SSH URL. Houston clones it into "
+                + "\(cloneParent) and adds it to Projects.",
+            placeholder: "git@github.com:user/repo.git"
+        ), !url.isEmpty else { return }
+        let name = Self.repoName(from: url)
+        guard !name.isEmpty else { return }
+        let parent = cloneParent
+        try? FileManager.default.createDirectory(
+            atPath: parent, withIntermediateDirectories: true
+        )
+        let dest = parent + "/" + name
+        select(.project(NSHomeDirectory()))
+        terminals.send("git clone \"\(url)\" \"\(dest)\"\n", to: NSHomeDirectory())
+        Task {
+            for _ in 0..<90 {
+                try? await Task.sleep(for: .seconds(2))
+                if FileManager.default.fileExists(atPath: dest + "/.git") {
+                    pinProject(dest)
+                    return
+                }
+            }
+        }
+    }
+
+    /// Where clones land: the first configured folder, else ~/Apps.
+    private var cloneParent: String {
+        store.projectsDirs.first ?? "~/Apps".expandingTildePath
+    }
+
+    /// "git@github.com:user/repo.git" / "https://…/repo.git" → "repo".
+    private static func repoName(from url: String) -> String {
+        var tail = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        while tail.hasSuffix("/") { tail.removeLast() }
+        let afterColon = tail.split(separator: ":").last.map(String.init) ?? tail
+        let last = afterColon.split(separator: "/").last.map(String.init) ?? afterColon
+        return last.hasSuffix(".git") ? String(last.dropLast(4)) : last
+    }
+
+    /// Pin a single project into the Projects section.
+    private func pinProject(_ path: String) {
+        updateSettings {
+            if !$0.pinnedProjects.contains(path) { $0.pinnedProjects.append(path) }
+        }
+        store.settingsChanged()
+    }
+
+    /// One-line modal text prompt (branch names, clone URLs).
+    private func promptForText(
+        title: String, message: String, placeholder: String
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = placeholder
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Sidebar action rows ("New", "Add").
     private func runAction(_ key: String) {
         switch key {
-        case "new-terminal": select(.project(NSHomeDirectory()))
+        case "new-terminal":
+            // Every click opens another shell: the first becomes the home
+            // terminal, the rest nest under it as "~ · N" tabs.
+            let home = NSHomeDirectory()
+            if terminals.hasPane(for: home), let tab = terminals.newTab(in: home) {
+                select(.shell(path: home, tab: tab.id))
+            } else {
+                select(.project(home))
+            }
         case "open-folder": addFolder()
         default: break
         }
     }
 
+    /// Shared chrome for the "+ New" / "+ Add" rows.
+    private func actionRowLabel(title: String, hovered: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "plus")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 16, height: 16)
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .modifier(RowChrome(hovered: hovered, selected: false))
+        .contentShape(Rectangle())
+    }
+
+
     private var sidebarFooter: some View {
+        // Just the gear, tucked into the bottom-left corner — no rule above.
         HStack(spacing: 0) {
-            // Until a folder exists this affordance lives up in the Folders
-            // section instead.
-            if !store.projectsDirs.isEmpty || !store.pinnedProjects.isEmpty {
-                Button {
-                    addFolder()
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder.badge.plus")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.text)
-                        Text("Add Folder...")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Theme.text)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+            settingsMenu
 
             Spacer(minLength: 8)
-
-            settingsMenu
         }
-        .padding(.leading, 24)
+        .padding(.leading, 14)
         .padding(.trailing, 14)
         .padding(.vertical, 12)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.borderFooter).frame(height: 1)
-        }
     }
 
     // MARK: - Settings
@@ -296,6 +420,20 @@ struct MainWindowView: View {
 
             Divider()
 
+            Section("Status Bar") {
+                Toggle("Hide", isOn: statusBarCollapsedBinding)
+                Toggle("Disable", isOn: statusBarDisabledBinding)
+                Menu("Items") {
+                    Toggle("Model", isOn: statusBarItemBinding("model"))
+                    Toggle("Context", isOn: statusBarItemBinding("context"))
+                    Toggle("MCP", isOn: statusBarItemBinding("mcp"))
+                    Toggle("Peak Hours", isOn: statusBarItemBinding("peak"))
+                    Toggle("Rate Limits", isOn: statusBarItemBinding("limits"))
+                }
+            }
+
+            Divider()
+
             if statusFeedInstalled {
                 Button("Disable Claude Status Bar") {
                     StatusLineFeed.restore()
@@ -307,17 +445,41 @@ struct MainWindowView: View {
                 }
             }
         } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.heading)
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
+            GearLabel()
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Appearance and terminal theme")
+    }
+
+    private var statusBarDisabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.statusBarDisabled },
+            set: { disabled in updateSettings { $0.statusBarDisabled = disabled } }
+        )
+    }
+
+    private var statusBarCollapsedBinding: Binding<Bool> {
+        Binding(
+            get: { settings.statusBarCollapsed },
+            set: { collapsed in updateSettings { $0.statusBarCollapsed = collapsed } }
+        )
+    }
+
+    /// On/off for one status-bar item — stored inverted (hidden list), so an
+    /// absent key means visible.
+    private func statusBarItemBinding(_ key: String) -> Binding<Bool> {
+        Binding(
+            get: { !settings.statusBarHiddenItems.contains(key) },
+            set: { visible in
+                updateSettings {
+                    $0.statusBarHiddenItems.removeAll { $0 == key }
+                    if !visible { $0.statusBarHiddenItems.append(key) }
+                }
+            }
+        )
     }
 
     private var appearanceBinding: Binding<String> {
@@ -356,21 +518,29 @@ struct MainWindowView: View {
             // The empty state stands alone — no title bar over it.
             if selection != nil {
                 topPanel
-                Rectangle().fill(Theme.borderHeader).frame(height: 1)
             }
             detailContent
-            if let snapshot = activeSnapshot, let path = selection?.projectPath {
+            // The bar keeps its place under every open pane; its components
+            // only appear while a session runs.
+            if let path = selection?.projectPath, terminals.hasPane(for: path),
+               !settings.statusBarDisabled {
+                let snapshot = activeSnapshot
                 StatusBarView(
                     snapshot: snapshot,
+                    collapsed: statusBarCollapsedBinding,
                     mcp: mcp.statuses[path],
                     mcpAuthInFlight: mcp.authInFlight,
                     onSelectModel: { modelArg in
-                        switchModel(to: modelArg, snapshot: snapshot)
+                        if let snapshot { switchModel(to: modelArg, snapshot: snapshot) }
                     },
-                    onManageMCP: { sendToSnapshotPane("/mcp\n", snapshot: snapshot) },
+                    onManageMCP: {
+                        if let snapshot { sendToSnapshotPane("/mcp\n", snapshot: snapshot) }
+                    },
                     onRefreshMCP: { mcp.refresh(path: path) },
                     onAuthenticateMCP: { mcp.login(server: $0, path: path) },
-                    onLogoutMCP: { mcp.logout(server: $0, path: path) }
+                    onLogoutMCP: { mcp.logout(server: $0, path: path) },
+                    hiddenItems: Set(settings.statusBarHiddenItems),
+                    sessionRunning: terminals.agents[path] != nil
                 )
                 .onAppear { mcp.refreshIfStale(path: path) }
             }
@@ -408,6 +578,7 @@ struct MainWindowView: View {
                         .lineLimit(1)
                 }
             }
+
             Spacer(minLength: 8)
 
             if let path = selection?.projectPath, terminals.hasPane(for: path) {
@@ -422,6 +593,60 @@ struct MainWindowView: View {
 
     @ViewBuilder
     private func headerActions(for path: String) -> some View {
+        // Mission controls lead the cluster: Start Mission until a session
+        // exists (and only where a mission log does), then the Mission menu.
+        if terminals.agents[path] == nil {
+            if FileManager.default.fileExists(atPath: path + "/missionlog.md") {
+                Button {
+                    terminals.send("claude \"/start-mission\"\n", to: path)
+                } label: {
+                    HStack(spacing: 5) {
+                        SVGIcon(name: "rocket", size: 13)
+                            .foregroundStyle(Theme.text.opacity(0.75))
+                        Text("Start Mission")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Theme.text)
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .modifier(HeaderButtonChrome())
+                .help("Launch claude and resume where the last session left off")
+            }
+        } else {
+            let handingOff = handoffs.active.contains(path)
+            HeaderMenuButton {
+                // One-click context reset: /log-mission, wait for the log
+                // write, /clear, /handoff — see HandoffCoordinator.
+                let menu = NSMenu()
+                menu.autoenablesItems = false
+                let handoff = ClosureMenuItem("Handoff") {
+                    handoffs.handoff(path: path)
+                }
+                handoff.isEnabled = !handingOff
+                menu.addItem(handoff)
+                menu.addItem(ClosureMenuItem("End Mission") {
+                    terminals.send("/end-mission\n", to: path)
+                })
+                return menu
+            } label: {
+                HStack(spacing: 6) {
+                    Text(handingOff ? "Handing off…" : "Mission")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Theme.text.opacity(0.75))
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .contentShape(Rectangle())
+            }
+            .help("Handoff (log, reset context, re-brief) or end the mission")
+        }
+
         // Branch button: live git state at a glance, panel on click.
         Button {
             withAnimation(.easeOut(duration: 0.18)) {
@@ -444,10 +669,11 @@ struct MainWindowView: View {
                 }
             }
             .padding(.horizontal, 12)
+            .frame(height: 30)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(HeaderButtonChrome())
+        .modifier(HeaderButtonChrome(active: showGit))
         .help("Git status")
 
         // Skills only exist inside an agent session, so the button appears
@@ -455,15 +681,20 @@ struct MainWindowView: View {
         if terminals.agents[path] != nil {
             Button {
                 if !showSkills { skills = SkillsCatalog.load(projectPath: path) }
-                withAnimation(.easeOut(duration: 0.18)) { showSkills.toggle() }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    showSkills.toggle()
+                    showGit = false
+                }
             } label: {
                 Text("Skills")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .modifier(HeaderButtonChrome())
+            .modifier(HeaderButtonChrome(active: showSkills))
             .help("Apply a skill to this session")
         }
 
@@ -471,34 +702,22 @@ struct MainWindowView: View {
         // Uninstalled harnesses are listed too — picking one offers to run
         // its install command instead of silently failing.
         launchButton(for: path)
-
-        Button {
-            closeTerminal(path)
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.closeRed)
-                .frame(width: 30, height: 30)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .modifier(HeaderButtonChrome())
-        .help("End this shell and everything running in it")
+        // No header ✕ — terminals close from their sidebar rows (hover ✕,
+        // context menu) or by the shell exiting.
     }
 
     private func launchButton(for path: String) -> some View {
         HStack(spacing: 6) {
-            Menu {
-                ForEach(CodingAgent.launchable, id: \.self) { agent in
-                    if terminals.installedAgents.contains(agent) {
-                        Button(agent.label) { launchAgent = agent }
-                    } else {
-                        Button {
-                            pendingInstall = agent
-                        } label: {
-                            Label(agent.label, systemImage: "arrow.down.circle")
-                        }
-                    }
+            Button {
+                guard !agentMenuOpen, let anchor = agentMenuBox.view else { return }
+                agentMenuOpen = true
+                DispatchQueue.main.async {
+                    agentMenu().popUp(
+                        positioning: nil,
+                        at: NSPoint(x: -12, y: -6),
+                        in: anchor
+                    )
+                    agentMenuOpen = false
                 }
             } label: {
                 HStack(spacing: 6) {
@@ -509,12 +728,11 @@ struct MainWindowView: View {
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(Theme.text.opacity(0.75))
                 }
+                .frame(height: 30)
                 .contentShape(Rectangle())
             }
-            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .background(MenuAnchorReader(box: agentMenuBox))
 
             Rectangle()
                 .fill(Theme.buttonStroke)
@@ -530,7 +748,7 @@ struct MainWindowView: View {
                 Image(systemName: "play.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 24, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -538,7 +756,7 @@ struct MainWindowView: View {
         }
         .padding(.leading, 12)
         .padding(.trailing, 4)
-        .modifier(HeaderButtonChrome())
+        .modifier(HeaderButtonChrome(active: agentMenuOpen))
         .alert(
             "Install \(pendingInstall?.label ?? "")?",
             isPresented: Binding(
@@ -555,10 +773,29 @@ struct MainWindowView: View {
         } message: { agent in
             Text(
                 "\(agent.label) isn't installed. Houston will run:\n\n"
-                + (agent.installCommand ?? "")
+                + (terminals.installCommand(for: agent) ?? "")
                 + "\n\nin this project's shell."
             )
         }
+    }
+
+    /// The harness picker's menu: installed agents plain, uninstalled ones
+    /// marked and routed to the install prompt.
+    private func agentMenu() -> NSMenu {
+        let menu = NSMenu()
+        for agent in CodingAgent.launchable {
+            if terminals.installedAgents.contains(agent) {
+                menu.addItem(ClosureMenuItem(agent.label) { launchAgent = agent })
+            } else {
+                let item = ClosureMenuItem(agent.label) { pendingInstall = agent }
+                item.image = NSImage(
+                    systemSymbolName: "arrow.down.circle",
+                    accessibilityDescription: nil
+                )
+                menu.addItem(item)
+            }
+        }
+        return menu
     }
 
     private var gitButtonTitle: String {
@@ -568,7 +805,10 @@ struct MainWindowView: View {
 
     private var headerTitle: String {
         switch selection {
-        case let .project(path), let .shell(path, _): name(of: path)
+        case let .project(path):
+            terminals.tabs[path]?.first?.customName ?? name(of: path)
+        case let .shell(path, tab):
+            terminals.tabs[path]?.first { $0.id == tab }?.customName ?? name(of: path)
         case let .server(id):
             servers.devServers.first { $0.id == id }
                 .map { $0.project ?? $0.command } ?? "Server"
@@ -592,25 +832,70 @@ struct MainWindowView: View {
         case let .project(path), let .shell(path, _):
             if terminals.hasPane(for: path) {
                 ZStack(alignment: .topTrailing) {
+                    // Inset from the right so the chrome wraps the terminal,
+                    // with the surface itself rounded off.
                     TerminalHostView(path: path, tabID: selection?.tabID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .padding(.leading, 8)
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 6)
+                    // Scrim under the floating panels: any click outside a
+                    // panel dismisses it (and is consumed, not passed to the
+                    // terminal — the standard popover bargain).
+                    if showSkills || showGit {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.easeOut(duration: 0.18)) {
+                                    showSkills = false
+                                    showGit = false
+                                }
+                            }
+                    }
                     // Floats over the terminal; the agent-gate mirrors the
                     // button so the card leaves with the session.
                     if showSkills, terminals.agents[path] != nil {
-                        SkillsPanel(skills: skills) { skill in
-                            terminals.send("/\(skill.name) ", to: path)
-                            withAnimation(.easeOut(duration: 0.18)) { showSkills = false }
-                        }
+                        SkillsPanel(
+                            skills: skills,
+                            onRun: { skill in
+                                terminals.send("/\(skill.name)\n", to: path)
+                                withAnimation(.easeOut(duration: 0.18)) { showSkills = false }
+                            },
+                            onInsert: { skill in
+                                terminals.send("/\(skill.name) ", to: path)
+                                withAnimation(.easeOut(duration: 0.18)) { showSkills = false }
+                            }
+                        )
                         .padding(12)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        // Slides down from the header, as if out of the
+                        // button that opened it.
+                        .transition(.opacity)
                     }
                     if showGit {
-                        GitPanel(info: git.info, projectPath: path) {
-                            terminals.send("git init\n", to: path)
-                            git.refresh()
-                        }
+                        GitPanel(
+                            info: git.info,
+                            projectPath: path,
+                            onInitialize: {
+                                terminals.send("git init\n", to: path)
+                                git.refresh()
+                            },
+                            onSwitchBranch: { branch in
+                                terminals.send("git switch \"\(branch)\"\n", to: path)
+                                git.refresh()
+                            },
+                            onNewBranch: {
+                                guard let name = promptForText(
+                                    title: "New Branch",
+                                    message: "Created from the current branch and switched to.",
+                                    placeholder: "feature/thing"
+                                ), !name.isEmpty else { return }
+                                terminals.send("git switch -c \"\(name)\"\n", to: path)
+                                git.refresh()
+                            }
+                        )
                         .padding(12)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .transition(.opacity)
                     }
                 }
             } else {
@@ -667,12 +952,29 @@ struct MainWindowView: View {
     /// Projects that already have a shell or agent live in Active, not under
     /// their folder — and a pinned project keeps its own row rather than
     /// doubling up inside a group that happens to contain it.
-    private func idlePaths(in group: ProjectGroup) -> [String] {
-        let taken = Set(terminals.agents.keys)
-            .union(terminals.tabs.keys)
-            .union(store.pinnedProjects)
-        return group.projects.map(\.path).filter { !taken.contains($0) }
+    /// A group's rows in the Folders library. Running state doesn't matter —
+    /// only pinned projects are excluded, since they have their own rows.
+    private func libraryPaths(in group: ProjectGroup) -> [String] {
+        group.projects.map(\.path).filter { !store.pinnedProjects.contains($0) }
     }
+
+    /// Uncommitted line counts for a library row; nil when clean, not a
+    /// repo, or the first scan is still out.
+    private func libraryDiff(_ path: String) -> (added: Int, removed: Int)? {
+        if case let .dirty(added, removed) = git.rowStatuses[path] {
+            return (added, removed)
+        }
+        return nil
+    }
+
+    /// Everything the sidebar shows a git dot or subtext for: open terminals
+    /// plus the whole Projects library.
+    private var gitWatchSet: Set<String> {
+        Set(terminalPaths)
+            .union(store.pinnedProjects)
+            .union(store.projectGroups.flatMap { $0.projects.map(\.path) })
+    }
+
 
     private func byName(_ a: String, _ b: String) -> Bool {
         (a as NSString).lastPathComponent
@@ -682,48 +984,47 @@ struct MainWindowView: View {
     /// The flattened row list the table renders: Terminals, Servers, Projects.
     private var entries: [SidebarEntry] {
         var out: [SidebarEntry] = []
-        out.append(.header("Active"))
-        // Empty section: a spelled-out affordance instead of the header "+"
-        // (which hides until a terminal exists).
-        if terminalPaths.isEmpty {
-            out.append(.action(key: "new-terminal", title: "New Terminal"))
-        }
+        out.append(.header("Terminals"))
         for path in terminalPaths {
-            out.append(.row(id: .project(path), title: name(of: path)))
-            // Extra tabs nest under the project's row, numbered with it.
-            for (index, tab) in (terminals.tabs[path] ?? []).enumerated().dropFirst() {
+            let list = terminals.tabs[path] ?? []
+            out.append(.row(
+                id: .project(path),
+                title: list.first?.customName ?? name(of: path)
+            ))
+            // Extra terminals in the same directory: full peer rows, same
+            // name — rename is there for anyone who wants to tell them apart.
+            for tab in list.dropFirst() {
                 out.append(.row(
                     id: .shell(path: path, tab: tab.id),
-                    title: "\(name(of: path)) · \(index + 1)"
+                    title: tab.customName ?? name(of: path)
                 ))
             }
         }
+        // Always visible beneath the terminal rows — the one affordance for
+        // opening a shell, now that the header carries no "+".
+        out.append(.action(key: "new-terminal", title: "New"))
         if !servers.devServers.isEmpty {
             out.append(.header("Servers"))
             out += servers.devServers.map {
                 .row(id: .server($0.id), title: $0.project ?? $0.command)
             }
         }
-        // No folders configured yet: the section leads with its own "Open
-        // Folder…" affordance; once one exists the action lives in the footer.
-        let taken = Set(terminals.agents.keys).union(terminals.tabs.keys)
-        let idlePinned = store.pinnedProjects.filter { !taken.contains($0) }
-        if store.projectsDirs.isEmpty, store.pinnedProjects.isEmpty {
-            out.append(.header("Projects"))
-            out.append(.action(key: "open-folder", title: "Open Folder…"))
-        } else if !store.projectGroups.isEmpty || !idlePinned.isEmpty {
-            out.append(.header("Projects"))
-            // Pinned single projects: their own rows, never expanded.
-            out += idlePinned.map { .row(id: .project($0), title: name(of: $0)) }
-            for group in store.projectGroups {
-                out.append(.folder(path: group.path, name: group.name))
-                if !collapsedFolders.contains(group.path) {
-                    out += idlePaths(in: group).map {
-                        .row(id: .project($0), title: name(of: $0))
-                    }
+        // Projects is the stable library: rows never leave it when a project
+        // runs — a running one turns its glyph green and is *mirrored* under
+        // Terminals, so nothing jumps sections and spatial memory holds.
+        // Pinned single projects get their own rows; a folder of projects is
+        // a collapsible parent. "Add" browses for either.
+        out.append(.header("Projects"))
+        out += store.pinnedProjects.map { .library(path: $0, title: name(of: $0)) }
+        for group in store.projectGroups {
+            out.append(.folder(path: group.path, name: group.name))
+            if !collapsedFolders.contains(group.path) {
+                out += libraryPaths(in: group).map {
+                    .library(path: $0, title: name(of: $0))
                 }
             }
         }
+        out.append(.action(key: "open-folder", title: "Add"))
         return out
     }
 
@@ -787,14 +1088,19 @@ struct MainWindowView: View {
     private func height(for entry: SidebarEntry) -> CGFloat {
         switch entry {
         case .header:
-            // Tall enough for the Terminals header's 24pt "+" chip, with the
-            // extra space above acting as the gap between sections.
-            return 32
-        case .folder, .action:
+            // The space above the bottom-aligned label IS the gap between
+            // sections — kept tight by request.
+            return 18
+        case .folder:
             return 26
+        case let .action(key, _):
+            // "New" stands in for the first terminal row — same height as one
+            // (32pt), so the sections below don't jump when it's swapped out.
+            return key == "new-terminal" ? 32 : 26
+        case .library:
+            return 28
         case let .row(id, _):
             if case .server = id { return 42 }
-            if case .shell = id { return 28 }
             if case let .project(path) = id, !terminals.hasPane(for: path) { return 28 }
             return 32
         }
@@ -811,33 +1117,6 @@ struct MainWindowView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.heading)
                 Spacer(minLength: 0)
-                // New-terminal menu: a split beside the current terminal, or
-                // a fresh shell that belongs to no project (opens in `~`).
-                // Hidden while no terminal is open — the section shows a
-                // spelled-out "New Terminal" row instead.
-                if title == "Active", !terminalPaths.isEmpty {
-                    Menu {
-                        // A second shell in the selected terminal's directory
-                        // — its own nested row under that terminal.
-                        if let path = selection?.projectPath, terminals.hasPane(for: path) {
-                            Button("New shell in \(name(of: path))") {
-                                if let tab = terminals.newTab(in: path) {
-                                    select(.shell(path: path, tab: tab.id))
-                                }
-                            }
-                        }
-                        Button("New shell in home folder") {
-                            select(.project(NSHomeDirectory()))
-                        }
-                    } label: {
-                        HeaderPlusLabel()
-                    }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("New terminal")
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             .padding(.leading, 14)
@@ -845,19 +1124,21 @@ struct MainWindowView: View {
             .padding(.bottom, 2)
 
         case let .action(key, title):
-            HStack(spacing: 8) {
-                Image(systemName: key == "open-folder" ? "folder.badge.plus" : "plus")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 16, height: 16)
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+            if key == "open-folder" {
+                // Two ways in: a local folder, or a fresh clone.
+                Menu {
+                    Button("Add Folder…") { addFolder() }
+                    Button("Clone Repository…") { cloneRepository() }
+                } label: {
+                    actionRowLabel(title: title, hovered: hovered)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+            } else {
+                actionRowLabel(title: title, hovered: hovered)
+                    .onTapGesture { runAction(key) }
             }
-            .modifier(RowChrome(hovered: hovered, selected: false))
-            .onTapGesture { runAction(key) }
 
         case let .folder(path, folderName):
             let collapsed = collapsedFolders.contains(path)
@@ -879,6 +1160,17 @@ struct MainWindowView: View {
             .modifier(RowChrome(hovered: hovered, selected: false))
             .onTapGesture { toggleFolder(path) }
 
+        case let .library(path, title):
+            // The library never carries the selection highlight — that lives
+            // on the project's Terminals mirror. Git state rides as subtext.
+            SidebarRow(
+                name: title,
+                diff: libraryDiff(path),
+                isProject: ProjectKindCache.isProject(path),
+                live: terminals.hasPane(for: path),
+                hovered: hovered
+            )
+
         case let .row(id, title):
             switch id {
             case let .project(path):
@@ -890,25 +1182,46 @@ struct MainWindowView: View {
                     isProject: !active && ProjectKindCache.isProject(path),
                     gitStatus: git.rowStatuses[path] ?? .none,
                     hovered: hovered,
-                    selected: selection == id
+                    selected: selection == id,
+                    onClose: { closeTerminal(path) }
                 )
             case let .shell(path, tabID):
                 SidebarRow(
                     name: title,
                     agent: shellAgent(path: path, tab: tabID),
                     hasTerminal: true,
-                    nested: true,
+                    gitStatus: git.rowStatuses[path] ?? .none,
                     hovered: hovered,
-                    selected: selection == id
+                    selected: selection == id,
+                    onClose: { terminals.closeTab(path: path, tabID: tabID) }
                 )
             case let .server(sid):
                 if let server = servers.devServers.first(where: { $0.id == sid }) {
                     ServerRow(
                         server: server,
-                        hovered: hovered,
-                        selected: selection == id,
+                        health: servers.health[sid],
+                        hovered: hovered || serverPopover == sid,
+                        selected: false,
                         onOpen: { Actions.openExternal(server.url) }
                     )
+                    .contentShape(Rectangle())
+                    .onTapGesture { serverPopover = sid }
+                    .popover(
+                        isPresented: Binding(
+                            get: { serverPopover == sid },
+                            set: { if !$0 { serverPopover = nil } }
+                        ),
+                        arrowEdge: .trailing
+                    ) {
+                        ServerPopover(
+                            server: server,
+                            health: servers.health[sid],
+                            onOpenTerminal: {
+                                serverPopover = nil
+                                if let cwd = server.cwd { select(.project(cwd)) }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -919,21 +1232,20 @@ struct MainWindowView: View {
     private func contentKey(for entry: SidebarEntry, hovered: Bool) -> String {
         switch entry {
         case let .header(title):
-            // The Terminals header's "+" menu offers a shell in the selected
-            // terminal's directory, so its content depends on the selection —
-            // without this in the key the header is never re-hosted and the
-            // menu keeps the selection it captured at launch (nil).
-            if title == "Active" {
-                let sel = selection?.projectPath
-                    .flatMap { terminals.hasPane(for: $0) ? $0 : nil } ?? "-"
-                return "h:\(title)|\(sel)|\(terminalPaths.isEmpty ? "-" : "t")"
-            }
             return "h:\(title)"
         case let .action(key, _):
             return "a:\(key)|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
             let collapsed = collapsedFolders.contains(path)
             return "f:\(folderName)|\(collapsed ? "c" : "-")|\(hovered ? "h" : "-")"
+        case let .library(path, title):
+            let diff = libraryDiff(path).map { "+\($0.added)-\($0.removed)" } ?? "-"
+            return [
+                "lib", title, diff,
+                terminals.hasPane(for: path) ? "t" : "-",
+                ProjectKindCache.isProject(path) ? "p" : "-",
+                hovered ? "h" : "-",
+            ].joined(separator: "|")
         case let .row(id, title):
             let selected = selection == id
             switch id {
@@ -949,10 +1261,15 @@ struct MainWindowView: View {
                 ].joined(separator: "|")
             case let .shell(path, tab):
                 let agent = shellAgent(path: path, tab: tab)?.label ?? "-"
-                return "sh:\(title)|\(tab)|\(agent)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
+                let status = String(describing: git.rowStatuses[path] ?? .none)
+                return "sh:\(title)|\(tab)|\(agent)|\(status)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
             case let .server(sid):
                 let port = servers.devServers.first { $0.id == sid }.map { String($0.port) } ?? "-"
-                return "\(title)|\(port)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
+                let health = servers.health[sid].map { String(describing: $0) } ?? "-"
+                // While the popover is up, hover changes must NOT re-host the
+                // row — that would tear down the view anchoring the popover.
+                let state = serverPopover == sid ? "P" : (hovered ? "h" : "-")
+                return "\(title)|\(port)|\(health)|\(state)"
             }
         }
     }
@@ -972,10 +1289,35 @@ struct MainWindowView: View {
             })
             return menu
         }
+        // The "New" row: click opens a home shell; the menu carries what the
+        // old header "+" offered — a second shell in the selected project.
+        if case .action(key: "new-terminal", _) = entry {
+            let menu = NSMenu()
+            if let path = selection?.projectPath, terminals.hasPane(for: path) {
+                menu.addItem(ClosureMenuItem("New shell in \(name(of: path))") {
+                    if let tab = terminals.newTab(in: path) {
+                        select(.shell(path: path, tab: tab.id))
+                    }
+                })
+            }
+            menu.addItem(ClosureMenuItem("New shell in home folder") {
+                select(.project(NSHomeDirectory()))
+            })
+            return menu
+        }
         guard let id = entry.selection else { return nil }
         let menu = NSMenu()
         switch id {
         case let .shell(path, tabID):
+            menu.addItem(ClosureMenuItem("New Terminal Here") {
+                if let tab = terminals.newTab(in: path) {
+                    select(.shell(path: path, tab: tab.id))
+                }
+            })
+            menu.addItem(ClosureMenuItem("Rename…") {
+                renameTerminal(path: path, tabID: tabID)
+            })
+            menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Close Terminal") {
                 terminals.closeTab(path: path, tabID: tabID)
             })
@@ -986,6 +1328,16 @@ struct MainWindowView: View {
         case let .project(path):
             if terminals.hasPane(for: path) {
                 menu.addItem(ClosureMenuItem("Start Claude") { terminals.start(.claude, in: path) })
+                menu.addItem(ClosureMenuItem("New Terminal Here") {
+                    if let tab = terminals.newTab(in: path) {
+                        select(.shell(path: path, tab: tab.id))
+                    }
+                })
+                menu.addItem(ClosureMenuItem("Rename…") {
+                    if let tabID = terminals.tabs[path]?.first?.id {
+                        renameTerminal(path: path, tabID: tabID)
+                    }
+                })
                 menu.addItem(.separator())
                 menu.addItem(ClosureMenuItem("Close Terminal") { closeTerminal(path) })
             } else {
@@ -1089,15 +1441,75 @@ struct MainWindowView: View {
 /// The design's header buttons: 30pt tall, #F3F3F3 fill, #E0E0E0 hairline,
 /// 6pt radius. Also used by the empty state's quick-open buttons.
 struct HeaderButtonChrome: ViewModifier {
+    /// Accent fill + 2px inside border while the button's menu or panel is
+    /// open.
+    var active = false
+
     func body(content: Content) -> some View {
         content
             .frame(height: 30)
-            .background(Theme.buttonFill, in: RoundedRectangle(cornerRadius: 6))
+            .background(
+                active ? Theme.buttonActiveFill : Theme.buttonFill,
+                in: RoundedRectangle(cornerRadius: 6)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+                    .strokeBorder(
+                        active ? Theme.buttonActiveStroke : Theme.buttonStroke,
+                        lineWidth: active ? 2 : 1
+                    )
             )
     }
+}
+
+/// A header control that pops an `NSMenu` and reads as active while it's
+/// open. SwiftUI's `Menu` exposes no open state, so the menu is popped
+/// manually — `popUp` runs the tracking loop and returns on dismissal,
+/// which is exactly the active window.
+struct HeaderMenuButton<Label: View>: View {
+    let makeMenu: () -> NSMenu
+    @ViewBuilder let label: () -> Label
+    @State private var box = MenuAnchorBox()
+    @State private var isOpen = false
+
+    var body: some View {
+        Button {
+            guard !isOpen, let anchor = box.view else { return }
+            isOpen = true
+            // Next tick so the active chrome renders a frame before the
+            // menu's tracking loop takes over.
+            DispatchQueue.main.async {
+                makeMenu().popUp(
+                    positioning: nil,
+                    at: NSPoint(x: 0, y: -6),
+                    in: anchor
+                )
+                isOpen = false
+            }
+        } label: {
+            label()
+        }
+        .buttonStyle(.plain)
+        .modifier(HeaderButtonChrome(active: isOpen))
+        .background(MenuAnchorReader(box: box))
+    }
+}
+
+/// Weak handle to the AppKit view a popped menu anchors to.
+final class MenuAnchorBox {
+    weak var view: NSView?
+}
+
+struct MenuAnchorReader: NSViewRepresentable {
+    let box: MenuAnchorBox
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        box.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) { box.view = view }
 }
 
 // MARK: - Rows
@@ -1131,6 +1543,8 @@ private struct RowChrome: ViewModifier {
 
 struct SidebarRow: View {
     let name: String
+    /// Uncommitted line counts under the name (library rows): +added −removed.
+    var diff: (added: Int, removed: Int)? = nil
     var agent: CodingAgent? = nil
     var hasTerminal: Bool = false
     /// An extra terminal tab nested under its project's row: indented, no
@@ -1139,9 +1553,15 @@ struct SidebarRow: View {
     /// The row's directory is itself a project (has `.git`, a manifest, …)
     /// rather than a plain folder — idle project rows get a project glyph.
     var isProject: Bool = false
+    /// A library row whose project is running: trailing live dot, mirroring
+    /// its Active row without moving anything.
+    var live: Bool = false
     var gitStatus: GitRowStatus = .none
     var hovered: Bool = false
     var selected: Bool = false
+    /// Close action for a live terminal row — while hovered, an ✕ takes the
+    /// terminal icon's place.
+    var onClose: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1153,22 +1573,47 @@ struct SidebarRow: View {
                     .fill(gitColor)
                     .frame(width: 6, height: 6)
                     .help(gitHelp)
-            } else if !hasTerminal, isProject {
+            } else if !hasTerminal, isProject || live {
+                // Always quiet gray — the live signal is the mirror row up
+                // in Terminals, not this glyph.
                 Image(systemName: "shippingbox")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 16, height: 16)
+                    .help(live ? "Terminal open — see Terminals" : "")
             }
             Text(name)
                 .font(.system(size: nested ? 12 : 13))
                 .foregroundStyle(nested ? Theme.textSecondary : Theme.text)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if let diff {
+                HStack(spacing: 3) {
+                    Text("+\(diff.added)")
+                        .foregroundStyle(Color(hex: 0x16A34A))
+                    Text("−\(diff.removed)")
+                        .foregroundStyle(Theme.closeRed)
+                }
+                .font(.system(size: 9, weight: .medium))
+                .help("Uncommitted line changes")
+            }
             if hasTerminal {
-                TerminalRowIcon(agent: agent, size: nested ? 13 : 16)
+                if hovered, let onClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: nested ? 13 : 16, height: nested ? 13 : 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close terminal")
+                } else {
+                    TerminalRowIcon(agent: agent, size: nested ? 13 : 16)
+                }
             }
         }
-        .padding(.leading, nested ? 17 : (hasTerminal || isProject ? 0 : 17))
+        .padding(.leading, nested ? 17 : (hasTerminal || isProject || live ? 0 : 17))
         .modifier(RowChrome(hovered: hovered, selected: selected))
     }
 
@@ -1189,18 +1634,90 @@ struct SidebarRow: View {
     }
 }
 
+/// The server detail, as a popover off its sidebar row — replaces the old
+/// full detail page.
+struct ServerPopover: View {
+    let server: DevServer
+    var health: ServerHealth? = nil
+    var onOpenTerminal: () -> Void = {}
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ServerGlyph(color: healthColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(server.project ?? server.command)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(healthLabel)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Button("localhost:" + String(server.port)) {
+                    Actions.openExternal(server.url)
+                }
+                .buttonStyle(.link)
+                .font(.system(size: 11))
+                if let cwd = server.cwd {
+                    Text(cwd)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textPath)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Text("\(server.command) · pid \(server.pid)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            HStack(spacing: 8) {
+                Button("Open in Browser") { Actions.openExternal(server.url) }
+                if server.cwd != nil {
+                    Button("Open Terminal") { onOpenTerminal() }
+                }
+                Button("Stop") { Actions.killPid(server.pid) }
+            }
+            .font(.system(size: 11))
+            .controlSize(.small)
+        }
+        .padding(14)
+        .frame(width: 260, alignment: .leading)
+    }
+
+    private var healthColor: Color {
+        switch health {
+        case .healthy: Theme.dotActive
+        case .degraded: Color(hex: 0xD97706)
+        case .down: Theme.closeRed
+        case nil: Theme.textSecondary
+        }
+    }
+
+    private var healthLabel: String {
+        switch health {
+        case .healthy: "Responding"
+        case .degraded: "Slow or responding with server errors"
+        case .down: "Not responding"
+        case nil: "Checking…"
+        }
+    }
+}
+
 struct ServerRow: View {
     let server: DevServer
+    /// Last probe verdict; nil until the first probe lands.
+    var health: ServerHealth? = nil
     var hovered: Bool = false
     var selected: Bool = false
     var onOpen: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: 16, height: 16)
+            ServerGlyph(color: healthColor)
+                .help(healthHelp)
             VStack(alignment: .leading, spacing: 1) {
                 Text(server.project ?? server.command)
                     .font(.system(size: 13, weight: .medium))
@@ -1224,18 +1741,36 @@ struct ServerRow: View {
         .padding(.vertical, 6)
         .modifier(RowChrome(hovered: hovered, selected: selected))
     }
+
+    private var healthColor: Color {
+        switch health {
+        case .healthy: Theme.dotActive
+        case .degraded: Color(hex: 0xD97706)
+        case .down: Theme.closeRed
+        case nil: Theme.textSecondary
+        }
+    }
+
+    private var healthHelp: String {
+        switch health {
+        case .healthy: "Responding"
+        case .degraded: "Slow or responding with server errors"
+        case .down: "Not responding"
+        case nil: "Checking…"
+        }
+    }
 }
 
-/// The Terminals header's "+": quiet glyph that gets the row-hover fill
-/// under the pointer.
-private struct HeaderPlusLabel: View {
+/// The footer gear: quiet glyph that gets the row-hover fill under the
+/// pointer.
+private struct GearLabel: View {
     @State private var hovered = false
 
     var body: some View {
-        Image(systemName: "plus")
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Theme.heading)
-            .frame(width: 20, height: 20)
+        Image(systemName: "gearshape")
+            .font(.system(size: 12))
+            .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            .frame(width: 22, height: 22)
             .background(
                 RoundedRectangle(cornerRadius: 5)
                     .fill(hovered ? Theme.rowHovered : .clear)

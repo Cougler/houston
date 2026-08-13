@@ -31,6 +31,8 @@ final class TerminalTab: Identifiable {
     let root: NSView
     /// Panes living inside this tab (grows via ⌘D splits).
     fileprivate(set) var panes: [TerminalPane]
+    /// User-given sidebar name; nil falls back to the directory-based title.
+    fileprivate(set) var customName: String?
 
     fileprivate init(projectPath: String, root: NSView, panes: [TerminalPane]) {
         self.projectPath = projectPath
@@ -46,7 +48,30 @@ final class TerminalSessionManager: NSObject, ObservableObject {
 
     /// Every project's terminal tabs, in creation order. A project with any
     /// tabs has a shell; each tab owns its own on-screen view tree.
-    @Published private(set) var tabs: [String: [TerminalTab]] = [:]
+    @Published private(set) var tabs: [String: [TerminalTab]] = [:] {
+        didSet { updateNapActivity() }
+    }
+
+    /// Held while any terminal exists. App Nap throttles a bundled app that
+    /// hasn't seen input for a while, freezing the visible terminal's
+    /// rendering until the next click (the shell-spawned debug binary was
+    /// never napped, which is why this only surfaced in the packaged build).
+    /// `.userInitiatedAllowingIdleSystemSleep` defeats nap without keeping
+    /// the whole Mac awake.
+    private var napActivity: NSObjectProtocol?
+
+    private func updateNapActivity() {
+        let hasPanes = tabs.contains { !$0.value.isEmpty }
+        if hasPanes, napActivity == nil {
+            napActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Hosting terminal sessions"
+            )
+        } else if !hasPanes, let activity = napActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            napActivity = nil
+        }
+    }
 
     /// Which coding agent is running in each project's panes, by path.
     /// Refreshed by polling the process tree, so it reflects
@@ -114,12 +139,14 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         return c
     }
 
-    /// Houston's design-matched terminal: white/#111 over the alabaster ANSI
-    /// palette in light, #1E1E1E/#E8E8E8 over afterglow in dark.
+    /// Houston's design-matched terminal: the app's chrome background/#111
+    /// over the alabaster ANSI palette in light, #1E1E1E/#E8E8E8 over
+    /// afterglow in dark. Light background matches `Theme.background` so the
+    /// terminal doesn't read as a separate panel.
     private static var designTheme: TerminalTheme {
         TerminalTheme(
             light: TerminalConfiguration.alabaster
-                .background("FFFFFF")
+                .background("EBEBEB")
                 .foreground("111111")
                 .cursorColor("111111"),
             dark: TerminalConfiguration.afterglow
@@ -177,10 +204,20 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         }
         let pane = TerminalPane(projectPath: projectPath, controller: controller)
         pane.view.contextMenu = terminalContextMenu(path: projectPath)
+        hookExit(pane)
         let root = NSView()
         fill(root, with: pane.view)
         revealAfterBoot(pane)
         return TerminalTab(projectPath: projectPath, root: root, panes: [pane])
+    }
+
+    /// The shell exiting (ctrl-D, `exit`) closes its pane — ghostty's
+    /// close-surface callback, routed through the pane's delegate.
+    private func hookExit(_ pane: TerminalPane) {
+        pane.onShellExit = { [weak self, weak pane] in
+            guard let pane else { return }
+            self?.closePane(pane)
+        }
     }
 
     func hasPane(for projectPath: String) -> Bool {
@@ -193,6 +230,15 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         guard let binary = agent.binary else { return }
         if tabs[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
         actionPane(in: projectPath)?.send(binary + "\n")
+    }
+
+    /// Renames a terminal's sidebar row; nil or empty restores the default.
+    /// `TerminalTab` is a class, so republishing needs an explicit nudge.
+    func renameTab(path: String, tabID: UUID, to name: String?) {
+        guard let tab = tabs[path]?.first(where: { $0.id == tabID }) else { return }
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        tab.customName = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        objectWillChange.send()
     }
 
     /// Writes into the project's focused pane (used by the skills panel).
@@ -212,6 +258,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
 
         let newPane = TerminalPane(projectPath: path, controller: controller)
         newPane.view.contextMenu = terminalContextMenu(path: path)
+        hookExit(newPane)
         tab.panes.append(newPane)
 
         let targetView = target.view
@@ -237,17 +284,27 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         }
     }
 
-    /// Closes the focused split within its tab, unwrapping its `NSSplitView`
-    /// when only one cell remains. Closing a tab's last pane closes the tab;
-    /// closing the project's last tab closes its shell entirely.
+    /// Closes the focused split within its tab — see `closePane(_:)`.
     func closeFocusedSplit(path: String? = nil) {
         guard let path = path ?? activeProjectPath,
-              let tab = actionTab(in: path) else { return }
+              let target = actionPane(in: path) else { return }
+        closePane(target)
+    }
+
+    /// Closes one specific pane wherever it lives (⇧⌘W on it, or its shell
+    /// exiting), unwrapping its `NSSplitView` when only one cell remains.
+    /// A tab's last pane closing closes the tab; the project's last tab
+    /// closing ends its shell entirely.
+    func closePane(_ target: TerminalPane) {
+        let path = target.projectPath
+        guard let list = tabs[path],
+              let tab = list.first(where: { candidate in
+                  candidate.panes.contains { $0 === target }
+              }) else { return }
         guard tab.panes.count > 1 else {
             closeTab(path: path, tabID: tab.id)
             return
         }
-        guard let target = actionPane(in: path) else { return }
 
         let targetView = target.view
         if let split = targetView.superview as? NSSplitView {
@@ -419,15 +476,54 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         guard installedAgents.isEmpty else { return }
         Task.detached(priority: .utility) {
             let found = AgentDetect.installedAgents()
-            await MainActor.run { self.installedAgents = found }
+            let needsSudo = Self.npmGlobalNeedsSudo()
+            await MainActor.run {
+                self.installedAgents = found
+                self.npmNeedsSudo = needsSudo
+            }
         }
+    }
+
+    /// The npm global prefix is root-owned (stock /usr/local) — installs
+    /// there need sudo. On Homebrew/nvm setups the prefix is user-writable
+    /// and sudo would just booby-trap `~/.npm` with root-owned cache files.
+    private(set) var npmNeedsSudo = false
+
+    private nonisolated static func npmGlobalNeedsSudo() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Login shell so npm resolves through the user's real PATH.
+        process.arguments = ["-lc", "npm prefix -g"]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return false }
+        process.waitUntilExit()
+        guard let data = try? out.fileHandleForReading.readToEnd(),
+              let prefix = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !prefix.isEmpty else { return false }
+        let fm = FileManager.default
+        // Global installs write into <prefix>/lib/node_modules.
+        let modules = prefix + "/lib/node_modules"
+        let target = fm.fileExists(atPath: modules) ? modules : prefix
+        return !fm.isWritableFile(atPath: target)
+    }
+
+    /// The agent's install command, with `sudo` prepended for npm installs
+    /// when the global prefix isn't user-writable. Shown verbatim in the
+    /// confirm dialog, so the sudo is never a surprise.
+    func installCommand(for agent: CodingAgent) -> String? {
+        guard let command = agent.installCommand else { return nil }
+        guard npmNeedsSudo, command.hasPrefix("npm ") else { return command }
+        return "sudo " + command
     }
 
     /// Types the agent's install command into the project's focused pane —
     /// in the open, where the user watches it run — then re-probes until the
     /// binary appears so the dropdown unmarks it.
     func install(_ agent: CodingAgent, in projectPath: String) {
-        guard let command = agent.installCommand else { return }
+        guard let command = installCommand(for: agent) else { return }
         if tabs[projectPath]?.isEmpty ?? true { pane(for: projectPath) }
         actionPane(in: projectPath)?.send(command + "\n")
         Task.detached(priority: .utility) {

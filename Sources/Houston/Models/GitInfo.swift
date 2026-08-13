@@ -4,10 +4,16 @@ import Foundation
 enum GitRowStatus: Equatable {
     /// Not a git repository.
     case none
-    /// Uncommitted changes in the working tree.
-    case dirty
+    /// Uncommitted changes in the working tree, with line counts vs HEAD
+    /// (untracked files not included).
+    case dirty(added: Int, removed: Int)
     /// Working tree clean.
     case clean
+
+    var isDirty: Bool {
+        if case .dirty = self { return true }
+        return false
+    }
 }
 
 /// One uncommitted change in a working tree.
@@ -80,6 +86,8 @@ struct GitInfo: Equatable {
     let isRepo: Bool
     /// Branch name, "detached · <sha>", or "no commits yet".
     let branchLabel: String
+    /// Local branch names, for the panel's switcher.
+    let branches: [String]
     let changes: [GitChange]
     let hasUpstream: Bool
     let ahead: Int
@@ -89,8 +97,8 @@ struct GitInfo: Equatable {
     let remoteURL: String?
 
     static let notARepo = GitInfo(
-        isRepo: false, branchLabel: "", changes: [], hasUpstream: false,
-        ahead: 0, behind: 0, commits: [], remoteURL: nil
+        isRepo: false, branchLabel: "", branches: [], changes: [],
+        hasUpstream: false, ahead: 0, behind: 0, commits: [], remoteURL: nil
     )
 
     /// The line under the branch name — only what the section labels don't

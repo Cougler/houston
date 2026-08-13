@@ -4,6 +4,8 @@ import Foundation
 struct Skill: Identifiable, Equatable {
     let name: String
     let description: String
+    /// The skill's directory, for Reveal in Finder.
+    let path: String
     var id: String { name }
 }
 
@@ -22,9 +24,10 @@ enum SkillsCatalog {
         for root in roots {
             guard let entries = try? fm.contentsOfDirectory(atPath: root) else { continue }
             for entry in entries where !entry.hasPrefix(".") {
-                let md = "\(root)/\(entry)/SKILL.md"
+                let dir = "\(root)/\(entry)"
+                let md = dir + "/SKILL.md"
                 guard fm.fileExists(atPath: md) else { continue }
-                byName[entry] = parse(markdownAt: md, directoryName: entry)
+                byName[entry] = parse(markdownAt: md, directoryName: entry, directory: dir)
             }
         }
         return byName.values.sorted {
@@ -35,9 +38,13 @@ enum SkillsCatalog {
     /// Reads `name:` and `description:` from the SKILL.md frontmatter. The
     /// directory name is the invocation name, so it's the fallback (and what
     /// `/name` must match); the frontmatter description is display-only.
-    private static func parse(markdownAt path: String, directoryName: String) -> Skill {
+    private static func parse(
+        markdownAt path: String,
+        directoryName: String,
+        directory: String
+    ) -> Skill {
         guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
-            return Skill(name: directoryName, description: "")
+            return Skill(name: directoryName, description: "", path: directory)
         }
         var description = ""
         let lines = raw.components(separatedBy: "\n")
@@ -48,7 +55,7 @@ enum SkillsCatalog {
                 if let value = scalar("description", in: trimmed) { description = value }
             }
         }
-        return Skill(name: directoryName, description: description)
+        return Skill(name: directoryName, description: description, path: directory)
     }
 
     /// `key: value` → value with surrounding quotes stripped; nil when the

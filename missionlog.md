@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-08-12 — UI polish pass, mission controls, packaged skills, first DMG
+
+Houston now packages as a universal, ad-hoc-signed DMG (`scripts/package.sh` → `dist/Houston.dmg`) and the invisible-window bug it exposed is fixed. The day's polish landed everywhere: warm light theme with 10%-black borders and a matching terminal background, a mirror-not-move sidebar (Terminals / Servers / Projects with library rows that never jump sections), header mission controls (rocket Start Mission gated on a mission log; a Mission menu whose Handoff does a one-click log → /clear → /handoff context reset via the new bundled log-mission skill), an evenly-distributed responsive status bar with peak hours, a skills sheet with detail pages, and health-colored server icons. Next: install the DMG and live in the packaged build.
+
+**Done this session:**
+- Light-mode theme: #EBEBEB background, 10%-black borders + orbit rings, empty-state sky one step off the chrome each way, Houston terminal theme background matched to the chrome
+- Sidebar model: mirror-not-move (`.library` rows with green live glyph, project rows never leave Projects), always-visible "+ New" (32pt, right-click for project shell) and "+ Add" rows, gear bottom-left, ✕-on-hover closes terminal rows, empty-state guidance text
+- Mission lifecycle: Start Mission / Mission menu inline with header buttons; new bundled `log-mission` skill; `HandoffCoordinator` sequences log → mtime-watch → /clear → /handoff with a 3-min timeout; all four mission skills packaged in the app and installed to ~/.claude/skills when missing
+- Status bar: mission buttons and chart toggle removed, groups (model+context, meters) spread evenly, compact tier under 620pt (% only, peak label only, details in tooltips), per-item toggles + Hide/Disable persisted in settings, mirrored in a new menu-bar Settings menu
+- Skills sheet: "Comes with Houston" section, rocket run buttons with tinted-pill hover, pushed detail pages (curated copy for mission skills, Run/Type/Reveal actions)
+- Server rows: servers.svg drawn as a tintable Shape, colored by a gentle HEAD probe (green/orange/red) — probe hits `localhost` not 127.0.0.1 (IPv6-only binds read as down)
+- Packaging: `scripts/package.sh` (universal build, resource bundle, icns from AppIcon.png, ad-hoc sign, DMG); fixed `contentViewController` collapsing the window to 1×1 in fresh-prefs launches
+
+**Up next:**
+- Install dist/Houston.dmg to /Applications and live in the packaged build
+- Hand-verify the one-click Handoff sequence end-to-end in a real session
+- Get a Developer ID for real signing/notarization when distribution matters
+
+**Handoff:**
+- The DMG is ad-hoc signed (no Developer ID on this machine) — Gatekeeper rejects it if downloaded; local installs fine, other Macs need right-click → Open.
+- `dist/` is untracked build output — gitignore it before /push (scripts/ and Resources/skills/ SHOULD be committed).
+- The packaged app was left running deliberately (user testing); the debug binary was killed. Its prefs domain is com.cougler.houston — a 1×1 frame saved by the broken first build was cleared here, and the code now refuses degenerate frames anyway.
+- Hand-unverified: the Handoff sequence (mtime watch + /clear timing — settle is 3s, may clip a turn whose log write lands early), menu-bar Settings actions, per-item status toggles, compact bar under 620pt, server health colors against a 5xx, skills detail pages, skill install on a fresh machine.
+- Peak hours is a local-clock port of the user's old statusline script (9:00–18:00) — the Claude statusline payload carries no peak data (verified in docs), so don't go looking for it there.
+- Houston's feed script is still the user's global Claude statusline; other terminals show a blank status row by design (backup restorable from gear menu).
+
+---
+
 ## 2026-08-12 — Native Claude status bar, terminal tabs, MCP controls, solar-system empty state
 
 Houston now has a native status bar for Claude sessions — model picker (drives `/model`), context bar with the model's true window size, account rate-limit meters, and an MCP menu with health dots and one-click OAuth — all fed by a statusline script that also blanks Claude's in-terminal bar (with consent and a restorable backup). Projects grew nested terminal tabs in the sidebar, Add Folder now distinguishes projects from folders-of-projects, and the empty state is an animated solar system. Next: live with the status bar and MCP auth day-to-day and see what breaks.

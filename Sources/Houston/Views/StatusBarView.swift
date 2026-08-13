@@ -1,11 +1,16 @@
 import SwiftUI
 
-/// The native status strip under the terminal: the focused claude session's
-/// model (a menu — picking one runs `/model` in the session), context usage,
-/// account rate-limit meters, lines changed and session cost, fed by
+/// The native status strip under the terminal, shown only while an agent
+/// session runs. Left-justified status cluster — model (a menu — picking one
+/// runs `/model` in the session), context, MCP health, peak/off-peak hours,
+/// account rate-limit meters. The chart toggle collapses the cluster down to
+/// the model. Mission controls live up in the header. Fed by
 /// `StatusLineFeed` instead of an in-terminal status line.
 struct StatusBarView: View {
-    let snapshot: StatusLineSnapshot
+    /// Nil until a claude session has produced a feed payload.
+    let snapshot: StatusLineSnapshot?
+    /// Collapse everything but the model (and the mission buttons).
+    @Binding var collapsed: Bool
     /// MCP health for this project, when a check has run.
     let mcp: MCPStatusStore.Status?
     /// Server names whose OAuth flow is currently open in the browser.
@@ -18,6 +23,14 @@ struct StatusBarView: View {
     /// Run `claude mcp login/logout <name>` for a server.
     let onAuthenticateMCP: (String) -> Void
     let onLogoutMCP: (String) -> Void
+    /// Item keys the settings menu has switched off ("model", "context",
+    /// "mcp", "peak", "limits").
+    var hiddenItems: Set<String> = []
+    /// Without a session the bar keeps its place but shows nothing — the
+    /// layout never jumps when a session starts.
+    var sessionRunning = false
+    /// The context meter's account-limits popover.
+    @State private var showLimits = false
 
     /// Menu label → `/model` argument.
     private static let models: [(label: String, arg: String)] = [
@@ -29,91 +42,147 @@ struct StatusBarView: View {
         ("Haiku 4.5", "haiku"),
     ]
 
+    private func shows(_ key: String) -> Bool { !hiddenItems.contains(key) }
+
     var body: some View {
-        HStack(spacing: 14) {
-            Menu {
-                ForEach(Self.models, id: \.arg) { model in
-                    Button(model.label) { onSelectModel(model.arg) }
+        GeometryReader { geo in
+            // Tight windows drop the detail text (tokens, countdown); the
+            // tooltips keep it one hover away.
+            let compact = geo.size.width < 620
+            HStack(spacing: 0) {
+                if !sessionRunning {
+                    Spacer(minLength: 0)
+                } else if collapsed {
+                    if shows("model"), let snapshot {
+                        modelMenu(snapshot)
+                    }
+                    Spacer(minLength: 0)
+                } else {
+                    // Model + context travel as one group, as do the meters;
+                    // flexible gaps spread the groups across the window.
+                    if let snapshot, shows("model") || shows("context") {
+                        HStack(spacing: 14) {
+                            if shows("model") {
+                                modelMenu(snapshot)
+                            }
+                            if shows("context"), let fraction = snapshot.usedFraction {
+                                contextDropdown(fraction, compact: compact, meters: snapshot.meters)
+                            }
+                        }
+                    }
+                    if shows("mcp") {
+                        Spacer(minLength: 12)
+                        mcpMenu
+                    }
+                    if shows("peak") {
+                        Spacer(minLength: 12)
+                        PeakHoursPill(compact: compact)
+                    }
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(snapshot.modelName)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7, weight: .semibold))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .contentShape(Rectangle())
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Switch this session's model")
-
-            if let fraction = snapshot.usedFraction {
-                HStack(spacing: 6) {
-                    ContextBar(
-                        pct: fraction,
-                        color: Theme.Context.color(for: fraction),
-                        trackWidth: 72,
-                        trackHeight: 4
-                    )
-                    Text(contextLabel(fraction))
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .help("Context window used")
-            }
-
-            mcpMenu
-
-            Spacer(minLength: 8)
-
-            ForEach(snapshot.meters, id: \.key) { meter in
-                HStack(spacing: 5) {
-                    Text(meter.label)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                    ContextBar(
-                        pct: meter.pct / 100,
-                        color: Self.meterColor(meter.pct),
-                        trackWidth: 30,
-                        trackHeight: 4
-                    )
-                    Text("\(Int(meter.pct))%")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .help("\(meter.label) rate limit used")
-            }
-
-            if snapshot.linesAdded > 0 || snapshot.linesRemoved > 0 {
-                HStack(spacing: 4) {
-                    Text("+\(snapshot.linesAdded)")
-                        .foregroundStyle(Color(hex: 0x16A34A))
-                    Text("−\(snapshot.linesRemoved)")
-                        .foregroundStyle(Theme.closeRed)
-                }
-                .font(.system(size: 11, weight: .medium))
-                .help("Lines added and removed this session")
-            }
-
-            if let cost = snapshot.costUSD, cost > 0 {
-                Text(String(format: "$%.2f", cost))
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
-                    .help("Session cost")
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .lineLimit(1)
         .padding(.leading, 24)
-        .padding(.trailing, 16)
-        .frame(height: 28)
+        .padding(.trailing, 24)
+        .frame(height: 34)
         .background(Theme.background)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.borderHeader).frame(height: 1)
+        .padding(.bottom, 8)
+    }
+
+    private func modelMenu(_ snapshot: StatusLineSnapshot) -> some View {
+        Menu {
+            ForEach(Self.models, id: \.arg) { model in
+                Button(model.label) { onSelectModel(model.arg) }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(snapshot.modelName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Switch this session's model")
+    }
+
+    /// The context meter, doubling as the dropdown for the account limit
+    /// meters (Session / All models / per-model) — they live in this popover
+    /// now, not on the bar.
+    private func contextDropdown(
+        _ fraction: Double,
+        compact: Bool,
+        meters: [StatusLineSnapshot.Meter]
+    ) -> some View {
+        Button {
+            showLimits.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                ContextBar(
+                    pct: fraction,
+                    color: Theme.Context.color(for: fraction),
+                    trackWidth: compact ? 56 : 84,
+                    trackHeight: 5
+                )
+                Text(compact
+                    ? "\(Int((fraction * 100).rounded()))%"
+                    : contextLabel(fraction))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                if shows("limits") {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!shows("limits"))
+        .help(compact
+            ? "\(contextLabel(fraction)) of the context window used"
+            : "Context window used — click for account limits")
+        .popover(isPresented: $showLimits, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Account Limits")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.heading)
+                if meters.isEmpty {
+                    // Claude's payload carries rate_limits only once it has
+                    // them — a fresh session shows this until its next
+                    // response.
+                    Text("No limit data from this session yet.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                ForEach(meters, id: \.key) { meter in
+                    HStack(spacing: 8) {
+                        Text(meter.label)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.text)
+                            .frame(width: 80, alignment: .leading)
+                        ContextBar(
+                            pct: meter.pct / 100,
+                            color: Self.meterColor(meter.pct),
+                            trackWidth: 90,
+                            trackHeight: 4
+                        )
+                        Text("\(Int(meter.pct))%")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 32, alignment: .trailing)
+                    }
+                    .help("\(meter.label) rate limit used")
+                }
+            }
+            .padding(14)
         }
     }
 
@@ -144,9 +213,9 @@ struct StatusBarView: View {
             HStack(spacing: 5) {
                 Circle()
                     .fill(mcpDotColor)
-                    .frame(width: 6, height: 6)
+                    .frame(width: 7, height: 7)
                 Text("MCP")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
             }
             .contentShape(Rectangle())
@@ -219,7 +288,7 @@ struct StatusBarView: View {
 
     private func contextLabel(_ fraction: Double) -> String {
         let pct = "\(Int((fraction * 100).rounded()))%"
-        guard let used = snapshot.usedTokens, let window = snapshot.windowSize else {
+        guard let used = snapshot?.usedTokens, let window = snapshot?.windowSize else {
             return pct
         }
         return "\(formatTokens(used)) / \(formatTokens(window)) · \(pct)"
@@ -231,5 +300,50 @@ struct StatusBarView: View {
         if pct >= 85 { return .red }
         if pct >= 60 { return .orange }
         return .green
+    }
+}
+
+/// Peak / off-peak indicator, ported from the user's original statusline
+/// script: peak is 09:00–18:00 local, with a countdown to the transition.
+/// Wall-clock derived — the statusline payload carries no peak-hours data —
+/// so a timeline keeps the countdown honest while the bar sits idle.
+private struct PeakHoursPill: View {
+    var compact: Bool = false
+    private static let peakStart = 9
+    private static let peakEnd = 18
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { timeline in
+            let info = Self.info(at: timeline.date)
+            HStack(spacing: 4) {
+                Text(info.icon)
+                    .font(.system(size: 10))
+                Text(info.label)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                if !compact {
+                    Text("· \(info.message)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textPath)
+                }
+            }
+            .help(
+                (compact ? "\(info.message.capitalized) — p" : "P")
+                + "eak hours are \(Self.peakStart):00–\(Self.peakEnd):00 local"
+            )
+        }
+    }
+
+    private static func info(at date: Date) -> (icon: String, label: String, message: String) {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        let hour = parts.hour ?? 0
+        let minute = parts.minute ?? 0
+        if hour >= peakStart, hour < peakEnd {
+            let left = (peakEnd - hour) * 60 - minute
+            return ("☀️", "Peak", "off-peak in \(left / 60)h \(left % 60)m")
+        }
+        let hoursToPeak = hour < peakStart ? peakStart - hour : 24 - hour + peakStart
+        let left = hoursToPeak * 60 - minute
+        return ("🌙", "Off-peak", "peak in \(left / 60)h \(left % 60)m")
     }
 }

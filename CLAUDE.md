@@ -26,6 +26,10 @@ path were deleted; see *History* below so nobody re-adds them.
   `pkill -f '.build/debug/Houston'; swift build && nohup .build/debug/Houston > /tmp/houston.log 2>&1 &`
 - **Dev hook**: `HOUSTON_TEST_PANE=<path>` preselects a project at launch, so the
   pane path can be exercised without driving the sidebar by hand.
+- **Package**: `scripts/package.sh [version]` → `dist/Houston.dmg` — universal
+  release build, resource bundle into `Contents/Resources`, icns from
+  `AppIcon.png`, ad-hoc signed unless `SIGN_ID` is set. `dist/` is build
+  output, never committed.
 
 ## Layout
 ```
@@ -191,6 +195,31 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   mode change), **not** on a timer, and a *running* session keeps its cached
   command until its next real interaction — don't expect an installed feed to
   take over an idle session.
+- **Assigning `contentViewController` resizes the window to the view's fitting
+  size** — with `sizingOptions = []` that's ~1×1, an invisible window. The
+  debug build masked it for months: its frame autosave restored a saved size
+  over the collapse, and only the packaged app's fresh prefs domain exposed
+  it. `MainWindowController` re-asserts the default size after assignment and
+  refuses to restore a degenerate (<400×300) saved frame.
+- **Server health probes must hit `localhost`, not `127.0.0.1`.** Node dev
+  servers routinely bind only the IPv6 loopback (`::1`); probing the IPv4
+  address alone reported a healthy server as down (red icon). The hostname
+  resolves both families. Probes are HEAD requests at most every 30s per
+  server — a per-tick `GET /` keeps a Next.js dev server permanently
+  recompiling.
+- **The mission skills ship in the app.** `Resources/skills/{start-mission,
+  handoff,log-mission,end-mission}` are copied into `~/.claude/skills` at
+  launch when missing (`HoustonSkills.installMissing`), never overwriting the
+  user's copies. The header's Handoff is `HandoffCoordinator`: /log-mission →
+  watch `missionlog.md`'s mtime → /clear → /handoff — orchestrated by Houston
+  because a session cannot `/clear` itself.
+- **Peak hours is wall-clock, not API data.** The statusline payload carries
+  no peak-hours fields (checked against the docs); `PeakHoursPill` ports the
+  user's old statusline script: peak = 9:00–18:00 local.
+- **`SVGIcon` renders bundled SVGs as template images** (`NSImage` decodes SVG
+  natively on macOS 11+), so `foregroundStyle` tints them like SF Symbols —
+  used for the rocket; `servers.svg` was simple enough to draw as a `Shape`
+  (`ServerGlyph`) instead.
 - **Sessions die with Houston.** Accepted tradeoff — same as sessions dying with
   Ghostty today. To make them survive, launch `tmux new-session -A -s
   houston-<project>` instead of the bare shell; that's the whole change.

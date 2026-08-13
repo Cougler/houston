@@ -24,6 +24,11 @@ enum GitDetect {
             branchLabel = "detached · \(sha)"
         }
 
+        let branches = (git(["branch", "--format=%(refname:short)"], in: projectPath) ?? "")
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
         // "<behind>\t<ahead>" — empty output when there is no upstream.
         var hasUpstream = false
         var ahead = 0, behind = 0
@@ -64,6 +69,7 @@ enum GitDetect {
         return GitInfo(
             isRepo: true,
             branchLabel: branchLabel,
+            branches: branches,
             changes: changes,
             hasUpstream: hasUpstream,
             ahead: ahead,
@@ -79,7 +85,18 @@ enum GitDetect {
             return .none
         }
         let porcelain = git(["status", "--porcelain"], in: projectPath) ?? ""
-        return porcelain.isEmpty ? .clean : .dirty
+        guard !porcelain.isEmpty else { return .clean }
+        // Line counts vs HEAD (staged + unstaged; binary rows are "-\t-").
+        var added = 0, removed = 0
+        if let numstat = git(["diff", "--numstat", "HEAD"], in: projectPath) {
+            for line in numstat.split(separator: "\n") {
+                let parts = line.split(separator: "\t")
+                guard parts.count >= 2 else { continue }
+                added += Int(parts[0]) ?? 0
+                removed += Int(parts[1]) ?? 0
+            }
+        }
+        return .dirty(added: added, removed: removed)
     }
 
     /// Everything about one commit, for the panel's detail page.

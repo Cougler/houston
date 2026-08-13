@@ -28,7 +28,7 @@ enum DevServerDetect {
 
     // MARK: - public
 
-    static func snapshot(projectsDirs: [String]) -> [DevServer] {
+    static func snapshot(projectsDirs: [String], pinnedProjects: [String] = []) -> [DevServer] {
         let rows = listenSockets()
         var seen = Set<String>()
         var cwdCache: [Int32: String?] = [:]
@@ -54,7 +54,7 @@ enum DevServerDetect {
                     port: r.port,
                     command: r.command,
                     cwd: cwd,
-                    project: projectFromCwd(cwd, appsDirs: projectsDirs),
+                    project: projectFromCwd(cwd, appsDirs: projectsDirs, pinned: pinnedProjects),
                     url: "http://localhost:\(r.port)"
                 )
             )
@@ -113,9 +113,17 @@ enum DevServerDetect {
     }
 
     /// The project name is the first path component under whichever
-    /// configured folder contains `cwd`.
-    private static func projectFromCwd(_ cwd: String?, appsDirs: [String]) -> String? {
+    /// configured folder contains `cwd` — or the pinned project that
+    /// contains it. Pinned projects aren't inside any `projectsDirs`
+    /// folder, so without this a server in one labeled as its bare
+    /// process name ("node").
+    private static func projectFromCwd(
+        _ cwd: String?, appsDirs: [String], pinned: [String]
+    ) -> String? {
         guard let cwd, !cwd.isEmpty else { return nil }
+        for project in pinned where cwd == project || cwd.hasPrefix(project + "/") {
+            return (project as NSString).lastPathComponent
+        }
         for appsDir in appsDirs {
             let prefix = appsDir + "/"
             guard cwd.hasPrefix(prefix) else { continue }

@@ -79,8 +79,24 @@ struct EmptyStateView: View {
                 SolarSystem()
                     .reveal(appeared, delay: 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // What to do next, quietly under the animation.
+                VStack(spacing: 6) {
+                    Text("Houston is standing by")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text("Pick a project in the sidebar and start a mission or open a new terminal")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: 360)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 48)
+                .reveal(appeared, delay: 0.4)
             }
         }
+        .background(Theme.emptyStateBackground)
         .clipped()
         .onAppear {
             // Next runloop tick so the first frame renders hidden and the
@@ -96,7 +112,7 @@ struct EmptyStateView: View {
 /// orbit rings, each turning at its own (slow) period so the arrangement
 /// never repeats. Sizes and spacing are legibility-first, not to scale —
 /// a true-scale drawing is mostly empty space and four invisible dots.
-private struct SolarSystem: View {
+struct SolarSystem: View {
 
     struct Planet: Identifiable {
         var id: String { name }
@@ -127,7 +143,7 @@ private struct SolarSystem: View {
             // Orbit rings.
             ForEach(Self.planets) { planet in
                 Circle()
-                    .stroke(Theme.watermark.opacity(0.5), lineWidth: 1)
+                    .stroke(Theme.orbitRing, lineWidth: 1)
                     .frame(width: planet.orbit * 2, height: planet.orbit * 2)
             }
 

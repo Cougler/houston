@@ -40,8 +40,20 @@ enum MainWindowController {
         let host = NSHostingController(rootView: MainWindowView())
         host.sizingOptions = []
         window.contentViewController = host
-        window.setFrameAutosaveName("HoustonMainWindow")
+        // Assigning `contentViewController` resizes the window to the view's
+        // fitting size — with no sizing options that's ~1×1, an invisible
+        // window. Re-assert the default size, center, and only then attach
+        // the autosave name (which restores a previous session's frame when
+        // one exists — the debug build's saved frame is what masked this).
+        window.setContentSize(NSSize(width: 1018, height: 660))
         window.center()
+        window.setFrameAutosaveName("HoustonMainWindow")
+        // A saved frame from a run that hit the collapse would restore the
+        // 1×1 window right back — never honour a degenerate frame.
+        if window.frame.width < 400 || window.frame.height < 300 {
+            window.setContentSize(NSSize(width: 1018, height: 660))
+            window.center()
+        }
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 760, height: 460)
 
