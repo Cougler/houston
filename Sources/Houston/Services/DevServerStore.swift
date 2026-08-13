@@ -50,7 +50,11 @@ final class DevServerStore: ObservableObject {
             let dev = DevServerDetect.snapshot(projectsDirs: dirs, pinnedProjects: pinned)
             await MainActor.run {
                 self.refreshInFlight = false
-                self.devServers = dev
+                // Only servers attributable to a project. Claude Code spawns
+                // its own node listeners (MCP bridges etc.) in the dev port
+                // range — from a home shell those have no project and were
+                // cluttering the section.
+                self.devServers = dev.filter { $0.project != nil }
                 let ids = Set(dev.map(\.id))
                 self.health = self.health.filter { ids.contains($0.key) }
                 self.probedAt = self.probedAt.filter { ids.contains($0.key) }

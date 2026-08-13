@@ -29,18 +29,15 @@ struct StatusBarView: View {
     /// Without a session the bar keeps its place but shows nothing — the
     /// layout never jumps when a session starts.
     var sessionRunning = false
+    /// The running harness — its model catalog fills the switcher.
+    var agent: CodingAgent? = nil
     /// The context meter's account-limits popover.
     @State private var showLimits = false
 
-    /// Menu label → `/model` argument.
-    private static let models: [(label: String, arg: String)] = [
-        ("Default", "default"),
-        ("Fable 5", "fable"),
-        ("Fable 5 · 1M", "fable[1m]"),
-        ("Opus 5", "opus"),
-        ("Sonnet 5", "sonnet"),
-        ("Haiku 4.5", "haiku"),
-    ]
+    /// The running harness's model catalog (see `CodingAgent.modelOptions`).
+    private var models: [(label: String, arg: String)] {
+        agent?.modelOptions ?? []
+    }
 
     private func shows(_ key: String) -> Bool { !hiddenItems.contains(key) }
 
@@ -53,19 +50,21 @@ struct StatusBarView: View {
                 if !sessionRunning {
                     Spacer(minLength: 0)
                 } else if collapsed {
-                    if shows("model"), let snapshot {
-                        modelMenu(snapshot)
+                    if shows("model"), !models.isEmpty {
+                        modelMenu
                     }
                     Spacer(minLength: 0)
                 } else {
                     // Model + context travel as one group, as do the meters;
                     // flexible gaps spread the groups across the window.
-                    if let snapshot, shows("model") || shows("context") {
+                    if (shows("model") && !models.isEmpty)
+                        || (shows("context") && snapshot?.usedFraction != nil) {
                         HStack(spacing: 14) {
-                            if shows("model") {
-                                modelMenu(snapshot)
+                            if shows("model"), !models.isEmpty {
+                                modelMenu
                             }
-                            if shows("context"), let fraction = snapshot.usedFraction {
+                            if shows("context"), let snapshot,
+                               let fraction = snapshot.usedFraction {
                                 contextDropdown(fraction, compact: compact, meters: snapshot.meters)
                             }
                         }
@@ -90,14 +89,16 @@ struct StatusBarView: View {
         .padding(.bottom, 8)
     }
 
-    private func modelMenu(_ snapshot: StatusLineSnapshot) -> some View {
+    private var modelMenu: some View {
         Menu {
-            ForEach(Self.models, id: \.arg) { model in
+            ForEach(models, id: \.arg) { model in
                 Button(model.label) { onSelectModel(model.arg) }
             }
         } label: {
             HStack(spacing: 4) {
-                Text(snapshot.modelName)
+                // Claude's feed reports the live model; other harnesses
+                // publish nothing, so the menu is just "Model".
+                Text(snapshot?.modelName ?? "Model")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.text)
                 Image(systemName: "chevron.down")

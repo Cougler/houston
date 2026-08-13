@@ -178,6 +178,11 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     @discardableResult
     func pane(for projectPath: String) -> TerminalPane? {
         if let existing = tabs[projectPath]?.first?.panes.first { return existing }
+        // A brand-new first pane can't have an agent yet, but the polled
+        // `agents` map can hold a stale entry from a just-closed session for
+        // up to a scan cycle — which flashed the status bar's session items
+        // for a couple of seconds on open.
+        agents.removeValue(forKey: projectPath)
         guard let tab = makeTab(projectPath) else { return nil }
         tabs[projectPath] = [tab]
         return tab.panes.first
@@ -334,6 +339,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         tab.root.removeFromSuperview()
         if list.isEmpty {
             tabs.removeValue(forKey: path)
+            agents.removeValue(forKey: path)
         } else {
             tabs[path] = list
         }
@@ -347,6 +353,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             tab.root.removeFromSuperview()
         }
         tabs.removeValue(forKey: projectPath)
+        agents.removeValue(forKey: projectPath)
     }
 
     // MARK: - Mounting

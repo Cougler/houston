@@ -132,6 +132,14 @@ struct MainWindowView: View {
         }
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
         .onChange(of: gitWatchSet) { _, set in git.watchRows(set) }
+        // A project's last terminal closing (✕, ⇧⌘W, ctrl-D) lands on the
+        // solar-system empty state, not a dead detail page.
+        .onChange(of: terminalPaths) { _, paths in
+            if case let .project(path) = selection, !paths.contains(path),
+               !terminals.hasPane(for: path) {
+                selection = nil
+            }
+        }
         .onChange(of: selection) { _, newValue in
             showSkills = false
             showGit = false
@@ -531,7 +539,14 @@ struct MainWindowView: View {
                     mcp: mcp.statuses[path],
                     mcpAuthInFlight: mcp.authInFlight,
                     onSelectModel: { modelArg in
-                        if let snapshot { switchModel(to: modelArg, snapshot: snapshot) }
+                        // Claude sessions target the exact pane the feed
+                        // payload came from; other harnesses get the command
+                        // typed into the project's focused pane.
+                        if let snapshot {
+                            switchModel(to: modelArg, snapshot: snapshot)
+                        } else {
+                            terminals.send("/model \(modelArg)\n", to: path)
+                        }
                     },
                     onManageMCP: {
                         if let snapshot { sendToSnapshotPane("/mcp\n", snapshot: snapshot) }
@@ -540,7 +555,8 @@ struct MainWindowView: View {
                     onAuthenticateMCP: { mcp.login(server: $0, path: path) },
                     onLogoutMCP: { mcp.logout(server: $0, path: path) },
                     hiddenItems: Set(settings.statusBarHiddenItems),
-                    sessionRunning: terminals.agents[path] != nil
+                    sessionRunning: terminals.agents[path] != nil,
+                    agent: terminals.agents[path]
                 )
                 .onAppear { mcp.refreshIfStale(path: path) }
             }
@@ -899,13 +915,11 @@ struct MainWindowView: View {
                     }
                 }
             } else {
-                ContentUnavailableView {
-                    Label("No terminal open", systemImage: "terminal")
-                } description: {
-                    Text((path as NSString).lastPathComponent)
-                } actions: {
-                    Button("Open Terminal") { terminals.pane(for: path) }
-                }
+                // Selection normally clears when the last pane closes (see
+                // the terminalPaths onChange) — this is the transient frame
+                // before it does, and any odd path into a pane-less
+                // selection. Same sky either way.
+                EmptyStateView()
             }
         case let .server(id):
             if let server = servers.devServers.first(where: { $0.id == id }) {
@@ -1000,9 +1014,6 @@ struct MainWindowView: View {
                 ))
             }
         }
-        // Always visible beneath the terminal rows — the one affordance for
-        // opening a shell, now that the header carries no "+".
-        out.append(.action(key: "new-terminal", title: "New"))
         if !servers.devServers.isEmpty {
             out.append(.header("Servers"))
             out += servers.devServers.map {
@@ -1024,7 +1035,6 @@ struct MainWindowView: View {
                 }
             }
         }
-        out.append(.action(key: "open-folder", title: "Add"))
         return out
     }
 
@@ -1089,8 +1099,8 @@ struct MainWindowView: View {
         switch entry {
         case .header:
             // The space above the bottom-aligned label IS the gap between
-            // sections — kept tight by request.
-            return 18
+            // sections; just tall enough for the "+" button's hit area.
+            return 22
         case .folder:
             return 26
         case let .action(key, _):
@@ -1112,16 +1122,31 @@ struct MainWindowView: View {
     private func row(for entry: SidebarEntry, hovered: Bool) -> some View {
         switch entry {
         case let .header(title):
-            HStack(alignment: .center, spacing: 0) {
+            HStack(alignment: .bottom, spacing: 0) {
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.heading)
+                    .padding(.bottom, 4)
                 Spacer(minLength: 0)
+                if title == "Terminals" {
+                    HeaderPlusButton(help: "New terminal") {
+                        let home = NSHomeDirectory()
+                        if terminals.hasPane(for: home),
+                           let tab = terminals.newTab(in: home) {
+                            select(.shell(path: home, tab: tab.id))
+                        } else {
+                            select(.project(home))
+                        }
+                    }
+                } else if title == "Projects" {
+                    HeaderPlusButton(help: "Add a project or folder") {
+                        addFolder()
+                    }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             .padding(.leading, 14)
             .padding(.trailing, 8)
-            .padding(.bottom, 2)
 
         case let .action(key, title):
             if key == "open-folder" {
@@ -1758,6 +1783,32 @@ struct ServerRow: View {
         case .down: "Not responding"
         case nil: "Checking…"
         }
+    }
+}
+
+/// Section-header "+": a 16pt glyph in a 20pt hit area, far right of the
+/// label.
+private struct HeaderPlusButton: View {
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(hovered ? Theme.text : Theme.heading)
+                .frame(width: 16, height: 16)
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
     }
 }
 

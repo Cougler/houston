@@ -110,6 +110,55 @@ enum CodingAgent: Equatable, Hashable {
         case .other: nil
         }
     }
+
+    /// Recent models for the status bar's switcher, newest first, as
+    /// (menu label, argument to the harness's /model command). Claude args
+    /// are Claude Code's aliases and un-dated IDs; other harnesses get their
+    /// current model slugs. Empty for harnesses whose CLIs only offer an
+    /// interactive picker (the menu hides itself).
+    var modelOptions: [(label: String, arg: String)] {
+        switch self {
+        case .claude: [
+            ("Default", "default"),
+            ("Fable 5", "fable"),
+            ("Fable 5 · 1M", "fable[1m]"),
+            ("Opus 5", "opus"),
+            ("Opus 4.8", "claude-opus-4-8"),
+            ("Opus 4.7", "claude-opus-4-7"),
+            ("Sonnet 5", "sonnet"),
+            ("Sonnet 4.6", "claude-sonnet-4-6"),
+            ("Haiku 4.5", "haiku"),
+        ]
+        case .codex: [
+            ("GPT-5.1 Codex Max", "gpt-5.1-codex-max"),
+            ("GPT-5.1 Codex", "gpt-5.1-codex"),
+            ("GPT-5.1 Codex Mini", "gpt-5.1-codex-mini"),
+            ("GPT-5.1", "gpt-5.1"),
+            ("GPT-5 Codex", "gpt-5-codex"),
+            ("GPT-5", "gpt-5"),
+        ]
+        case .gemini: [
+            ("Gemini 3 Pro", "gemini-3-pro-preview"),
+            ("Gemini 2.5 Pro", "gemini-2.5-pro"),
+            ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+            ("Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite"),
+        ]
+        case .grok: [
+            ("Grok 4.1", "grok-4-1"),
+            ("Grok 4", "grok-4"),
+            ("Grok 4 Fast", "grok-4-fast"),
+            ("Grok Code Fast", "grok-code-fast-1"),
+        ]
+        case .aider: [
+            ("Claude Sonnet", "sonnet"),
+            ("Claude Opus", "opus"),
+            ("Claude Haiku", "haiku"),
+            ("GPT-5.1", "openai/gpt-5.1"),
+            ("Gemini 2.5 Pro", "gemini/gemini-2.5-pro"),
+        ]
+        case .opencode, .pi, .other: []
+        }
+    }
 }
 
 /// The 16pt mark at the left of a Terminals row: a plain terminal glyph for a
