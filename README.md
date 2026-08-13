@@ -1,3 +1,5 @@
+<img width="1039" height="679" alt="Houston" src="https://github.com/user-attachments/assets/341c9693-cc7a-4f86-ab85-80f03532003e" />
+
 # Houston
 
 Houston is a native macOS app for running coding agents. It puts your
