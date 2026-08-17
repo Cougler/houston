@@ -48,6 +48,7 @@ struct MainWindowView: View {
     @StateObject private var mcp = MCPStatusStore()
     @StateObject private var handoffs = HandoffCoordinator()
     @ObservedObject private var terminals = TerminalSessionManager.shared
+    @ObservedObject private var updates = UpdateChecker.shared
     @State private var selection: SidebarSelection?
     /// Agent the header's split button launches; the chevron menu changes it.
     @State private var launchAgent: CodingAgent = .claude
@@ -76,6 +77,10 @@ struct MainWindowView: View {
     @State private var collapsedFolders = Set(HoustonSettings.read().collapsedFolders)
     /// First-launch welcome overlay, until dismissed once.
     @State private var showWelcome = !HoustonSettings.read().welcomeSeen
+    /// Sidebar collapsed to the three-icon rail, persisted in settings.
+    @State private var sidebarCollapsed = HoustonSettings.read().sidebarCollapsed
+    /// The rail section whose popover is open, while collapsed.
+    @State private var railPopover: RailSection?
 
     /// Clearance for the traffic lights, which float over the sidebar now that
     /// the title bar is transparent and full-size.
@@ -83,7 +88,18 @@ struct MainWindowView: View {
 
     /// Sidebar width, dragged by the divider below.
     @State private var sidebarWidth: CGFloat = Theme.sidebarWidth
+    /// Below this width the library rows' inline diff counts come off and
+    /// move into hover tooltips — squeezed against a long name they were
+    /// the first thing to look broken.
+    private var sidebarNarrow: Bool { sidebarWidth < 210 }
     private let sidebarRange: ClosedRange<CGFloat> = 180...420
+    /// Width when the divider drag began — translation is cumulative from the
+    /// gesture's start, so it must be applied to the start width, not the
+    /// live one.
+    @State private var sidebarDragStart: CGFloat?
+    /// Pointer over the divider's grip — lights the faint stroke that tells
+    /// the user there's something to grab.
+    @State private var dividerHovered = false
 
     var body: some View {
         // Plain HStack, not `HSplitView`: NSSplitView-backed `HSplitView`
@@ -91,14 +107,23 @@ struct MainWindowView: View {
         // whole UI collapsed into a band floating in dead space. A hand-drawn
         // divider is also the point — we own the layout.
         HStack(spacing: 0) {
-            sidebarColumn
-                .frame(width: sidebarWidth)
+            if sidebarCollapsed {
+                railColumn
+                    .frame(width: railWidth)
+            } else {
+                sidebarColumn
+                    .frame(width: sidebarWidth)
+            }
+            // One divider for both states, outside the branch so its view —
+            // and any drag mid-flight through a collapse/expand — survives
+            // the swap.
             splitDivider
             detailColumn
                 .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .overlay(alignment: .topLeading) { railFlyoutLayer }
         .overlay {
             if showWelcome {
                 WelcomeView {
@@ -203,27 +228,88 @@ struct MainWindowView: View {
     }
 
     /// Draggable split handle — invisible now (no line between sidebar and
-    /// detail), but still the 6pt-wide resize grip.
+    /// detail), but still the 6pt-wide resize grip. One control for both
+    /// states: dragging past the minimum collapses to the rail, dragging the
+    /// rail's edge back out springs it open — and either way the *same*
+    /// gesture keeps resizing, because the crossing rebases the drag origin
+    /// instead of ending it.
     private var splitDivider: some View {
+        // Invisible until the pointer finds it: the faint stroke while
+        // hovered (and held through a drag) is the only hint the grip exists.
         Rectangle()
-            .fill(Color.clear)
+            .fill(dividerHovered || sidebarDragStart != nil
+                ? Theme.borderSidebar
+                : Color.clear)
             .frame(width: 1)
             .frame(maxHeight: .infinity)
+            .animation(.easeOut(duration: 0.12), value: dividerHovered)
             .overlay(
                 Rectangle()
                     .fill(Color.clear)
                     .frame(width: 6)
                     .contentShape(Rectangle())
-                    .onHover { NSCursor.resizeLeftRight.set(); if !$0 { NSCursor.arrow.set() } }
+                    .onHover { inside in
+                        dividerHovered = inside
+                        if inside {
+                            (sidebarCollapsed ? NSCursor.resizeRight : NSCursor.resizeLeftRight)
+                                .set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
                     .gesture(
-                        DragGesture()
+                        // Global space, not the default `.local`: the divider
+                        // itself moves as the width changes, so a local-space
+                        // translation feeds back into the value that produced
+                        // it — the sidebar oscillated with the pointer held
+                        // still. The window's space stays put.
+                        DragGesture(coordinateSpace: .global)
                             .onChanged { value in
-                                let proposed = sidebarWidth + value.translation.width
-                                sidebarWidth = min(
+                                let start = sidebarDragStart
+                                    ?? (sidebarCollapsed ? railWidth : sidebarWidth)
+                                sidebarDragStart = start
+                                let proposed = start + value.translation.width
+                                if sidebarCollapsed {
+                                    // Crossing halfway to the minimum springs
+                                    // the sidebar open; rebasing the origin
+                                    // lets this drag continue as a plain
+                                    // resize from the minimum, no jump.
+                                    if proposed > (railWidth + sidebarRange.lowerBound) / 2 {
+                                        sidebarWidth = sidebarRange.lowerBound
+                                        sidebarDragStart =
+                                            sidebarRange.lowerBound - value.translation.width
+                                        setSidebarCollapsed(false)
+                                    }
+                                    return
+                                }
+                                // Well past the minimum snaps to the rail,
+                                // Finder-style — rebased so reversing the
+                                // same drag pulls it straight back out.
+                                if proposed < sidebarRange.lowerBound - 50 {
+                                    sidebarWidth = sidebarRange.lowerBound
+                                    sidebarDragStart = railWidth - value.translation.width
+                                    setSidebarCollapsed(true)
+                                    return
+                                }
+                                // Whole pixels only — drag translations are
+                                // fractional, and text laid out at a subpixel
+                                // x-offset renders soft (the "blur" during
+                                // resize). And only touch the state when the
+                                // rounded value actually moved: every write
+                                // re-lays-out the window, terminal included.
+                                let clamped = min(
                                     max(proposed, sidebarRange.lowerBound),
                                     sidebarRange.upperBound
-                                )
+                                ).rounded()
+                                guard clamped != sidebarWidth else { return }
+                                // No implicit animation may ride along: a
+                                // tween chasing a live drag is exactly the
+                                // jumpy trail-behind look.
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) { sidebarWidth = clamped }
                             }
+                            .onEnded { _ in sidebarDragStart = nil }
                     )
             )
     }
@@ -249,6 +335,412 @@ struct MainWindowView: View {
             sidebarFooter
         }
         .background(Theme.background)
+    }
+
+    // MARK: - Collapsed rail
+
+    /// Rail width — enough for a 34pt icon button centered with breathing
+    /// room; the traffic lights float above it, same as the full sidebar.
+    private let railWidth: CGFloat = 52
+
+    /// The collapsed sidebar: three section icons whose popovers carry the
+    /// same rows the full sidebar shows, expand at the bottom above the gear.
+    private var railColumn: some View {
+        VStack(spacing: 6) {
+            Color.clear.frame(height: trafficLightInset)
+            railButton(.terminals)
+            railButton(.servers)
+            railButton(.projects)
+            Spacer(minLength: 0)
+            if let update = updates.available {
+                RailButton(
+                    help: "Update available — download Houston \(update.version)",
+                    active: false,
+                    action: { NSWorkspace.shared.open(update.url) }
+                ) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.buttonActiveStroke)
+                }
+            }
+            FooterIconButton(
+                systemName: "sidebar.left",
+                help: "Expand sidebar",
+                action: toggleSidebarCollapse
+            )
+            settingsMenu
+                .padding(.bottom, 12)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
+    }
+
+    private func railButton(_ section: RailSection) -> some View {
+        RailButton(
+            help: section.title,
+            active: railPopover == section,
+            action: { setRailPopover(railPopover == section ? nil : section) }
+        ) {
+            railIcon(section)
+        }
+    }
+
+    /// Flyout open/close rides one animation so the card slides, not pops.
+    private func setRailPopover(_ section: RailSection?) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+            railPopover = section
+        }
+    }
+
+    /// The rail flyout: a second-layer card floating beside the rail,
+    /// top-aligned with its button. Replaces `.popover` — NSPopover's
+    /// arrow-and-frame chrome read heavy at this size.
+    @ViewBuilder
+    private var railFlyoutLayer: some View {
+        if sidebarCollapsed, let section = railPopover {
+            ZStack(alignment: .topLeading) {
+                // Scrim: any click outside dismisses (and is consumed). The
+                // rail itself stays uncovered so switching sections is one
+                // click, not dismiss-then-click.
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: railWidth)
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { setRailPopover(nil) }
+                }
+                railPopoverContent(section)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Theme.panelFill)
+                            .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                    )
+                    .offset(x: railWidth + 6, y: flyoutTop(for: section))
+                    .transition(.opacity.combined(with: .offset(x: -8)))
+            }
+        }
+    }
+
+    /// Aligns the flyout's top edge with the rail button that opened it —
+    /// the buttons stack at `trafficLightInset` in 30pt + 6pt-spacing steps.
+    private func flyoutTop(for section: RailSection) -> CGFloat {
+        let index: CGFloat = switch section {
+        case .terminals: 0
+        case .servers: 1
+        case .projects: 2
+        }
+        return trafficLightInset + index * 36
+    }
+
+    @ViewBuilder
+    private func railIcon(_ section: RailSection) -> some View {
+        switch section {
+        case .terminals:
+            Image(systemName: "terminal")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textSecondary)
+        case .servers:
+            ServerGlyph(color: Theme.textSecondary, size: 15)
+        case .projects:
+            Image(systemName: "shippingbox")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private func setSidebarCollapsed(_ collapsed: Bool) {
+        guard collapsed != sidebarCollapsed else { return }
+        railPopover = nil
+        withAnimation(.easeOut(duration: 0.15)) { sidebarCollapsed = collapsed }
+        updateSettings { $0.sidebarCollapsed = collapsed }
+    }
+
+    private func toggleSidebarCollapse() {
+        setSidebarCollapsed(!sidebarCollapsed)
+    }
+
+    /// Select from a rail popover: dismiss first, then route through the
+    /// same `select(_:)` every other selection path uses.
+    private func railSelect(_ target: SidebarSelection) {
+        setRailPopover(nil)
+        select(target)
+    }
+
+    @ViewBuilder
+    private func railPopoverContent(_ section: RailSection) -> some View {
+        switch section {
+        case .terminals: terminalsPopover
+        case .servers: serversPopover
+        case .projects: projectsPopover
+        }
+    }
+
+    /// Chrome shared by the rail popovers: a header with the section's glyph
+    /// in a rose-tinted tile and a count badge, the rows (capped at 400pt,
+    /// scrolling past that), and an optional pinned action footer.
+    private func railPopoverPanel(
+        title: String,
+        count: Int,
+        rowsHeight: CGFloat,
+        @ViewBuilder icon: () -> some View,
+        @ViewBuilder rows: () -> some View,
+        @ViewBuilder footer: () -> some View
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                icon()
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Theme.buttonActiveFill)
+                    )
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 8)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.rowSelected))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+            ScrollView {
+                VStack(spacing: 0) { rows() }
+            }
+            .scrollIndicators(.hidden)
+            .frame(height: min(rowsHeight, 400))
+            footer()
+        }
+        .frame(width: 260)
+        .padding(.bottom, 8)
+    }
+
+    /// A pinned popover footer: hairline, then an action row.
+    private func railPopoverFooter(
+        _ title: String, action: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 4) {
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(height: 1)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+            PopoverRow(height: 30, action: action) { hovered in
+                actionRowLabel(title: title, hovered: hovered)
+            }
+        }
+    }
+
+    /// A friendly empty state for a rail popover. Sized to
+    /// `railEmptyStateHeight` — keep the two in step.
+    private func railEmptyState(
+        _ headline: String, _ subtext: String,
+        @ViewBuilder icon: () -> some View
+    ) -> some View {
+        VStack(spacing: 8) {
+            icon()
+            Text(headline)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.text)
+            Text(subtext)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .frame(height: railEmptyStateHeight)
+    }
+
+    private var railEmptyStateHeight: CGFloat { 112 }
+
+    /// The Terminals section as a popover — same rows, plus "New Terminal".
+    private var terminalsPopover: some View {
+        let tabCount = terminals.tabs.values.map(\.count).reduce(0, +)
+        return railPopoverPanel(
+            title: "Terminals",
+            count: tabCount,
+            rowsHeight: tabCount == 0 ? railEmptyStateHeight : CGFloat(tabCount) * 32
+        ) {
+            Image(systemName: "terminal")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.buttonActiveStroke)
+        } rows: {
+            if terminalPaths.isEmpty {
+                railEmptyState(
+                    "No terminals open",
+                    "Open one below — every project gets its own shell."
+                ) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Theme.heading)
+                }
+            }
+            ForEach(terminalPaths, id: \.self) { path in
+                let list = terminals.tabs[path] ?? []
+                PopoverRow(height: 32, action: { railSelect(.project(path)) }) { hovered in
+                    SidebarRow(
+                        name: list.first?.customName ?? name(of: path),
+                        agent: primaryAgent(path: path),
+                        hasTerminal: true,
+                        gitStatus: git.rowStatuses[path] ?? .none,
+                        hovered: hovered,
+                        selected: selection == .project(path),
+                        onClose: { closeTerminal(path) }
+                    )
+                }
+                ForEach(list.dropFirst()) { tab in
+                    PopoverRow(
+                        height: 32,
+                        action: { railSelect(.shell(path: path, tab: tab.id)) }
+                    ) { hovered in
+                        SidebarRow(
+                            name: tab.customName ?? name(of: path),
+                            agent: shellAgent(path: path, tab: tab.id),
+                            hasTerminal: true,
+                            gitStatus: git.rowStatuses[path] ?? .none,
+                            hovered: hovered,
+                            selected: selection == .shell(path: path, tab: tab.id),
+                            onClose: { terminals.closeTab(path: path, tabID: tab.id) }
+                        )
+                    }
+                }
+            }
+        } footer: {
+            railPopoverFooter("New Terminal") {
+                setRailPopover(nil)
+                runAction("new-terminal")
+            }
+        }
+    }
+
+    /// The Servers section as a popover. Clicking a row jumps to the
+    /// server's project terminal (its popover detail doesn't fit inside
+    /// another popover); the hover arrow still opens the browser.
+    private var serversPopover: some View {
+        let list = servers.devServers
+        return railPopoverPanel(
+            title: "Servers",
+            count: list.count,
+            rowsHeight: list.isEmpty ? railEmptyStateHeight : CGFloat(list.count) * 42
+        ) {
+            ServerGlyph(color: Theme.buttonActiveStroke, size: 13)
+        } rows: {
+            if list.isEmpty {
+                railEmptyState(
+                    "No dev servers running",
+                    "Start one — npm run dev, vite — and it appears here with a health light."
+                ) {
+                    ServerGlyph(color: Theme.heading, size: 22)
+                }
+            } else {
+                ForEach(list) { server in
+                    PopoverRow(height: 42, action: {
+                        setRailPopover(nil)
+                        if let cwd = server.cwd {
+                            select(.project(cwd))
+                        } else {
+                            Actions.openExternal(server.url)
+                        }
+                    }) { hovered in
+                        ServerRow(
+                            server: server,
+                            health: servers.health[server.id],
+                            hovered: hovered,
+                            selected: false,
+                            onOpen: { Actions.openExternal(server.url) }
+                        )
+                    }
+                }
+            }
+        } footer: {
+            EmptyView()
+        }
+    }
+
+    /// The Projects library as a popover: pinned rows, folders (always
+    /// expanded — collapse state stays a full-sidebar concern), and "Add".
+    private var projectsPopover: some View {
+        let pinned = store.pinnedProjects
+        let groups = store.projectGroups
+        let libCount = groups.reduce(0) { $0 + libraryPaths(in: $1).count }
+        let empty = pinned.isEmpty && groups.isEmpty
+        let rowsHeight = empty
+            ? railEmptyStateHeight
+            : CGFloat(pinned.count) * 28
+                + CGFloat(groups.count) * 28
+                + CGFloat(libCount) * 28
+        return railPopoverPanel(
+            title: "Projects",
+            count: pinned.count + libCount,
+            rowsHeight: rowsHeight
+        ) {
+            Image(systemName: "shippingbox")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.buttonActiveStroke)
+        } rows: {
+            if empty {
+                railEmptyState(
+                    "No projects yet",
+                    "Add a repo or a folder of projects to build your library."
+                ) {
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Theme.heading)
+                }
+            }
+            ForEach(pinned, id: \.self) { path in
+                projectPopoverRow(path)
+            }
+            ForEach(groups, id: \.path) { group in
+                // Folder names read as sub-headings here — the popover has
+                // no disclosure, so the quiet heading style keeps them from
+                // competing with the project rows.
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.heading)
+                    Text(group.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.heading)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12 + Theme.rowInset)
+                .frame(height: 24)
+                .padding(.top, 4)
+                ForEach(libraryPaths(in: group), id: \.self) { path in
+                    projectPopoverRow(path)
+                }
+            }
+        } footer: {
+            railPopoverFooter("Add Project…") {
+                setRailPopover(nil)
+                addFolder()
+            }
+        }
+    }
+
+    private func projectPopoverRow(_ path: String) -> some View {
+        PopoverRow(height: 28, action: { railSelect(.project(path)) }) { hovered in
+            SidebarRow(
+                name: name(of: path),
+                diff: libraryDiff(path),
+                isProject: ProjectKindCache.isProject(path),
+                live: terminals.hasPane(for: path),
+                hovered: hovered
+            )
+        }
     }
 
     /// Opens the directory picker and registers the choice. A folder that is
@@ -391,10 +883,20 @@ struct MainWindowView: View {
 
 
     private var sidebarFooter: some View {
-        // Just the gear, tucked into the bottom-left corner — no rule above.
-        HStack(spacing: 0) {
+        // Gear + collapse, tucked into the bottom-left corner — no rule above.
+        HStack(spacing: 2) {
             settingsMenu
-
+            FooterIconButton(
+                systemName: "sidebar.left",
+                help: "Collapse sidebar",
+                action: toggleSidebarCollapse
+            )
+            if let update = updates.available {
+                UpdatePill(version: update.version) {
+                    NSWorkspace.shared.open(update.url)
+                }
+                .padding(.leading, 4)
+            }
             Spacer(minLength: 8)
         }
         .padding(.leading, 14)
@@ -451,6 +953,12 @@ struct MainWindowView: View {
                 Button("Enable Claude Status Bar…") {
                     showStatusPrompt = true
                 }
+            }
+
+            Divider()
+
+            Button("Check for Updates…") {
+                UpdateChecker.shared.checkInteractively()
             }
         } label: {
             GearLabel()
@@ -1168,8 +1676,15 @@ struct MainWindowView: View {
         case let .folder(path, folderName):
             let collapsed = collapsedFolders.contains(path)
             HStack(spacing: 8) {
-                Image(systemName: collapsed ? "folder" : "folder.fill")
-                    .font(.system(size: 11))
+                // The disclosure chevron takes the folder glyph's place under
+                // the pointer — Finder's sidebar move — instead of sitting
+                // permanently at the row's far edge.
+                Image(systemName: hovered
+                    ? (collapsed ? "chevron.right" : "chevron.down")
+                    : (collapsed ? "folder" : "folder.fill"))
+                    .font(hovered
+                        ? .system(size: 10, weight: .semibold)
+                        : .system(size: 11))
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 16, height: 16)
                 Text(folderName)
@@ -1177,10 +1692,6 @@ struct MainWindowView: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                // Disclosure state, far right.
-                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.heading)
             }
             .modifier(RowChrome(hovered: hovered, selected: false))
             .onTapGesture { toggleFolder(path) }
@@ -1191,6 +1702,7 @@ struct MainWindowView: View {
             SidebarRow(
                 name: title,
                 diff: libraryDiff(path),
+                diffTooltipOnly: sidebarNarrow,
                 isProject: ProjectKindCache.isProject(path),
                 live: terminals.hasPane(for: path),
                 hovered: hovered
@@ -1267,6 +1779,7 @@ struct MainWindowView: View {
             let diff = libraryDiff(path).map { "+\($0.added)-\($0.removed)" } ?? "-"
             return [
                 "lib", title, diff,
+                sidebarNarrow ? "n" : "-",
                 terminals.hasPane(for: path) ? "t" : "-",
                 ProjectKindCache.isProject(path) ? "p" : "-",
                 hovered ? "h" : "-",
@@ -1461,6 +1974,124 @@ struct MainWindowView: View {
     }
 }
 
+// MARK: - Collapsed-rail pieces
+
+/// The three sections the collapsed rail exposes as popovers.
+private enum RailSection: String, Identifiable {
+    case terminals, servers, projects
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .terminals: "Terminals"
+        case .servers: "Servers"
+        case .projects: "Projects"
+        }
+    }
+}
+
+/// A rail icon button: quiet glyph, hover fill, selected fill while its
+/// popover is open.
+private struct RailButton<Icon: View>: View {
+    let help: String
+    let active: Bool
+    let action: () -> Void
+    @ViewBuilder let icon: () -> Icon
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            icon()
+                .frame(width: 34, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(active ? Theme.rowSelected : (hovered ? Theme.rowHovered : .clear))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+    }
+}
+
+/// A row inside a rail popover. The popovers are plain SwiftUI (no
+/// `NSTableView` here), so hover is tracked locally per row.
+private struct PopoverRow<Content: View>: View {
+    let height: CGFloat
+    let action: () -> Void
+    @ViewBuilder let content: (Bool) -> Content
+    @State private var hovered = false
+
+    var body: some View {
+        content(hovered)
+            .frame(height: height)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .onHover { hovered = $0 }
+    }
+}
+
+/// Accent pill in the sidebar footer while a newer release exists — the
+/// quiet, persistent form of the update notice (the loud one is the manual
+/// check's alert). Click downloads the DMG.
+private struct UpdatePill: View {
+    let version: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(version)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(Theme.buttonActiveStroke)
+            .padding(.horizontal, 8)
+            .frame(height: 20)
+            .background(Capsule().fill(Theme.buttonActiveFill))
+            .overlay(
+                Capsule().strokeBorder(
+                    Theme.buttonActiveStroke.opacity(hovered ? 0.9 : 0.35),
+                    lineWidth: 1
+                )
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help("Update available — download Houston \(version)")
+    }
+}
+
+/// Footer/rail icon button with the gear's quiet hover chrome.
+struct FooterIconButton: View {
+    let systemName: String
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12))
+                .foregroundStyle(hovered ? Theme.text : Theme.heading)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+    }
+}
+
 // MARK: - Header button chrome
 
 /// The design's header buttons: 30pt tall, #F3F3F3 fill, #E0E0E0 hairline,
@@ -1570,6 +2201,9 @@ struct SidebarRow: View {
     let name: String
     /// Uncommitted line counts under the name (library rows): +added −removed.
     var diff: (added: Int, removed: Int)? = nil
+    /// Inline diff suppressed (narrow sidebar) — the counts move into the
+    /// row's hover tooltip instead of crowding the name.
+    var diffTooltipOnly: Bool = false
     var agent: CodingAgent? = nil
     var hasTerminal: Bool = false
     /// An extra terminal tab nested under its project's row: indented, no
@@ -1612,7 +2246,7 @@ struct SidebarRow: View {
                 .foregroundStyle(nested ? Theme.textSecondary : Theme.text)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            if let diff {
+            if let diff, !diffTooltipOnly {
                 HStack(spacing: 3) {
                     Text("+\(diff.added)")
                         .foregroundStyle(Color(hex: 0x16A34A))
@@ -1640,6 +2274,13 @@ struct SidebarRow: View {
         }
         .padding(.leading, nested ? 17 : (hasTerminal || isProject || live ? 0 : 17))
         .modifier(RowChrome(hovered: hovered, selected: selected))
+        // An empty help string attaches no tooltip.
+        .help(diffHelp)
+    }
+
+    private var diffHelp: String {
+        guard diffTooltipOnly, let diff else { return "" }
+        return "+\(diff.added) −\(diff.removed) uncommitted lines"
     }
 
     private var gitColor: Color {

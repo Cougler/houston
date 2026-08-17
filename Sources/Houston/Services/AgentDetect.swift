@@ -24,10 +24,38 @@ enum AgentDetect {
         for proc in procs.values {
             guard let agent = agentFor(command: proc.command) else { continue }
             guard ProcScan.isDescendant(proc.pid, of: me, in: procs) else { continue }
+            // A pane's chain is Houston → login → shell → agent; Houston's own
+            // utility spawns (the MCP store's `zsh -lc "claude mcp list"`, run
+            // in the project directory) have no `login` in theirs. Without
+            // this check every MCP refresh read as a running claude session
+            // and flashed the header's Mission menu for its duration.
+            guard hasLoginAncestor(proc.pid, in: procs) else { continue }
             guard let cwd = ProcScan.cwd(ofPid: proc.pid), paths.contains(cwd) else { continue }
             result[cwd] = agent
         }
         return result
+    }
+
+    /// Whether the process was reached through a `login` process — true for
+    /// anything typed into a pane, false for Houston's own tool spawns.
+    /// Bounded like `isDescendant` so a malformed snapshot can't spin.
+    private static func hasLoginAncestor(_ pid: Int32, in procs: [Int32: ProcScan.Proc]) -> Bool {
+        var current = procs[pid]?.ppid ?? 0
+        for _ in 0..<32 {
+            guard current > 1, let proc = procs[current] else { return false }
+            if isLogin(proc.command) { return true }
+            current = proc.ppid
+        }
+        return false
+    }
+
+    /// "login", "/usr/bin/login -fp user", "-login" → true.
+    private static func isLogin(_ command: String) -> Bool {
+        guard var first = command.split(separator: " ").first.map(String.init) else {
+            return false
+        }
+        if first.hasPrefix("-") { first.removeFirst() }
+        return (first as NSString).lastPathComponent == "login"
     }
 
     /// Which launchable agents are actually installed, resolved through the

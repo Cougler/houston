@@ -18,6 +18,9 @@ enum MainMenu {
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
+        appMenu.addItem(ClosureMenuItem("Check for Updates…") {
+            UpdateChecker.shared.checkInteractively()
+        })
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Hide Houston",

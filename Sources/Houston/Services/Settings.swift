@@ -35,6 +35,8 @@ struct HoustonSettings {
     var statusBarHiddenItems: [String]
     /// The first-launch welcome card has been dismissed.
     var welcomeSeen: Bool
+    /// The sidebar is collapsed to the three-icon rail.
+    var sidebarCollapsed: Bool
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -47,7 +49,8 @@ struct HoustonSettings {
             statusBarDisabled: false,
             statusBarCollapsed: false,
             statusBarHiddenItems: [],
-            welcomeSeen: false
+            welcomeSeen: false,
+            sidebarCollapsed: false
         )
     }
 
@@ -111,6 +114,9 @@ struct HoustonSettings {
         if let seen = json["welcomeSeen"] as? Bool {
             s.welcomeSeen = seen
         }
+        if let railed = json["sidebarCollapsed"] as? Bool {
+            s.sidebarCollapsed = railed
+        }
         return s
     }
 
@@ -133,6 +139,7 @@ struct HoustonSettings {
         obj["statusBarCollapsed"] = s.statusBarCollapsed
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
         obj["welcomeSeen"] = s.welcomeSeen
+        obj["sidebarCollapsed"] = s.sidebarCollapsed
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

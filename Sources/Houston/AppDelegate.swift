@@ -25,6 +25,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         MainWindowController.present()
+        Self.logLifecycle("launched")
+        UpdateChecker.shared.start()
+    }
+
+    /// A clean quit (⌘Q, menubar Quit, logout) passes through here; a signal
+    /// kill doesn't. So when Houston "was just closed" with no crash report,
+    /// this log tells the two apart: a `terminating` line means someone quit
+    /// it, its absence means an outside kill. Added after an unexplained
+    /// close on 2026-08-16 that left no crash report and no kill in any
+    /// session transcript.
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.logLifecycle("terminating")
+    }
+
+    private static func logLifecycle(_ event: String) {
+        let dir = ("~/Library/Application Support/Houston" as NSString)
+            .expandingTildeInPath
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true
+        )
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("lifecycle.log")
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(event) pid=\(ProcessInfo.processInfo.processIdentifier)\n"
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
     }
 
     /// Re-open the window when the Dock icon is clicked and nothing is visible.
@@ -54,6 +83,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(openWindow),
             keyEquivalent: ""
         ).target = self
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem("Check for Updates…") {
+            UpdateChecker.shared.checkInteractively()
+        })
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Quit Houston",
