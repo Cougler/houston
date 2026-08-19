@@ -136,15 +136,17 @@ struct GitPanel: View {
                     if !info.branches.isEmpty { Divider() }
                     Button("New Branch…") { onNewBranch() }
                 } label: {
+                    // The label is the fixed word "Branch", never the branch
+                    // name — the name renders below, outside the menu, so a
+                    // long one can't force the 320pt card wider (the menu
+                    // control sizes to its label's ideal width).
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.triangle.branch")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Theme.heading)
-                        Text(info.branchLabel)
+                        Text("Branch")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                         Image(systemName: "chevron.down")
                             .font(.system(size: 8, weight: .semibold))
                             .foregroundStyle(Theme.heading)
@@ -154,9 +156,7 @@ struct GitPanel: View {
                 .menuStyle(.button)
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
-                // No .fixedSize() here: the panel is a fixed 320pt, and a
-                // fixed-size menu takes the full ideal width of a long branch
-                // name, blowing the whole content stack out past the card.
+                .fixedSize()
                 .help("Switch or create a branch")
                 Spacer(minLength: 0)
                 if let remote = info.remoteURL {
@@ -165,10 +165,15 @@ struct GitPanel: View {
                     }
                 }
             }
+            Text(info.branchLabel)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
             if !info.headerSubtext.isEmpty {
                 Text(info.headerSubtext)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary.opacity(0.7))
             }
         }
         .padding(.horizontal, 16)
@@ -185,7 +190,7 @@ struct GitPanel: View {
                     ForEach(info.changes) { change in
                         ChangeRow(change: change) { open(change) }
                     }
-                    Spacer().frame(height: 12)
+                    Spacer().frame(height: 22)
                 }
                 let unpushed = info.commits.filter(\.isUnpushed)
                 let synced = info.commits.filter { !$0.isUnpushed }
@@ -197,7 +202,7 @@ struct GitPanel: View {
                     ForEach(unpushed) { commit in
                         CommitRow(commit: commit) { open(commit) }
                     }
-                    Spacer().frame(height: 12)
+                    Spacer().frame(height: 22)
                 }
                 if !synced.isEmpty {
                     GitSectionLabel(
@@ -211,6 +216,7 @@ struct GitPanel: View {
                 }
             }
             .padding(.horizontal, 10)
+            .padding(.top, 10)
             .padding(.bottom, 12)
         }
     }
