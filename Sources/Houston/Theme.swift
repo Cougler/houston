@@ -13,11 +13,12 @@ enum Theme {
     /// The empty state's sky — a step off the chrome in each direction:
     /// darker than the sidebar in light mode, lighter in dark mode.
     static let emptyStateBackground = Color(light: 0xE2E2E2, dark: 0x252525)
-    /// Floating cards (skills panel).
-    static let panelFill = Color(light: 0xFFFFFF, dark: 0x262626)
-    /// The git panel: pushed away from the chrome in both directions —
-    /// lighter than the UI in light mode, darker in dark.
-    static let gitPanelFill = Color(light: 0xFFFFFF, dark: 0x181818)
+    /// Floating cards (skills panel, rail flyouts). Light mode matches the
+    /// sidebar chrome; dark mode steps lighter to separate from it.
+    static let panelFill = Color(light: 0xEBEBEB, dark: 0x262626)
+    /// The git panel: chrome-colored in light mode like the other cards,
+    /// darker than the UI in dark mode.
+    static let gitPanelFill = Color(light: 0xEBEBEB, dark: 0x181818)
     /// The faded helmet on the empty state.
     static let watermark = Color(light: 0xEBEBEB, dark: 0x323232)
 
@@ -72,8 +73,11 @@ enum Theme {
             : NSColor.black.withAlphaComponent(0.03)
     })
 
-    /// Status dots — saturated enough to hold on both surfaces.
-    static let dotActive = Color(hex: 0x00DD21)
+    /// Status dots — saturated enough to hold on both surfaces. The active
+    /// green darkens in light mode: #00DD21 on white sat under 2:1 contrast,
+    /// invisible to low-vision users; #15803D clears 3:1 (WCAG for non-text
+    /// UI) while the dark surface keeps the bright signal color.
+    static let dotActive = Color(light: 0x15803D, dark: 0x00DD21)
     static let dotServer = Color(hex: 0x3B82F6)
     static let dotShell = Color(hex: 0xA6A6A6)
 
@@ -101,7 +105,7 @@ enum Theme {
         static func color(for fraction: Double) -> Color {
             if fraction >= dangerPct { return .red }
             if fraction >= warnPct { return .orange }
-            return .green
+            return Theme.dotActive
         }
     }
 }

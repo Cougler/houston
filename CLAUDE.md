@@ -66,6 +66,17 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   makes the terminal context menu act on the pane under the cursor.
   Ghostty's view never consults `NSView.menu` — the context menu needs
   that subclass.
+- `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
+  `Notification` (permission request / idle waiting) and `Stop` (turn done)
+  hooks. One script dumps each hook payload to
+  `Application Support/Houston/notify/<HOUSTON_PANE>.….json`; the store polls,
+  keeps per-pane attention, and drives the banner (packaged builds only —
+  `UNUserNotificationCenter` needs a bundle), the menubar amber dot, and the
+  sidebar row badge. An event for the pane the user is watching (its tab
+  displayed, app active) is dropped. Unlike the statusline takeover this is a
+  non-destructive *merge* into settings.json's `hooks` arrays — install
+  appends Houston's entry, restore removes exactly it — but still gated on
+  the same consent-dialog pattern (gear menu).
 - `StatusLineFeed` / `StatusBarView` — the native status bar under the
   terminal (model menu → `/model`, context bar, rate-limit meters), fed by
   the statusline hook (see Gotchas). `MCPStatusStore` adds MCP health via

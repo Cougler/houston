@@ -9,8 +9,11 @@ enum GitDetect {
             return .notARepo
         }
 
+        // -uall: an untracked directory is otherwise one collapsed "Docs/"
+        // row — a file-looking entry that previews blank. List the actual
+        // files inside instead, so every row opens to real content.
         let changes = parseStatus(
-            git(["status", "--porcelain"], in: projectPath) ?? ""
+            git(["status", "--porcelain", "-uall"], in: projectPath) ?? ""
         )
 
         // Branch, falling back to the unborn-branch name (fresh `git init`)
@@ -205,6 +208,9 @@ enum GitDetect {
         let full = (projectPath as NSString).appendingPathComponent(change.path)
         guard let contents = try? String(contentsOfFile: full, encoding: .utf8) else {
             return [GitDiffLine(id: 0, kind: .note, text: "No preview available")]
+        }
+        if contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return [GitDiffLine(id: 0, kind: .note, text: "Empty file")]
         }
         var lines: [GitDiffLine] = []
         for line in contents.components(separatedBy: "\n") {

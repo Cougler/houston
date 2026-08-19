@@ -1,12 +1,14 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 /// Houston is a normal windowed app with a menubar item that toggles the
 /// window. The old menubar popover (a port of the Electron build's tabbed UI)
 /// was removed — the desktop window covers the same ground and having both
 /// meant two UIs over the same data.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate,
+    UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -24,9 +26,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
         }
 
+        // Banner clicks route back here (`didReceive`). No bundle id means
+        // no notification center (debug builds) — badges still work.
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
+        }
+
         MainWindowController.present()
         Self.logLifecycle("launched")
         UpdateChecker.shared.start()
+    }
+
+    /// Amber dot beside the menubar glyph while any session needs the user.
+    func setNeedsAttentionBadge(_ on: Bool) {
+        guard let button = statusItem?.button else { return }
+        if on {
+            button.attributedTitle = NSAttributedString(
+                string: " ●",
+                attributes: [
+                    .foregroundColor: NSColor(hex: 0xD97706),
+                    .font: NSFont.systemFont(ofSize: 8),
+                    .baselineOffset: 2,
+                ]
+            )
+            button.imagePosition = .imageLeft
+        } else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.imagePosition = button.image == nil ? .noImage : .imageOnly
+        }
     }
 
     /// A clean quit (⌘Q, menubar Quit, logout) passes through here; a signal
@@ -100,6 +127,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openWindow() {
         MainWindowController.present()
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let path = response.notification.request.content
+            .userInfo["path"] as? String
+        Task { @MainActor in
+            MainWindowController.present()
+            if let path {
+                NotificationCenter.default.post(
+                    name: .houstonOpenProject,
+                    object: nil,
+                    userInfo: ["path": path]
+                )
+            }
+        }
+        completionHandler()
     }
 
     /// Merges `tray.png` (22×22) and `tray@2x.png` (44×44) into one image with a

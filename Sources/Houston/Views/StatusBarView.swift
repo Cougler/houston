@@ -300,7 +300,7 @@ struct StatusBarView: View {
     private static func meterColor(_ pct: Double) -> Color {
         if pct >= 85 { return .red }
         if pct >= 60 { return .orange }
-        return .green
+        return Theme.dotActive
     }
 }
 

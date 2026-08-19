@@ -7,6 +7,9 @@ extension Notification.Name {
     static let houstonSettingsChanged = Notification.Name("HoustonSettingsChanged")
     /// The menu bar asked for the Claude status-bar consent prompt.
     static let houstonShowStatusFeedPrompt = Notification.Name("HoustonShowStatusFeedPrompt")
+    /// A macOS notification was clicked — select this project
+    /// (`userInfo["path"]`).
+    static let houstonOpenProject = Notification.Name("HoustonOpenProject")
 }
 
 /// Houston's settings. Unknown keys in the JSON are preserved on write.

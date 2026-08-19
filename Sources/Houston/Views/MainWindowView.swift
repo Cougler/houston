@@ -50,6 +50,7 @@ struct MainWindowView: View {
     @ObservedObject private var terminals = TerminalSessionManager.shared
     @ObservedObject private var updates = UpdateChecker.shared
     @ObservedObject private var installer = UpdateInstaller.shared
+    @ObservedObject private var notify = NotifyStore.shared
     @State private var selection: SidebarSelection?
     /// Agent the header's split button launches; the chevron menu changes it.
     @State private var launchAgent: CodingAgent = .claude
@@ -72,6 +73,10 @@ struct MainWindowView: View {
     @State private var statusFeedInstalled = StatusLineFeed.state == .houston
     /// Consent dialog for taking over the Claude statusline.
     @State private var showStatusPrompt = false
+    /// Whether Houston's hooks feed notifications (mirrors settings.json).
+    @State private var notifyInstalled = NotifyFeed.isInstalled
+    /// Consent dialog for installing the notification hooks.
+    @State private var showNotifyPrompt = false
     /// The automatic offer fires at most once per launch.
     @State private var statusPromptOffered = false
     /// Project folders currently collapsed, persisted in settings.
@@ -98,6 +103,10 @@ struct MainWindowView: View {
     /// gesture's start, so it must be applied to the start width, not the
     /// live one.
     @State private var sidebarDragStart: CGFloat?
+    /// The terminal region's frame in root coordinates — where the floating
+    /// panels live. The outside-click scrim covers everything around it.
+    @State private var detailFrame: CGRect = .zero
+    private static let rootSpace = "houston-root"
     /// Pointer over the divider's grip — lights the faint stroke that tells
     /// the user there's something to grab.
     @State private var dividerHovered = false
@@ -124,7 +133,12 @@ struct MainWindowView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .coordinateSpace(name: Self.rootSpace)
+        .onPreferenceChange(DetailFrameKey.self) { frame in
+            Task { @MainActor in detailFrame = frame }
+        }
         .overlay(alignment: .topLeading) { railFlyoutLayer }
+        .overlay(alignment: .topLeading) { panelOutsideClickScrim }
         .overlay {
             if showWelcome {
                 WelcomeView {
@@ -146,6 +160,7 @@ struct MainWindowView: View {
             git.start()
             git.watchRows(gitWatchSet)
             statusFeed.start()
+            notify.start()
             terminals.startAgentPolling()
             terminals.detectInstalledAgents()
             // Ship the mission skills: copy any that are missing into
@@ -172,6 +187,21 @@ struct MainWindowView: View {
             terminals.activeProjectPath = newValue?.projectPath
             terminals.activeTabID = newValue?.tabID
             git.watch(newValue?.projectPath)
+            notify.markSeen(projectPath: newValue?.projectPath)
+        }
+        // Coming back to Houston with a flagged project on screen spends its
+        // attention; a banner click routes to the project it came from.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            notify.markSeen(projectPath: selection?.projectPath)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .houstonOpenProject)) { note in
+            if let path = note.userInfo?["path"] as? String {
+                select(.project(path))
+            }
         }
         // A nested shell closing (⇧⌘W, context menu) must not strand the
         // selection on a dead tab — fall back to the project's main terminal.
@@ -224,6 +254,23 @@ struct MainWindowView: View {
                 + "~/.claude/settings.json. Your current one is backed up and can be "
                 + "restored anytime from the sidebar's gear menu. Running sessions "
                 + "switch over at their next response."
+            )
+        }
+        .alert("Notify when Claude needs you?", isPresented: $showNotifyPrompt) {
+            Button("Enable") {
+                notifyInstalled = NotifyFeed.install()
+                NotifyStore.requestAuthorization()
+            }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text(
+                "Houston can tell you the moment a session is waiting — a "
+                + "permission request, idle waiting for input, or a finished "
+                + "response — with a notification, a menubar dot, and a badge "
+                + "on the project's row.\n\nThis adds a Houston entry to the "
+                + "hooks in ~/.claude/settings.json. Your own hooks are left "
+                + "untouched, and Disable removes exactly Houston's entry. "
+                + "Sessions already running pick it up on their next turn."
             )
         }
     }
@@ -340,9 +387,11 @@ struct MainWindowView: View {
 
     // MARK: - Collapsed rail
 
-    /// Rail width — enough for a 34pt icon button centered with breathing
-    /// room; the traffic lights float above it, same as the full sidebar.
-    private let railWidth: CGFloat = 52
+    /// Rail width — the traffic lights end at x=69 (last button 55+14,
+    /// measured), and the rail runs 12pt past them so it fully contains the
+    /// cluster. That's also what lets the empty-state sky go without a shelf
+    /// under the lights.
+    private let railWidth: CGFloat = 81
 
     /// The collapsed sidebar: three section icons whose popovers carry the
     /// same rows the full sidebar shows, expand at the bottom above the gear.
@@ -368,13 +417,20 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.buttonActiveStroke)
                 }
             }
-            FooterIconButton(
-                systemName: "sidebar.left",
-                help: "Expand sidebar",
-                action: toggleSidebarCollapse
-            )
-            settingsMenu
-                .padding(.bottom, 12)
+            // Same arrangement AND position as the expanded footer — gear,
+            // then collapse, left-aligned at the same 14pt inset — so the
+            // pair doesn't shift when the sidebar collapses.
+            HStack(spacing: 2) {
+                settingsMenu
+                FooterIconButton(
+                    systemName: "sidebar.left",
+                    help: "Expand sidebar",
+                    action: toggleSidebarCollapse
+                )
+            }
+            .padding(.leading, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -426,6 +482,45 @@ struct MainWindowView: View {
                     .offset(x: railWidth + 6, y: flyoutTop(for: section))
                     .transition(.opacity.combined(with: .offset(x: -8)))
             }
+        }
+    }
+
+    /// Click-away for the floating git/skills panels, covering what their
+    /// in-region scrim can't: the sidebar, the header, and the status bar.
+    /// Three rectangles around the detail region rather than one sheet over
+    /// the window, so the panels themselves (inside the region) stay
+    /// clickable. Clicks are consumed — the standard popover bargain.
+    @ViewBuilder
+    private var panelOutsideClickScrim: some View {
+        if showSkills || showGit, detailFrame != .zero {
+            GeometryReader { g in
+                ZStack(alignment: .topLeading) {
+                    // Left of the detail region: sidebar/rail + divider.
+                    scrimRect(width: detailFrame.minX, height: g.size.height)
+                    // Above it: the header.
+                    scrimRect(width: g.size.width - detailFrame.minX,
+                              height: detailFrame.minY)
+                        .offset(x: detailFrame.minX)
+                    // Below it: the status bar.
+                    scrimRect(width: g.size.width - detailFrame.minX,
+                              height: max(0, g.size.height - detailFrame.maxY))
+                        .offset(x: detailFrame.minX, y: detailFrame.maxY)
+                }
+            }
+        }
+    }
+
+    private func scrimRect(width: CGFloat, height: CGFloat) -> some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture { closeFloatingPanels() }
+            .frame(width: max(0, width), height: max(0, height))
+    }
+
+    private func closeFloatingPanels() {
+        withAnimation(.easeOut(duration: 0.18)) {
+            showSkills = false
+            showGit = false
         }
     }
 
@@ -960,6 +1055,17 @@ struct MainWindowView: View {
                 }
             }
 
+            if notifyInstalled {
+                Button("Disable Needs-You Notifications") {
+                    NotifyFeed.restore()
+                    notifyInstalled = false
+                }
+            } else {
+                Button("Notify When Claude Needs You…") {
+                    showNotifyPrompt = true
+                }
+            }
+
             Divider()
 
             Button("Check for Updates…") {
@@ -1366,7 +1472,6 @@ struct MainWindowView: View {
                     TerminalHostView(path: path, tabID: selection?.tabID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .padding(.leading, 8)
                         .padding(.trailing, 16)
                         .padding(.bottom, 6)
                     // Scrim under the floating panels: any click outside a
@@ -1375,12 +1480,7 @@ struct MainWindowView: View {
                     if showSkills || showGit {
                         Color.clear
                             .contentShape(Rectangle())
-                            .onTapGesture {
-                                withAnimation(.easeOut(duration: 0.18)) {
-                                    showSkills = false
-                                    showGit = false
-                                }
-                            }
+                            .onTapGesture { closeFloatingPanels() }
                     }
                     // Floats over the terminal; the agent-gate mirrors the
                     // button so the card leaves with the session.
@@ -1427,6 +1527,14 @@ struct MainWindowView: View {
                         .transition(.opacity)
                     }
                 }
+                .background(
+                    GeometryReader { g in
+                        Color.clear.preference(
+                            key: DetailFrameKey.self,
+                            value: g.frame(in: .named(Self.rootSpace))
+                        )
+                    }
+                )
             } else {
                 // Selection normally clears when the last pane closes (see
                 // the terminalPaths onChange) — this is the transient frame
@@ -1455,20 +1563,10 @@ struct MainWindowView: View {
         }
     }
 
-    /// The empty-state sky, with a chrome-colored shelf tucked under the
-    /// traffic lights while the sidebar is collapsed: the lights are wider
-    /// than the rail, and without it they float over the darker sky. The
-    /// shelf is the same fill as the rail, so together they read as one
-    /// L-shaped piece of chrome with a rounded inner corner.
+    /// The empty-state sky. The collapsed rail is wider than the traffic
+    /// lights, so no shelf is needed under them anymore.
     private var emptyState: some View {
         EmptyStateView()
-            .overlay(alignment: .topLeading) {
-                if sidebarCollapsed {
-                    UnevenRoundedRectangle(bottomTrailingRadius: 14)
-                        .fill(Theme.background)
-                        .frame(width: 36, height: trafficLightInset)
-                }
-            }
     }
 
     // MARK: - Sidebar data
@@ -1745,6 +1843,7 @@ struct MainWindowView: View {
                     hasTerminal: active,
                     isProject: !active && ProjectKindCache.isProject(path),
                     gitStatus: git.rowStatuses[path] ?? .none,
+                    needsAttention: notify.hasAttention(path: path),
                     hovered: hovered,
                     selected: selection == id,
                     onClose: { closeTerminal(path) }
@@ -1755,6 +1854,7 @@ struct MainWindowView: View {
                     agent: shellAgent(path: path, tab: tabID),
                     hasTerminal: true,
                     gitStatus: git.rowStatuses[path] ?? .none,
+                    needsAttention: notify.hasAttention(path: path, tab: tabID),
                     hovered: hovered,
                     selected: selection == id,
                     onClose: { terminals.closeTab(path: path, tabID: tabID) }
@@ -1821,13 +1921,15 @@ struct MainWindowView: View {
                     primaryAgent(path: path)?.label ?? "-",
                     ProjectKindCache.isProject(path) ? "p" : "-",
                     String(describing: git.rowStatuses[path] ?? .none),
+                    notify.hasAttention(path: path) ? "!" : "-",
                     selected ? "s" : "-",
                     hovered ? "h" : "-",
                 ].joined(separator: "|")
             case let .shell(path, tab):
                 let agent = shellAgent(path: path, tab: tab)?.label ?? "-"
                 let status = String(describing: git.rowStatuses[path] ?? .none)
-                return "sh:\(title)|\(tab)|\(agent)|\(status)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
+                let bang = notify.hasAttention(path: path, tab: tab) ? "!" : "-"
+                return "sh:\(title)|\(tab)|\(agent)|\(status)|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
             case let .server(sid):
                 let port = servers.devServers.first { $0.id == sid }.map { String($0.port) } ?? "-"
                 let health = servers.health[sid].map { String(describing: $0) } ?? "-"
@@ -2020,6 +2122,13 @@ private enum RailSection: String, Identifiable {
 
 /// A rail icon button: quiet glyph, hover fill, selected fill while its
 /// popover is open.
+private struct DetailFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
 private struct RailButton<Icon: View>: View {
     let help: String
     let active: Bool
@@ -2249,6 +2358,9 @@ struct SidebarRow: View {
     /// its Active row without moving anything.
     var live: Bool = false
     var gitStatus: GitRowStatus = .none
+    /// The session is waiting on the user (permission prompt, idle, or a
+    /// finished turn) — amber dot over the terminal icon until viewed.
+    var needsAttention: Bool = false
     var hovered: Bool = false
     var selected: Bool = false
     /// Close action for a live terminal row — while hovered, an ✕ takes the
@@ -2302,6 +2414,21 @@ struct SidebarRow: View {
                     .help("Close terminal")
                 } else {
                     TerminalRowIcon(agent: agent, size: nested ? 13 : 16)
+                        .overlay(alignment: .topTrailing) {
+                            if needsAttention {
+                                Circle()
+                                    .fill(Color(hex: 0xD97706))
+                                    .frame(width: 6, height: 6)
+                                    // Ring in the row background so the dot
+                                    // reads over any icon art.
+                                    .background(
+                                        Circle().fill(Theme.background)
+                                            .frame(width: 9, height: 9)
+                                    )
+                                    .offset(x: 3, y: -3)
+                                    .help("Claude needs you")
+                            }
+                        }
                 }
             }
         }
