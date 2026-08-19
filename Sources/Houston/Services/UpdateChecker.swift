@@ -116,11 +116,15 @@ final class UpdateChecker: ObservableObject {
         if let update {
             alert.messageText = "Houston \(update.version) is available"
             alert.informativeText = "You're running "
-                + (Self.currentVersion ?? "a development build") + "."
-            alert.addButton(withTitle: "Download")
+                + (Self.currentVersion ?? "a development build")
+                + ". Installing relaunches Houston, ending any terminal "
+                + "sessions running in it."
+            alert.addButton(withTitle: "Install and Relaunch")
             alert.addButton(withTitle: "Later")
             if alert.runModal() == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(update.url)
+                // Falls back to opening the browser for dev builds and
+                // DMG-less releases.
+                UpdateInstaller.shared.install(update)
             }
         } else {
             alert.messageText = "You're up to date"

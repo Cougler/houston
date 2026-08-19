@@ -49,6 +49,7 @@ struct MainWindowView: View {
     @StateObject private var handoffs = HandoffCoordinator()
     @ObservedObject private var terminals = TerminalSessionManager.shared
     @ObservedObject private var updates = UpdateChecker.shared
+    @ObservedObject private var installer = UpdateInstaller.shared
     @State private var selection: SidebarSelection?
     /// Agent the header's split button launches; the chevron menu changes it.
     @State private var launchAgent: CodingAgent = .claude
@@ -354,11 +355,15 @@ struct MainWindowView: View {
             Spacer(minLength: 0)
             if let update = updates.available {
                 RailButton(
-                    help: "Update available — download Houston \(update.version)",
+                    help: installer.isBusy
+                        ? "Updating Houston…"
+                        : "Update available — install Houston \(update.version)",
                     active: false,
-                    action: { NSWorkspace.shared.open(update.url) }
+                    action: { installer.requestInstall(update) }
                 ) {
-                    Image(systemName: "arrow.down.circle.fill")
+                    Image(systemName: installer.isBusy
+                        ? "arrow.triangle.2.circlepath"
+                        : "arrow.down.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.buttonActiveStroke)
                 }
@@ -892,8 +897,8 @@ struct MainWindowView: View {
                 action: toggleSidebarCollapse
             )
             if let update = updates.available {
-                UpdatePill(version: update.version) {
-                    NSWorkspace.shared.open(update.url)
+                UpdatePill(version: update.version, busy: installer.isBusy) {
+                    installer.requestInstall(update)
                 }
                 .padding(.leading, 4)
             }
@@ -2057,18 +2062,21 @@ private struct PopoverRow<Content: View>: View {
 
 /// Accent pill in the sidebar footer while a newer release exists — the
 /// quiet, persistent form of the update notice (the loud one is the manual
-/// check's alert). Click downloads the DMG.
+/// check's alert). Click installs in place and relaunches.
 private struct UpdatePill: View {
     let version: String
+    var busy: Bool = false
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: "arrow.down.circle.fill")
+                Image(systemName: busy
+                    ? "arrow.triangle.2.circlepath"
+                    : "arrow.down.circle.fill")
                     .font(.system(size: 10, weight: .semibold))
-                Text(version)
+                Text(busy ? "Updating…" : version)
                     .font(.system(size: 10, weight: .semibold))
             }
             .foregroundStyle(Theme.buttonActiveStroke)
@@ -2085,7 +2093,10 @@ private struct UpdatePill: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help("Update available — download Houston \(version)")
+        .disabled(busy)
+        .help(busy
+            ? "Updating Houston…"
+            : "Update available — install Houston \(version)")
     }
 }
 

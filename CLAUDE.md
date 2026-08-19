@@ -233,6 +233,16 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   DMG attached: `scripts/package.sh X.Y.Z && gh release create vX.Y.Z
   dist/Houston.dmg`. Debug builds have no bundle version and never auto-check;
   the footer pill / rail badge appear only in the packaged app.
+- **Updates install in place (1.0.4+).** `UpdateInstaller` downloads the
+  release DMG, mounts it, and refuses anything that isn't Houston: intact
+  `codesign --verify --deep --strict`, `TeamIdentifier=4CDVHNL984`, and a
+  passing `spctl` assess (i.e. still notarized). The swap moves the old
+  bundle aside first (running executables keep their inode) and rolls back on
+  failure; `ditto`, not FileManager copy — a plain copy can break the seal.
+  Relaunch is a detached `sh` child that waits for our pid to exit. Only a
+  packaged app self-installs; dev builds and DMG-less releases fall back to
+  the browser. Installing relaunches Houston, so every entry point confirms —
+  sessions die with Houston.
 
 ## History — deliberately removed, don't re-add
 Houston began as a port of an Electron menubar app. Deleted 2026-08-11 (~3,200
