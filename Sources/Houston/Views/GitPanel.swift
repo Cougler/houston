@@ -144,6 +144,7 @@ struct GitPanel: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Theme.text)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                         Image(systemName: "chevron.down")
                             .font(.system(size: 8, weight: .semibold))
                             .foregroundStyle(Theme.heading)
@@ -153,7 +154,9 @@ struct GitPanel: View {
                 .menuStyle(.button)
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
-                .fixedSize()
+                // No .fixedSize() here: the panel is a fixed 320pt, and a
+                // fixed-size menu takes the full ideal width of a long branch
+                // name, blowing the whole content stack out past the card.
                 .help("Switch or create a branch")
                 Spacer(minLength: 0)
                 if let remote = info.remoteURL {
