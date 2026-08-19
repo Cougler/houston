@@ -84,9 +84,9 @@ struct StatusBarView: View {
         .lineLimit(1)
         .padding(.leading, 24)
         .padding(.trailing, 24)
-        .frame(height: 34)
+        .frame(height: 26)
         .background(Theme.background)
-        .padding(.bottom, 8)
+        .padding(.bottom, 4)
     }
 
     private var modelMenu: some View {

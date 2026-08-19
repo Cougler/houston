@@ -495,7 +495,7 @@ struct MainWindowView: View {
                     .frame(width: 22, height: 22)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Theme.buttonActiveFill)
+                            .fill(Theme.rowSelected)
                     )
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
@@ -543,7 +543,7 @@ struct MainWindowView: View {
     /// A friendly empty state for a rail popover. Sized to
     /// `railEmptyStateHeight` — keep the two in step.
     private func railEmptyState(
-        _ headline: String, _ subtext: String,
+        _ headline: String, _ subtext: String? = nil,
         @ViewBuilder icon: () -> some View
     ) -> some View {
         VStack(spacing: 8) {
@@ -551,11 +551,13 @@ struct MainWindowView: View {
             Text(headline)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text(subtext)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
+            if let subtext {
+                Text(subtext)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 24)
@@ -574,13 +576,10 @@ struct MainWindowView: View {
         ) {
             Image(systemName: "terminal")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.buttonActiveStroke)
+                .foregroundStyle(Theme.textSecondary)
         } rows: {
             if terminalPaths.isEmpty {
-                railEmptyState(
-                    "No terminals open",
-                    "Open one below — every project gets its own shell."
-                ) {
+                railEmptyState("No terminals open") {
                     Image(systemName: "terminal")
                         .font(.system(size: 20))
                         .foregroundStyle(Theme.heading)
@@ -617,8 +616,9 @@ struct MainWindowView: View {
                 }
             }
         } footer: {
+            // Deliberately leaves the flyout open — the new row appearing in
+            // place is the action's feedback.
             railPopoverFooter("New Terminal") {
-                setRailPopover(nil)
                 runAction("new-terminal")
             }
         }
@@ -634,7 +634,7 @@ struct MainWindowView: View {
             count: list.count,
             rowsHeight: list.isEmpty ? railEmptyStateHeight : CGFloat(list.count) * 42
         ) {
-            ServerGlyph(color: Theme.buttonActiveStroke, size: 13)
+            ServerGlyph(color: Theme.textSecondary, size: 13)
         } rows: {
             if list.isEmpty {
                 railEmptyState(
@@ -687,7 +687,7 @@ struct MainWindowView: View {
         ) {
             Image(systemName: "shippingbox")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.buttonActiveStroke)
+                .foregroundStyle(Theme.textSecondary)
         } rows: {
             if empty {
                 railEmptyState(
@@ -1427,7 +1427,7 @@ struct MainWindowView: View {
                 // the terminalPaths onChange) — this is the transient frame
                 // before it does, and any odd path into a pane-less
                 // selection. Same sky either way.
-                EmptyStateView()
+                emptyState
             }
         case let .server(id):
             if let server = servers.devServers.first(where: { $0.id == id }) {
@@ -1446,8 +1446,24 @@ struct MainWindowView: View {
                 )
             }
         case .none:
-            EmptyStateView()
+            emptyState
         }
+    }
+
+    /// The empty-state sky, with a chrome-colored shelf tucked under the
+    /// traffic lights while the sidebar is collapsed: the lights are wider
+    /// than the rail, and without it they float over the darker sky. The
+    /// shelf is the same fill as the rail, so together they read as one
+    /// L-shaped piece of chrome with a rounded inner corner.
+    private var emptyState: some View {
+        EmptyStateView()
+            .overlay(alignment: .topLeading) {
+                if sidebarCollapsed {
+                    UnevenRoundedRectangle(bottomTrailingRadius: 14)
+                        .fill(Theme.background)
+                        .frame(width: 36, height: trafficLightInset)
+                }
+            }
     }
 
     // MARK: - Sidebar data
@@ -1507,6 +1523,12 @@ struct MainWindowView: View {
     private var entries: [SidebarEntry] {
         var out: [SidebarEntry] = []
         out.append(.header("Terminals"))
+        // The section never vanishes: with nothing open, the "New Terminal"
+        // affordance stands in for the first row (same 32pt, so the sections
+        // below don't jump when it's swapped for a real terminal).
+        if terminalPaths.isEmpty {
+            out.append(.action(key: "new-terminal", title: "New Terminal"))
+        }
         for path in terminalPaths {
             let list = terminals.tabs[path] ?? []
             out.append(.row(

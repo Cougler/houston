@@ -139,18 +139,18 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         return c
     }
 
-    /// Houston's design-matched terminal: the app's chrome background/#111
-    /// over the alabaster ANSI palette in light, #1E1E1E/#E8E8E8 over
-    /// afterglow in dark. Light background matches `Theme.background` so the
-    /// terminal doesn't read as a separate panel.
+    /// Houston's design-matched terminal: #111 over the alabaster ANSI
+    /// palette in light, #E8E8E8 over afterglow in dark. The background sits
+    /// a step *darker* than the chrome in both modes (chrome is #EBEBEB /
+    /// #1E1E1E), so the terminal reads as its own recessed surface.
     private static var designTheme: TerminalTheme {
         TerminalTheme(
             light: TerminalConfiguration.alabaster
-                .background("EBEBEB")
+                .background("E0E0E0")
                 .foreground("111111")
                 .cursorColor("111111"),
             dark: TerminalConfiguration.afterglow
-                .background("1E1E1E")
+                .background("181818")
                 .foreground("E8E8E8")
                 .cursorColor("E8E8E8")
         )
