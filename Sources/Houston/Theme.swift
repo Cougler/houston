@@ -72,6 +72,14 @@ enum Theme {
             ? NSColor.white.withAlphaComponent(0.05)
             : NSColor.black.withAlphaComponent(0.03)
     })
+    /// A small inline control (icon/pill button) under the pointer —
+    /// markedly darker than the row tints, because these buttons usually sit
+    /// ON an already row-tinted surface where rowSelected reads as nothing.
+    static let controlHovered = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.16)
+            : NSColor.black.withAlphaComponent(0.11)
+    })
 
     /// Status dots — saturated enough to hold on both surfaces. The active
     /// green darkens in light mode: #00DD21 on white sat under 2:1 contrast,

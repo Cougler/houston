@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-08-19 — Self-updater, needs-you notifications, first real releases
+
+Houston now ships properly: v1.0.3 and v1.0.4 are on GitHub Releases with notarized DMGs, tryhoustonapp.com serves the same build, a `/release` skill does the whole chain in one command, and 1.0.4+ installs updates in place (verify → swap → relaunch). The big new feature is needs-you notifications — Claude Code's Notification/Stop hooks drive native banners, a menubar dot, and rose-washed sidebar rows — alongside a pile of chrome polish (git sheet fixes, 81pt collapsed rail containing the traffic lights, click-away panels, accessible light-mode green). Next: enable the hooks and live with notifications, then cut 1.0.5 to test the self-updater's first real in-place install.
+
+**Done this session:**
+- Git sheet: fixed long branch names blowing the 320pt card out (fixed "Branch" title, name below in smaller text), wider section spacing, untracked dirs expanded to real files (`-uall`), "Empty file" preview note
+- Releases: v1.0.3 and v1.0.4 published (signed, notarized, stapled DMGs) — the repo had NO releases before, so installed apps had nothing to update from; site DMG synced both times
+- `/release` skill (.claude/skills/release): package → GitHub release → site DMG → verify, one command
+- Self-updater (`UpdateInstaller`): downloads the release DMG, verifies deep codesign + TeamIdentifier 4CDVHNL984 + Gatekeeper, swaps the bundle with rollback, relaunches via detached child; pills/alert install in place with confirmation (sessions die with Houston)
+- Needs-you notifications (`NotifyFeed`/`NotifyStore`): one script as Claude's Notification+Stop hooks (consent-gated, non-destructive settings.json hooks merge), events per HOUSTON_PANE, banners (packaged builds only) + menubar amber dot + sidebar badges; banner click routes to the project; viewing clears
+- Sidebar row re-layout: agent/AI icon now leads the row, git dot moved to trailing (hover-✕ swaps in same 16pt cell), attention = rose row wash + 3pt edge bar drawn in RowChrome
+- Chrome: collapsed rail 81pt (traffic lights end at x=69, measured; L-shelf removed), terminal leading padding removed, footer gear+collapse horizontal and pinned at 14pt in both states, git/skills panels dismiss on clicks anywhere (3 scrim rects around tracked detail frame), popover fills match sidebar bg in light mode, dotActive green darkened to #15803D in light mode (all meters unified on the token)
+
+**Up next:**
+- Enable needs-you notifications from the gear and validate the full loop (badge in debug; banners need the packaged app)
+- Cut 1.0.5 via /release once validated — first real test of the self-updater from installed 1.0.4
+- Eyeball the new row layout (icon leading / git dot trailing) and the rose attention wash
+
+**Handoff:**
+- UNCOMMITTED: MainWindowView.swift carries the row re-layout + attention wash/edge-bar (chosen over dot via user Q&A: "Row wash + edge bar") — build passes, running in the relaunched debug binary, not yet committed; run /push.
+- The notification hooks are NOT enabled — NotifyFeed.install() only runs from the gear-menu consent alert; nothing has ever exercised the pipeline end-to-end. Debug builds can't banner (UNUserNotificationCenter needs a bundle id) — badges/menubar dot only.
+- The self-updater's real path (installed app swapping itself) is untested — only the pipeline commands were verified headlessly against the 1.0.3 DMG. The 1.0.5 release is the test.
+- Anyone on the 1.0.3 site DMG updates via browser download (self-updater shipped in 1.0.4).
+- Releasing = /release skill; SIGN_ID is the Developer ID "Aaron Cougle (4CDVHNL984)", notarization via keychain profile houston-notary. GitHub release + site DMG must both happen or installs and downloads drift.
+- houston-fos (the site) is NOT a git repo — deploys go straight from the working dir via vercel --prod.
+
+---
+
 ## 2026-08-12 — UI polish pass, mission controls, packaged skills, first DMG
 
 Houston now packages as a universal, ad-hoc-signed DMG (`scripts/package.sh` → `dist/Houston.dmg`) and the invisible-window bug it exposed is fixed. The day's polish landed everywhere: warm light theme with 10%-black borders and a matching terminal background, a mirror-not-move sidebar (Terminals / Servers / Projects with library rows that never jump sections), header mission controls (rocket Start Mission gated on a mission log; a Mission menu whose Handoff does a one-click log → /clear → /handoff context reset via the new bundled log-mission skill), an evenly-distributed responsive status bar with peak hours, a skills sheet with detail pages, and health-colored server icons. Next: install the DMG and live in the packaged build.

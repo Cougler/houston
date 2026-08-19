@@ -147,10 +147,11 @@ private struct SkillRow: View {
                     .foregroundStyle(playHovered ? Theme.text : Theme.textSecondary)
                     .frame(width: 22, height: 22)
                     .background(
-                        // Resting on the row-hover tint, darkening to the
-                        // selection tint under the pointer.
+                        // Resting on the row-hover tint, dropping to the
+                        // control tint under the pointer — rowSelected was
+                        // indistinguishable on an already-tinted row.
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(playHovered ? Theme.rowSelected : Theme.rowHovered)
+                            .fill(playHovered ? Theme.controlHovered : Theme.rowHovered)
                     )
                     .contentShape(Rectangle())
             }
@@ -306,7 +307,7 @@ private struct DetailActionButton: View {
             .frame(height: 26)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(hovered ? Theme.rowHovered : Theme.buttonFill)
+                    .fill(hovered ? Theme.controlHovered : Theme.buttonFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)

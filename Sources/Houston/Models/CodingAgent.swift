@@ -161,9 +161,9 @@ enum CodingAgent: Equatable, Hashable {
     }
 }
 
-/// The 16pt mark at the left of a Terminals row: a plain terminal glyph for a
-/// bare shell, or the running agent's logo from `Resources/icons` (with a
-/// tinted-monogram fallback for agents without an asset).
+/// A Terminals-row mark: a plain terminal glyph when `agent` is nil (the
+/// 16pt leading slot), or the agent's logo from `Resources/icons` (with a
+/// tinted-monogram fallback) — used small as the row's corner badge.
 struct TerminalRowIcon: View {
     let agent: CodingAgent?
     /// Point size; 16 for terminal rows, smaller for nested shells.

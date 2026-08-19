@@ -14,9 +14,17 @@ struct GitPanel: View {
     var onSwitchBranch: (String) -> Void = { _ in }
     /// Prompts for a name and creates + switches to it.
     var onNewBranch: () -> Void = {}
+    /// Sends a composed git command to the project's shell. `execute: false`
+    /// types it without running — destructive commands, where pressing
+    /// Return in the terminal is the user's confirmation.
+    var onCommand: (_ command: String, _ execute: Bool) -> Void = { _, _ in }
+    /// One-line modal prompt (title, message, placeholder) for commands
+    /// that need input, like a commit message.
+    var prompt: (String, String, String) -> String? = { _, _, _ in nil }
 
     private enum Page: Equatable {
         case list
+        case commands
         case commit(GitCommit)
         case file(GitChange)
     }
@@ -31,6 +39,9 @@ struct GitPanel: View {
             case .list:
                 listPage
                     .transition(.move(edge: .leading).combined(with: .opacity))
+            case .commands:
+                GitCommandsPage(onBack: goBack, run: run(_:))
+                    .transition(.move(edge: .trailing))
             case let .commit(commit):
                 CommitDetailPage(commit: commit, detail: detail, onBack: goBack)
                     .transition(.move(edge: .trailing))
@@ -81,6 +92,20 @@ struct GitPanel: View {
                 detail = loaded
             }
         }
+    }
+
+    /// Resolve a command's input (if any), then hand it to the shell —
+    /// executed for safe commands, only typed for destructive ones.
+    private func run(_ spec: GitCommandSpec) {
+        var command = spec.command
+        if let input = spec.input {
+            guard let text = prompt(input.title, input.message, input.placeholder),
+                  !text.isEmpty else { return }
+            command = command.replacingOccurrences(
+                of: "%@", with: shellEscaped(text)
+            )
+        }
+        onCommand(command, !spec.typeOnly)
     }
 
     private func open(_ change: GitChange) {
@@ -159,6 +184,9 @@ struct GitPanel: View {
                 .fixedSize()
                 .help("Switch or create a branch")
                 Spacer(minLength: 0)
+                HoverArrowButton(icon: "terminal", help: "Git commands") {
+                    withAnimation(.easeOut(duration: 0.18)) { page = .commands }
+                }
                 if let remote = info.remoteURL {
                     HoverArrowButton(help: "Open on the remote") {
                         Actions.openExternal(remote)
@@ -325,6 +353,181 @@ private struct CommitDetailPage: View {
     private var byline: String {
         guard let detail else { return commit.timeAgo }
         return "\(detail.author) · \(detail.date) (\(commit.timeAgo))"
+    }
+}
+
+// MARK: - Commands page
+
+/// One entry in the command catalog: a plain-language name over the literal
+/// command it runs. `%@` marks where prompted input lands.
+private struct GitCommandSpec: Identifiable {
+    let title: String
+    let command: String
+    /// Prompt (title, message, placeholder) shown before running.
+    var input: (title: String, message: String, placeholder: String)? = nil
+    /// Destructive: typed into the terminal but NOT executed — the user's
+    /// Return keypress is the confirmation.
+    var typeOnly = false
+    var id: String { title }
+}
+
+/// Escapes prompted text for interpolation inside shell double quotes.
+private func shellEscaped(_ text: String) -> String {
+    text.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "$", with: "\\$")
+        .replacingOccurrences(of: "`", with: "\\`")
+}
+
+private let commitPrompt: (String, String, String) = (
+    "Commit Message", "One line describing what this commit changes.", "what changed"
+)
+
+private let gitCommandSections: [(title: String, subtext: String, commands: [GitCommandSpec])] = [
+    ("SYNC", "talk to the remote", [
+        GitCommandSpec(title: "Pull", command: "git pull"),
+        GitCommandSpec(title: "Push", command: "git push"),
+        GitCommandSpec(title: "Fetch", command: "git fetch --all --prune"),
+    ]),
+    ("COMMIT", "save your work", [
+        GitCommandSpec(title: "Stage everything", command: "git add -A"),
+        GitCommandSpec(
+            title: "Commit staged changes",
+            command: "git commit -m \"%@\"", input: commitPrompt
+        ),
+        GitCommandSpec(
+            title: "Stage + commit everything",
+            command: "git add -A && git commit -m \"%@\"", input: commitPrompt
+        ),
+        GitCommandSpec(
+            title: "Amend last commit", command: "git commit --amend --no-edit"
+        ),
+    ]),
+    ("STASH", "shelve changes for later", [
+        GitCommandSpec(title: "Stash changes", command: "git stash push -u"),
+        GitCommandSpec(title: "Restore latest stash", command: "git stash pop"),
+        GitCommandSpec(title: "List stashes", command: "git stash list"),
+    ]),
+    ("UNDO", "red ones are typed, not run — Return confirms", [
+        GitCommandSpec(title: "Unstage everything", command: "git reset"),
+        GitCommandSpec(
+            title: "Undo last commit, keep changes",
+            command: "git reset --soft HEAD~1"
+        ),
+        GitCommandSpec(
+            title: "Discard all changes", command: "git restore .", typeOnly: true
+        ),
+        GitCommandSpec(
+            title: "Delete untracked files", command: "git clean -fd", typeOnly: true
+        ),
+    ]),
+    ("INSPECT", "read-only, safe anytime", [
+        GitCommandSpec(title: "Status", command: "git status"),
+        GitCommandSpec(title: "Recent commits", command: "git log --oneline -15"),
+        GitCommandSpec(title: "Unstaged diff", command: "git diff"),
+    ]),
+]
+
+private struct GitCommandsPage: View {
+    let onBack: () -> Void
+    let run: (GitCommandSpec) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Button(action: onBack) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Back")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(Theme.heading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Git Commands")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("Click one to run it in this project's terminal.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(gitCommandSections, id: \.title) { section in
+                        GitSectionLabel(
+                            title: section.title, subtext: section.subtext
+                        )
+                        ForEach(section.commands) { spec in
+                            CommandRow(spec: spec) { run(spec) }
+                        }
+                        Spacer().frame(height: 22)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 12)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct CommandRow: View {
+    let spec: GitCommandSpec
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(spec.title)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text(spec.command.replacingOccurrences(of: "%@", with: "…"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(
+                            spec.typeOnly ? Theme.closeRed : Theme.textSecondary
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: spec.typeOnly ? "keyboard" : "return")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.heading.opacity(hovered ? 1 : 0.4))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(hovered ? Theme.rowHovered : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        if spec.typeOnly {
+            return "Destructive — typed into the terminal, press Return to confirm"
+        }
+        if spec.input != nil { return "Asks for a message, then runs" }
+        return "Runs in this project's terminal"
     }
 }
 
@@ -573,13 +776,14 @@ private struct CommitRow: View {
 }
 
 private struct HoverArrowButton: View {
+    var icon: String = "arrow.up.forward"
     let help: String
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "arrow.up.forward")
+            Image(systemName: icon)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(hovered ? Theme.text : Theme.heading)
                 .frame(width: 20, height: 20)

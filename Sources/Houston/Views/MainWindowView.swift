@@ -1521,7 +1521,23 @@ struct MainWindowView: View {
                                 ), !name.isEmpty else { return }
                                 terminals.send("git switch -c \"\(name)\"\n", to: path)
                                 git.refresh()
-                            }
+                            },
+                            onCommand: { command, execute in
+                                if execute {
+                                    terminals.send(command + "\n", to: path)
+                                    git.refresh()
+                                } else {
+                                    // Destructive: type it and get out of the
+                                    // way — the user's Return is the confirm.
+                                    terminals.send(command, to: path)
+                                    withAnimation(.easeOut(duration: 0.18)) {
+                                        showGit = false
+                                    }
+                                }
+                            },
+                            prompt: { promptForText(
+                                title: $0, message: $1, placeholder: $2
+                            ) }
                         )
                         .padding(12)
                         .transition(.opacity)
@@ -2322,12 +2338,19 @@ struct MenuAnchorReader: NSViewRepresentable {
 private struct RowChrome: ViewModifier {
     let hovered: Bool
     let selected: Bool
+    /// "Needs you": a rose wash over the pill. Drawn here — RowChrome is the
+    /// one layer that draws row highlights — so it can never fight the
+    /// hover/selection fills.
+    var attention: Bool = false
 
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8).fill(fill))
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(fill)
+            )
             .padding(.horizontal, Theme.rowInset)
             .contentShape(Rectangle())
     }
@@ -2335,6 +2358,7 @@ private struct RowChrome: ViewModifier {
     private var fill: Color {
         if selected { return Theme.rowSelected }
         if hovered { return Theme.rowHovered }
+        if attention { return Theme.buttonActiveFill }
         return .clear
     }
 }
@@ -2359,7 +2383,7 @@ struct SidebarRow: View {
     var live: Bool = false
     var gitStatus: GitRowStatus = .none
     /// The session is waiting on the user (permission prompt, idle, or a
-    /// finished turn) — amber dot over the terminal icon until viewed.
+    /// finished turn) — rose wash over the whole row until viewed.
     var needsAttention: Bool = false
     var hovered: Bool = false
     var selected: Bool = false
@@ -2369,15 +2393,15 @@ struct SidebarRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // Active rows: git status dot on the left, session identity
-            // (agent logo or terminal glyph) on the right. Idle rows lead
-            // with a project glyph when they are projects, else indent.
-            if hasTerminal, !nested {
-                Circle()
-                    .fill(gitColor)
-                    .frame(width: 6, height: 6)
-                    .help(gitHelp)
-            } else if !hasTerminal, isProject || live {
+            // Active rows lead with a status avatar: a circle tinted with
+            // the row's git state behind a white terminal glyph, and the
+            // running agent's logo as a white-backed badge on the circle's
+            // lower-right corner. Idle rows lead with a project glyph when
+            // they are projects, else indent. Attention is the row itself:
+            // a wash drawn by RowChrome.
+            if hasTerminal {
+                terminalAvatar
+            } else if isProject || live {
                 // Always quiet gray — the live signal is the mirror row up
                 // in Terminals, not this glyph.
                 Image(systemName: "shippingbox")
@@ -2401,41 +2425,58 @@ struct SidebarRow: View {
                 .font(.system(size: 9, weight: .medium))
                 .help("Uncommitted line changes")
             }
-            if hasTerminal {
-                if hovered, let onClose {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                            .frame(width: nested ? 13 : 16, height: nested ? 13 : 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Close terminal")
-                } else {
-                    TerminalRowIcon(agent: agent, size: nested ? 13 : 16)
-                        .overlay(alignment: .topTrailing) {
-                            if needsAttention {
-                                Circle()
-                                    .fill(Color(hex: 0xD97706))
-                                    .frame(width: 6, height: 6)
-                                    // Ring in the row background so the dot
-                                    // reads over any icon art.
-                                    .background(
-                                        Circle().fill(Theme.background)
-                                            .frame(width: 9, height: 9)
-                                    )
-                                    .offset(x: 3, y: -3)
-                                    .help("Claude needs you")
-                            }
-                        }
+            if hasTerminal, hovered, let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: nested ? 13 : 16, height: nested ? 13 : 16)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .help("Close terminal")
             }
         }
         .padding(.leading, nested ? 17 : (hasTerminal || isProject || live ? 0 : 17))
-        .modifier(RowChrome(hovered: hovered, selected: selected))
+        .modifier(RowChrome(
+            hovered: hovered, selected: selected, attention: needsAttention
+        ))
         // An empty help string attaches no tooltip.
         .help(diffHelp)
+    }
+
+    /// The leading status avatar: git state as a translucent wash inside a
+    /// solid ring of the same color, the terminal glyph in the solid color
+    /// centered on top, and — when an agent is running — its logo as a
+    /// badge overhanging the circle's lower-right, cut out by a white
+    /// backing circle.
+    private var terminalAvatar: some View {
+        let size: CGFloat = nested ? 15 : 18
+        let badge: CGFloat = nested ? 9 : 11
+        return Circle()
+            .fill(gitColor.opacity(0.18))
+            .overlay(Circle().strokeBorder(gitColor, lineWidth: 1))
+            .overlay(
+                // Resizable + scaledToFit centers the symbol's box exactly;
+                // font-metric layout floats it slightly off-center.
+                Image(systemName: "terminal")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(gitColor)
+                    .frame(width: size * 0.52)
+            )
+            .frame(width: size, height: size)
+            .help(gitHelp)
+        .overlay(alignment: .bottomTrailing) {
+            if let agent {
+                ZStack {
+                    Circle().fill(.white)
+                    TerminalRowIcon(agent: agent, size: badge - 4)
+                }
+                .frame(width: badge, height: badge)
+                .offset(x: 2.5, y: 2.5)
+            }
+        }
     }
 
     private var diffHelp: String {
