@@ -8,6 +8,8 @@ import SwiftUI
 enum MainWindowController {
 
     private static var controller: NSWindowController?
+    /// Retained here because `NSWindow.delegate` is weak.
+    private static let frameSaver = WindowFrameSaver()
 
     static func present() {
         if let controller {
@@ -54,8 +56,25 @@ enum MainWindowController {
             window.setContentSize(NSSize(width: 1018, height: 660))
             window.center()
         }
+        // settings.json's frame wins over the UserDefaults autosave: it
+        // survives updates and is shared by debug and packaged builds,
+        // whose defaults domains differ. The autosave stays as a fallback
+        // for pre-existing installs with nothing in settings yet.
+        let saved = HoustonSettings.read().windowFrame
+        if saved.count == 4 {
+            let frame = NSRect(x: saved[0], y: saved[1], width: saved[2], height: saved[3])
+            // Only restore a frame some screen can actually show.
+            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+                window.setFrame(frame, display: false)
+            }
+        }
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 760, height: 460)
+
+        // Persist the frame as it changes (delegate, not NotificationCenter
+        // closures — NSWindowDelegate is main-actor, so no Sendable dance).
+        window.delegate = frameSaver
+
 
         let wc = NSWindowController(window: window)
         controller = wc
@@ -63,5 +82,33 @@ enum MainWindowController {
         NSApp.activate(ignoringOtherApps: true)
         wc.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// Writes the window frame into settings.json whenever a move or live
+/// resize ends, so size and position survive relaunches AND updates —
+/// unlike the UserDefaults autosave, settings.json is one store shared by
+/// debug and packaged builds.
+@MainActor
+private final class WindowFrameSaver: NSObject, NSWindowDelegate {
+    func windowDidEndLiveResize(_ notification: Notification) {
+        save(notification)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        save(notification)
+    }
+
+    private func save(_ notification: Notification) {
+        // The same degenerate-frame guard as restore — never persist a
+        // collapsed window.
+        guard let window = notification.object as? NSWindow,
+              window.frame.width >= 400, window.frame.height >= 300 else { return }
+        var s = HoustonSettings.read()
+        s.windowFrame = [
+            window.frame.origin.x, window.frame.origin.y,
+            window.frame.width, window.frame.height,
+        ]
+        HoustonSettings.write(s)
     }
 }

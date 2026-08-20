@@ -93,7 +93,10 @@ struct MainWindowView: View {
     private let trafficLightInset: CGFloat = 48
 
     /// Sidebar width, dragged by the divider below.
-    @State private var sidebarWidth: CGFloat = Theme.sidebarWidth
+    // Restored from settings; the literal bounds mirror `sidebarRange`,
+    // which isn't available in a property initializer.
+    @State private var sidebarWidth: CGFloat =
+        min(max(CGFloat(HoustonSettings.read().sidebarWidth), 180), 420)
     /// Below this width the library rows' inline diff counts come off and
     /// move into hover tooltips — squeezed against a long name they were
     /// the first thing to look broken.
@@ -357,7 +360,12 @@ struct MainWindowView: View {
                                 transaction.disablesAnimations = true
                                 withTransaction(transaction) { sidebarWidth = clamped }
                             }
-                            .onEnded { _ in sidebarDragStart = nil }
+                            .onEnded { _ in
+                                sidebarDragStart = nil
+                                updateSettings {
+                                    $0.sidebarWidth = Double(sidebarWidth)
+                                }
+                            }
                     )
             )
     }
@@ -418,7 +426,7 @@ struct MainWindowView: View {
                 }
             }
             // Same arrangement AND position as the expanded footer — gear,
-            // then collapse, left-aligned at the same 14pt inset — so the
+            // then collapse, left-aligned at the same 10pt inset — so the
             // pair doesn't shift when the sidebar collapses.
             HStack(spacing: 2) {
                 settingsMenu
@@ -428,9 +436,9 @@ struct MainWindowView: View {
                     action: toggleSidebarCollapse
                 )
             }
-            .padding(.leading, 14)
+            .padding(.leading, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 12)
+            .padding(.bottom, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -999,9 +1007,9 @@ struct MainWindowView: View {
             }
             Spacer(minLength: 8)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 14)
-        .padding(.vertical, 12)
+        .padding(.leading, 10)
+        .padding(.trailing, 10)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Settings
@@ -1749,19 +1757,19 @@ struct MainWindowView: View {
         case .header:
             // The space above the bottom-aligned label IS the gap between
             // sections; just tall enough for the "+" button's hit area.
-            return 22
+            return 20
         case .folder:
-            return 26
+            return 24
         case let .action(key, _):
             // "New" stands in for the first terminal row — same height as one
-            // (32pt), so the sections below don't jump when it's swapped out.
-            return key == "new-terminal" ? 32 : 26
+            // (28pt), so the sections below don't jump when it's swapped out.
+            return key == "new-terminal" ? 28 : 24
         case .library:
-            return 28
+            return 26
         case let .row(id, _):
-            if case .server = id { return 42 }
-            if case let .project(path) = id, !terminals.hasPane(for: path) { return 28 }
-            return 32
+            if case .server = id { return 38 }
+            if case let .project(path) = id, !terminals.hasPane(for: path) { return 26 }
+            return 28
         }
     }
 
@@ -1794,8 +1802,8 @@ struct MainWindowView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.leading, 14)
-            .padding(.trailing, 8)
+            .padding(.leading, 10)
+            .padding(.trailing, 6)
 
         case let .action(key, title):
             if key == "open-folder" {
@@ -2328,8 +2336,8 @@ struct MenuAnchorReader: NSViewRepresentable {
 
 // MARK: - Rows
 
-/// Shared background for sidebar rows: the design's 220pt pill (8pt radius,
-/// 16pt inner padding) inset `Theme.rowInset` from the sidebar edges.
+/// Shared background for sidebar rows: the design's pill (8pt radius, 8pt
+/// inner padding) inset `Theme.rowInset` from the sidebar edges.
 ///
 /// Selection *and* hover are drawn here rather than by the table. Source-list
 /// selection styling would only cover half of it — `NSTableView` has no hover
@@ -2345,7 +2353,7 @@ private struct RowChrome: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 8)
@@ -2605,7 +2613,7 @@ struct ServerRow: View {
                     .frame(maxHeight: .infinity)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .modifier(RowChrome(hovered: hovered, selected: selected))
     }
 

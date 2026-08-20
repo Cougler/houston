@@ -40,6 +40,13 @@ struct HoustonSettings {
     var welcomeSeen: Bool
     /// The sidebar is collapsed to the three-icon rail.
     var sidebarCollapsed: Bool
+    /// Expanded sidebar width in points (user-dragged).
+    var sidebarWidth: Double
+    /// Last window frame as [x, y, w, h]; empty until first saved. Lives
+    /// here (not just NSWindow frame autosave) because settings.json is the
+    /// store that survives updates AND is shared by debug and packaged
+    /// builds — UserDefaults domains differ between the two.
+    var windowFrame: [Double]
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -53,7 +60,9 @@ struct HoustonSettings {
             statusBarCollapsed: false,
             statusBarHiddenItems: [],
             welcomeSeen: false,
-            sidebarCollapsed: false
+            sidebarCollapsed: false,
+            sidebarWidth: Double(Theme.sidebarWidth),
+            windowFrame: []
         )
     }
 
@@ -120,6 +129,15 @@ struct HoustonSettings {
         if let railed = json["sidebarCollapsed"] as? Bool {
             s.sidebarCollapsed = railed
         }
+        // Bounds mirror MainWindowView.sidebarRange — a corrupt value must
+        // not restore an unusable sidebar.
+        if let w = json["sidebarWidth"] as? Double, (180...420).contains(w) {
+            s.sidebarWidth = w
+        }
+        if let f = json["windowFrame"] as? [Double], f.count == 4,
+           f[2] >= 400, f[3] >= 300 {
+            s.windowFrame = f
+        }
         return s
     }
 
@@ -143,6 +161,8 @@ struct HoustonSettings {
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
         obj["welcomeSeen"] = s.welcomeSeen
         obj["sidebarCollapsed"] = s.sidebarCollapsed
+        obj["sidebarWidth"] = s.sidebarWidth
+        obj["windowFrame"] = s.windowFrame
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default
