@@ -90,6 +90,10 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
     let contentKey: (SidebarEntry, Bool) -> String
     /// Right-click menu for a row, if any.
     var menuForEntry: ((SidebarEntry) -> NSMenu?)? = nil
+    /// Fired on every left click that lands on a selectable row — including
+    /// one that's already selected, which `selection` alone can't report.
+    /// Used to hand keyboard focus back to the row's terminal.
+    var onRowClick: ((SidebarEntry) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -120,6 +124,9 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
         }
         table.menuProvider = { [weak coordinator = context.coordinator] row in
             coordinator?.menuForRow(row)
+        }
+        table.onRowClick = { [weak coordinator = context.coordinator] row in
+            coordinator?.rowClicked(row)
         }
         context.coordinator.table = table
 
@@ -365,6 +372,15 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
             guard entries.indices.contains(row) else { return nil }
             return parent.menuForEntry?(entries[row])
         }
+
+        // MARK: Clicks
+
+        func rowClicked(_ row: Int) {
+            guard entries.indices.contains(row) else { return }
+            let entry = entries[row]
+            guard entry.isSelectable else { return }
+            parent.onRowClick?(entry)
+        }
     }
 }
 
@@ -376,7 +392,19 @@ private final class HoverTableView: NSTableView {
     /// boundary (a `SidebarMenuProviding` conformance did, and `NSMenu` isn't
     /// `Sendable`).
     var menuProvider: ((Int) -> NSMenu?)?
+    /// Every left click on a row, selected or not — `selectionDidChange`
+    /// stays silent when the clicked row is already selected.
+    var onRowClick: ((Int) -> Void)?
     private var tracking: NSTrackingArea?
+
+    override func mouseDown(with event: NSEvent) {
+        // super runs the selection tracking loop first; the click callback
+        // fires after, so it sees the settled selection.
+        super.mouseDown(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        if row >= 0 { onRowClick?(row) }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

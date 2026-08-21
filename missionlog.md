@@ -2,6 +2,32 @@
 
 ---
 
+## 2026-08-19 — Sidebar avatars + density, git commands page, v1.0.5 & v1.0.6 shipped
+
+Houston 1.0.5 and 1.0.6 are shipped — notarized DMGs on GitHub Releases and tryhoustonapp.com, both cut cleanly via /release. The sidebar got a full pass: terminal rows now lead with a git-status avatar (tinted circle, agent logo as a corner badge), everything is denser, and sidebar width/collapse plus the window frame persist in settings.json so they survive updates. The git panel gained a click-to-run Git Commands page. Next: actually exercise the self-updater's in-place install from an installed build, and enable the needs-you notification hooks.
+
+**Done this session:**
+- Sidebar rows: leading agent icon replaced by a status avatar — circle filled with the git-status color at 18% + solid 1pt ring, centered terminal glyph, agent logo as an 11pt white-backed badge overhanging lower-right; trailing git dot and the attention edge bar removed (rose wash is the whole signal)
+- GitPanel: new Git Commands page (terminal button in the header) — sync/commit/stash/undo/inspect catalog, each row shows the exact command and runs it in the project's terminal; destructive ones (`git restore .`, `git clean -fd`) are typed but not executed, Return confirms; commit rows prompt for a message
+- Theme.controlHovered token (16% white / 11% black) — skill run buttons (row rocket + detail "Run Skill") now visibly darken on hover
+- Density pass: rowInset 5→3, pill inner padding 12→8, row heights trimmed (terminals 32→28, library 28→26, headers 22→20, servers 42→38), header/footer insets 14→10 mirrored in the collapsed rail
+- Persistence: sidebarWidth + windowFrame ([x,y,w,h]) in settings.json — WindowFrameSaver window delegate saves on move/resize-end; restore prefers settings over the UserDefaults frame autosave
+- Released v1.0.5 and v1.0.6: signed, notarized, stapled DMGs on GitHub Releases with the site DMG synced both times
+
+**Up next:**
+- Run the self-updater for real: open the installed 1.0.4/1.0.5 app and let it install 1.0.6 in place — first true test of verify → swap → relaunch
+- Enable needs-you notifications from the gear menu and validate the loop (badges in debug; banners need the packaged app)
+- Live with the new avatar rows and tighter density; adjust any single number that feels off
+
+**Handoff:**
+- The self-updater's in-place path is STILL unverified — 1.0.5 and 1.0.6 both shipped, but no installed build has actually run the update flow yet; that was the point of cutting 1.0.5 and it hasn't happened.
+- The needs-you notification hooks have still never been enabled; the pipeline remains unexercised end-to-end.
+- settings.json's sidebarWidth/windowFrame keys only appear after the first divider drag or window move/resize — their absence right after launch is not a bug.
+- A "traffic lights on a tab sticking above the window" idea was explored and explicitly dropped by the user ("nah forget i asked") — don't resurrect it.
+- The debug Houston binary was left running for the user to eyeball the density pass.
+
+---
+
 ## 2026-08-19 — Self-updater, needs-you notifications, first real releases
 
 Houston now ships properly: v1.0.3 and v1.0.4 are on GitHub Releases with notarized DMGs, tryhoustonapp.com serves the same build, a `/release` skill does the whole chain in one command, and 1.0.4+ installs updates in place (verify → swap → relaunch). The big new feature is needs-you notifications — Claude Code's Notification/Stop hooks drive native banners, a menubar dot, and rose-washed sidebar rows — alongside a pile of chrome polish (git sheet fixes, 81pt collapsed rail containing the traffic lights, click-away panels, accessible light-mode green). Next: enable the hooks and live with notifications, then cut 1.0.5 to test the self-updater's first real in-place install.

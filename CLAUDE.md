@@ -168,10 +168,13 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   Transcripts grow to tens of MB and are re-read every 2s; usage lives in the
   last assistant message. It falls back to a full read only when the tail's
   lines carry no usage at all (e.g. a giant trailing tool result).
-- **The terminal claims focus on a pane's first display only**
-  (`TerminalPane.hasAutoFocused`). Re-grabbing it on every selection yanked
-  focus out of the sidebar the instant you clicked a row, so arrow-key
-  navigation never worked.
+- **Focus follows the sidebar selection into the terminal** (deliberate
+  reversal, 2026-08-20): `select(_:)` calls `focusTerminal`, and
+  `SidebarTable.onRowClick` re-fires it for a click on the already-selected
+  row (no `selectionDidChange` then). Click a row → type immediately;
+  arrow keys go to the shell, not sidebar navigation — that tradeoff is
+  chosen, don't "fix" it back. Focus stays put if it's already in one of
+  the tab's split panes.
 - **Theming: every chrome color is a dynamic token in `Theme.swift`**
   (`Color(light:dark:)` over `NSColor(name:dynamicProvider:)`), so the
   System/Light/Dark setting restyles everything live — never hard-code a hex
@@ -212,6 +215,13 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   over the collapse, and only the packaged app's fresh prefs domain exposed
   it. `MainWindowController` re-asserts the default size after assignment and
   refuses to restore a degenerate (<400×300) saved frame.
+- **Window frame and sidebar width persist in `settings.json`, not the frame
+  autosave.** Debug and packaged builds have different UserDefaults domains,
+  so the autosave never carried between them; `WindowFrameSaver` (the window
+  delegate) writes `windowFrame` `[x,y,w,h]` on move/resize-end and restore
+  prefers it over the autosave (kept as fallback). Same degenerate-frame guard
+  on save and restore, plus an on-some-screen check; `sidebarWidth` is written
+  on divider-drag end and clamped to the 180–420 drag range on read.
 - **Server health probes must hit `localhost`, not `127.0.0.1`.** Node dev
   servers routinely bind only the IPv6 loopback (`::1`); probing the IPv4
   address alone reported a healthy server as down (red icon). The hostname

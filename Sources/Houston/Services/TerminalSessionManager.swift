@@ -387,6 +387,25 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         return list.first { $0.id == id }
     }
 
+    /// Moves keyboard focus into a project's terminal, so selecting a row
+    /// means "type here now". If focus already sits in one of the tab's
+    /// panes (a split), it stays put. Async because on a first open the
+    /// view isn't in the window until the render pass mounts it.
+    func focusTerminal(path: String, tab tabID: UUID? = nil) {
+        guard let tab = resolveTab(path: path, id: tabID) else { return }
+        if let responder = paneContainer.window?.firstResponder as? NSView,
+           tab.panes.contains(where: {
+               responder === $0.view || responder.isDescendant(of: $0.view)
+           }) {
+            return
+        }
+        guard let pane = tab.panes.first else { return }
+        pane.hasAutoFocused = true
+        DispatchQueue.main.async {
+            pane.view.window?.makeFirstResponder(pane.view)
+        }
+    }
+
     // MARK: - Internals
 
     /// Right-click menu for a terminal pane. Copy/Paste dispatch through the

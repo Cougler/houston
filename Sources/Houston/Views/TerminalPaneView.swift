@@ -6,8 +6,24 @@ import SwiftUI
 /// `NSView.menu`, so surfacing Houston's terminal context menu (splits,
 /// copy/paste) needs the override. Popping the menu also makes the clicked
 /// pane first responder, which is what points the split commands at it.
+///
+/// Also the drop target: files dropped on the terminal insert their
+/// shell-escaped paths at the prompt; image data and promised files
+/// (drags from browsers, Photos, screenshots) are written to a temp file
+/// first and that path is inserted — so an image can go straight to a
+/// running agent.
 final class HoustonTerminalView: AppTerminalView {
     var contextMenu: NSMenu?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(Self.dropTypes)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("HoustonTerminalView is never decoded")
+    }
 
     override func rightMouseDown(with event: NSEvent) {
         guard let contextMenu else {
@@ -16,6 +32,103 @@ final class HoustonTerminalView: AppTerminalView {
         }
         window?.makeFirstResponder(self)
         NSMenu.popUpContextMenu(contextMenu, with: event, for: self)
+    }
+
+    // MARK: - Drag & drop
+
+    private static let dropTypes: [NSPasteboard.PasteboardType] = {
+        var types: [NSPasteboard.PasteboardType] = [.fileURL]
+        types += NSFilePromiseReceiver.readableDraggedTypes
+            .map { NSPasteboard.PasteboardType($0) }
+        types += NSImage.imageTypes.map { NSPasteboard.PasteboardType($0) }
+        return types
+    }()
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        accepts(sender.draggingPasteboard) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pb = sender.draggingPasteboard
+        // The drop is an intent to type here next — focus like a click does.
+        window?.makeFirstResponder(self)
+
+        // Real files (Finder, most apps): insert their paths directly.
+        if let urls = pb.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], !urls.isEmpty {
+            insert(paths: urls.map(\.path))
+            return true
+        }
+
+        // Promised files (browsers, Photos): receive into a temp folder,
+        // then insert as they land. The completion arrives on the queue we
+        // pass — main — but isn't statically isolated, hence the unsafe box.
+        if let receivers = pb.readObjects(
+            forClasses: [NSFilePromiseReceiver.self]
+        ) as? [NSFilePromiseReceiver], !receivers.isEmpty {
+            let dir = Self.dropDirectory()
+            nonisolated(unsafe) let view = self
+            for receiver in receivers {
+                receiver.receivePromisedFiles(
+                    atDestination: dir, options: [:], operationQueue: .main
+                ) { url, error in
+                    guard error == nil else { return }
+                    MainActor.assumeIsolated { view.insert(paths: [url.path]) }
+                }
+            }
+            return true
+        }
+
+        // Raw image data with no file behind it: write a PNG, insert that.
+        if let image = NSImage(pasteboard: pb),
+           let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            let url = Self.dropDirectory()
+                .appendingPathComponent("dropped-image.png")
+            guard (try? png.write(to: url)) != nil else { return false }
+            insert(paths: [url.path])
+            return true
+        }
+        return false
+    }
+
+    private func accepts(_ pb: NSPasteboard) -> Bool {
+        pb.canReadObject(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        )
+        || pb.canReadObject(forClasses: [NSFilePromiseReceiver.self])
+        || NSImage.canInit(with: pb)
+    }
+
+    /// Escaped, space-separated, with a trailing space so the next path (or
+    /// the user's typing) doesn't fuse onto it. No newline — dropping never
+    /// executes anything.
+    private func insert(paths: [String]) {
+        guard !paths.isEmpty else { return }
+        sendText(paths.map(Self.shellEscaped).joined(separator: " ") + " ")
+    }
+
+    private static func shellEscaped(_ path: String) -> String {
+        let safe = CharacterSet.alphanumerics
+            .union(CharacterSet(charactersIn: "/._-~+@%:,="))
+        if path.unicodeScalars.allSatisfy({ safe.contains($0) }) { return path }
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// A fresh folder per drop, so same-named files from consecutive drops
+    /// never collide.
+    private static func dropDirectory() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HoustonDrops", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        return dir
     }
 }
 

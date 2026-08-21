@@ -207,10 +207,17 @@ struct MainWindowView: View {
             }
         }
         // A nested shell closing (⇧⌘W, context menu) must not strand the
-        // selection on a dead tab — fall back to the project's main terminal.
+        // selection on a dead tab — fall back to the project's main
+        // terminal. Same fallback when the selected tab still lives but got
+        // promoted to the main row (the first tab closed): its `.shell` row
+        // no longer exists in the sidebar, `.project` now names it.
         .onChange(of: allTabIDs) { _, ids in
-            guard case let .shell(path, tab) = selection, !ids.contains(tab) else { return }
-            selection = terminals.hasPane(for: path) ? .project(path) : nil
+            guard case let .shell(path, tab) = selection else { return }
+            if !ids.contains(tab) {
+                selection = terminals.hasPane(for: path) ? .project(path) : nil
+            } else if terminals.tabs[path]?.first?.id == tab {
+                selection = .project(path)
+            }
         }
         // Keep the launch selection pointing at something that exists.
         .onChange(of: terminals.installedAgents) { _, installed in
@@ -381,7 +388,12 @@ struct MainWindowView: View {
                 heightForEntry: height(for:),
                 content: { entry, hovered in row(for: entry, hovered: hovered) },
                 contentKey: contentKey(for:hovered:),
-                menuForEntry: menu(for:)
+                menuForEntry: menu(for:),
+                // Re-clicking the selected row fires no selection change,
+                // but still means "put me in that terminal".
+                onRowClick: { entry in
+                    if let target = entry.selection { select(target) }
+                }
             )
             // NSViewRepresentable has no intrinsic content size, so without
             // this SwiftUI hands it ~zero height and the whole column collapses
@@ -2078,6 +2090,17 @@ struct MainWindowView: View {
             terminals.pane(for: path)
         }
         selection = target
+        // Selecting a terminal row means "type here now": focus follows the
+        // selection into the pane, so keys (including arrows) go to the
+        // shell, not sidebar navigation.
+        switch target {
+        case let .project(path):
+            terminals.focusTerminal(path: path)
+        case let .shell(path, tabID):
+            terminals.focusTerminal(path: path, tab: tabID)
+        default:
+            break
+        }
     }
 
     /// `$selection` for the table, routed through `select(_:)`.
@@ -2103,7 +2126,19 @@ struct MainWindowView: View {
         let index = order.firstIndex(of: path)
         let wasSelected = (selection == .project(path))
 
-        terminals.closePane(for: path)
+        // The ✕ ends only the project's main terminal. Extra "· N" tabs
+        // are independent shells that happen to share the directory — the
+        // next one is promoted to the main row (closeTab leaves the rest
+        // of the list intact, and the sidebar derives its rows from it)
+        // instead of being torn down alongside the first.
+        if let main = terminals.tabs[path]?.first {
+            terminals.closeTab(path: path, tabID: main.id)
+        }
+        if terminals.hasPane(for: path) {
+            // A sibling survived and was promoted; a selection pointing
+            // here still names a live terminal — nothing to reselect.
+            return
+        }
 
         guard wasSelected else { return }
         let remaining = order.filter { $0 != path }
