@@ -31,6 +31,12 @@ enum SidebarSelection: Hashable {
     }
 }
 
+/// What the right sheet can show — Git, Skills, Tracked, or the
+/// notification feed. One sheet, so the four are exclusive by construction.
+enum RightPanel: Equatable {
+    case git, skills, tracked, feed
+}
+
 /// Houston's desktop window, laid out to the Figma design: a white sidebar
 /// (Active / Servers / Shells / Projects, "Open Folder…" footer) beside a
 /// white detail pane with a title header and the terminal.
@@ -51,15 +57,20 @@ struct MainWindowView: View {
     @ObservedObject private var updates = UpdateChecker.shared
     @ObservedObject private var installer = UpdateInstaller.shared
     @ObservedObject private var notify = NotifyStore.shared
+    @StateObject private var tracked = TrackedStore()
+    @ObservedObject private var feed = EventFeed.shared
     @State private var selection: SidebarSelection?
+    /// What the right sheet shows. One sheet, four contents — Git, Skills,
+    /// Tracked, and the notification feed are mutually exclusive by type.
+    @State private var rightPanel: RightPanel?
+    /// Docked: the sheet joins the layout and pushes the detail column.
+    /// Floating (default): it overlays the content, click-away dismisses.
+    @State private var rightPanelDocked = false
+    /// Last panel shown — what the sheet renders while sliding closed.
+    @State private var lastRightPanel: RightPanel?
     /// Agent the header's split button launches; the chevron menu changes it.
     @State private var launchAgent: CodingAgent = .claude
-    /// Skills overlay over the terminal. Only shown while an agent is running
-    /// in the pane — a bare shell has nothing to apply a skill to.
-    @State private var showSkills = false
     @State private var skills: [Skill] = []
-    /// Git overlay over the terminal.
-    @State private var showGit = false
     /// Uninstalled harness the user picked — drives the install prompt.
     @State private var pendingInstall: CodingAgent?
     /// The harness selector's popped menu, for its active chrome.
@@ -108,8 +119,6 @@ struct MainWindowView: View {
     @State private var sidebarDragStart: CGFloat?
     /// The terminal region's frame in root coordinates — where the floating
     /// panels live. The outside-click scrim covers everything around it.
-    @State private var detailFrame: CGRect = .zero
-    private static let rootSpace = "houston-root"
     /// Pointer over the divider's grip — lights the faint stroke that tells
     /// the user there's something to grab.
     @State private var dividerHovered = false
@@ -133,15 +142,18 @@ struct MainWindowView: View {
             splitDivider
             detailColumn
                 .frame(maxWidth: .infinity)
+            // Docked: reserve the sheet's width in the layout. The sheet
+            // itself always draws in the overlay flush with the right edge,
+            // so pin/unpin animates nothing but this width (and the scrim) —
+            // no re-parenting, no jump.
+            Color.clear
+                .frame(width: rightPanelDocked && rightPanel != nil
+                    ? rightSheetWidth : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
-        .coordinateSpace(name: Self.rootSpace)
-        .onPreferenceChange(DetailFrameKey.self) { frame in
-            Task { @MainActor in detailFrame = frame }
-        }
         .overlay(alignment: .topLeading) { railFlyoutLayer }
-        .overlay(alignment: .topLeading) { panelOutsideClickScrim }
+        .overlay(alignment: .topTrailing) { rightSheetLayer }
         .overlay {
             if showWelcome {
                 WelcomeView {
@@ -164,6 +176,7 @@ struct MainWindowView: View {
             git.watchRows(gitWatchSet)
             statusFeed.start()
             notify.start()
+            tracked.start()
             terminals.startAgentPolling()
             terminals.detectInstalledAgents()
             // Ship the mission skills: copy any that are missing into
@@ -176,6 +189,11 @@ struct MainWindowView: View {
         }
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
         .onChange(of: gitWatchSet) { _, set in git.watchRows(set) }
+        // Commit watch for the bell's feed: HEAD moving on the watched
+        // project's branch becomes a "Committed"/"New commits" event.
+        .onChange(of: git.info) { _, info in
+            feed.noteGit(path: selection?.projectPath, info: info)
+        }
         // A project's last terminal closing (✕, ⇧⌘W, ctrl-D) lands on the
         // solar-system empty state, not a dead detail page.
         .onChange(of: terminalPaths) { _, paths in
@@ -185,8 +203,14 @@ struct MainWindowView: View {
             }
         }
         .onChange(of: selection) { _, newValue in
-            showSkills = false
-            showGit = false
+            // A floating sheet is transient — navigation dismisses it. A
+            // docked one is furniture: it stays, its content following the
+            // selection (git already watches it; skills reload here).
+            if !rightPanelDocked {
+                closeRightPanel()
+            } else if rightPanel == .skills, let path = newValue?.projectPath {
+                skills = SkillsCatalog.load(projectPath: path)
+            }
             terminals.activeProjectPath = newValue?.projectPath
             terminals.activeTabID = newValue?.tabID
             git.watch(newValue?.projectPath)
@@ -407,11 +431,11 @@ struct MainWindowView: View {
 
     // MARK: - Collapsed rail
 
-    /// Rail width — the traffic lights end at x=69 (last button 55+14,
-    /// measured), and the rail runs 12pt past them so it fully contains the
-    /// cluster. That's also what lets the empty-state sky go without a shelf
-    /// under the lights.
-    private let railWidth: CGFloat = 81
+    /// Rail width — enough for a 34pt icon button centered with breathing
+    /// room. The traffic lights (ending at x=69) overhang the divider onto
+    /// the detail column's top-left, brushing the sky container's rounded
+    /// corner on the empty state — accepted for the thin rail.
+    private let railWidth: CGFloat = 52
 
     /// The collapsed sidebar: three section icons whose popovers carry the
     /// same rows the full sidebar shows, expand at the bottom above the gear.
@@ -437,20 +461,34 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.buttonActiveStroke)
                 }
             }
-            // Same arrangement AND position as the expanded footer — gear,
-            // then collapse, left-aligned at the same 10pt inset — so the
-            // pair doesn't shift when the sidebar collapses.
-            HStack(spacing: 2) {
-                settingsMenu
-                FooterIconButton(
-                    systemName: "sidebar.left",
-                    help: "Expand sidebar",
-                    action: toggleSidebarCollapse
-                )
-            }
-            .padding(.leading, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 8)
+            // Too narrow for the expanded footer's rows — bare icons stacked
+            // in the same order: bell, calendar, gear, collapse.
+            FooterLabeledButton(
+                systemName: "bell",
+                badgeCount: feed.unreadCount,
+                active: rightPanel == .feed,
+                help: "Notifications",
+                action: { toggleRightPanel(.feed) }
+            )
+            FooterLabeledButton(
+                systemName: "calendar",
+                dot: tracked.attentionCount > 0,
+                active: rightPanel == .tracked,
+                help: "Reminders",
+                action: { toggleRightPanel(.tracked) }
+            )
+            settingsMenu()
+            // Same short rule as the expanded footer, centered on the rail.
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(width: 24, height: 1)
+                .padding(.vertical, 2)
+            FooterIconButton(
+                systemName: "sidebar.left",
+                help: "Expand sidebar",
+                action: toggleSidebarCollapse
+            )
+            .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -505,43 +543,215 @@ struct MainWindowView: View {
         }
     }
 
-    /// Click-away for the floating git/skills panels, covering what their
-    /// in-region scrim can't: the sidebar, the header, and the status bar.
-    /// Three rectangles around the detail region rather than one sheet over
-    /// the window, so the panels themselves (inside the region) stay
-    /// clickable. Clicks are consumed — the standard popover bargain.
-    @ViewBuilder
-    private var panelOutsideClickScrim: some View {
-        if showSkills || showGit, detailFrame != .zero {
-            GeometryReader { g in
-                ZStack(alignment: .topLeading) {
-                    // Left of the detail region: sidebar/rail + divider.
-                    scrimRect(width: detailFrame.minX, height: g.size.height)
-                    // Above it: the header.
-                    scrimRect(width: g.size.width - detailFrame.minX,
-                              height: detailFrame.minY)
-                        .offset(x: detailFrame.minX)
-                    // Below it: the status bar.
-                    scrimRect(width: g.size.width - detailFrame.minX,
-                              height: max(0, g.size.height - detailFrame.maxY))
-                        .offset(x: detailFrame.minX, y: detailFrame.maxY)
-                }
+    // MARK: - Right sheet
+
+    /// The uniform card width inside the sheet; the strip adds its gutters.
+    private var rightSheetWidth: CGFloat { 364 }
+
+    /// The sheet's one animation — springy enough to feel alive, damped
+    /// enough not to bounce off the edge.
+    private var sheetSpring: Animation {
+        .spring(response: 0.35, dampingFraction: 0.86)
+    }
+
+    private func toggleRightPanel(_ panel: RightPanel) {
+        let opening = rightPanel != panel
+        // The render fallback: the close animation slides out still showing
+        // this panel instead of a blanked strip.
+        if opening { lastRightPanel = panel }
+        withAnimation(sheetSpring) {
+            rightPanel = opening ? panel : nil
+        }
+        guard opening else { return }
+        switch panel {
+        case .feed:
+            // Opening is seeing: the badge's job ends here.
+            feed.markAllRead()
+        case .skills:
+            if let path = selection?.projectPath {
+                skills = SkillsCatalog.load(projectPath: path)
             }
+        case .git, .tracked:
+            break
         }
     }
 
-    private func scrimRect(width: CGFloat, height: CGFloat) -> some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .onTapGesture { closeFloatingPanels() }
-            .frame(width: max(0, width), height: max(0, height))
+    private func closeRightPanel() {
+        withAnimation(sheetSpring) { rightPanel = nil }
     }
 
-    private func closeFloatingPanels() {
-        withAnimation(.easeOut(duration: 0.18)) {
-            showSkills = false
-            showGit = false
+    /// The sheet always lives here, flush with the right edge, sliding in
+    /// and out by offset — one continuously-mounted view for both modes, so
+    /// pin/unpin can't jump. Floating adds the click-away scrim and a depth
+    /// shadow that fades away when docked; docking itself just reserves
+    /// width in the root HStack.
+    @ViewBuilder
+    private var rightSheetLayer: some View {
+        let open = rightPanel != nil
+        ZStack(alignment: .topTrailing) {
+            if open, !rightPanelDocked {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeRightPanel() }
+            }
+            rightSheet
+                .offset(x: open ? 0 : rightSheetWidth + 40)
+                .allowsHitTesting(open)
         }
+    }
+
+    /// The sheet itself: a full-height strip off the right edge — a controls
+    /// bar (title, dock toggle, close) over the active panel's card. Same
+    /// view in both modes; only who owns its geometry changes.
+    private var rightSheet: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Text(rightSheetTitle)
+                    .font(.system(size: 10))
+                    .kerning(0.5)
+                    .foregroundStyle(Theme.heading)
+                Spacer(minLength: 8)
+                ControlIconButton(
+                    systemName: rightPanelDocked
+                        ? "pin.slash" : "pin",
+                    help: rightPanelDocked
+                        ? "Float over the content"
+                        : "Dock beside the content",
+                    action: {
+                        withAnimation(sheetSpring) {
+                            rightPanelDocked.toggle()
+                        }
+                    }
+                )
+                ControlIconButton(
+                    systemName: "xmark",
+                    help: "Close",
+                    action: closeRightPanel
+                )
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+            rightSheetContent
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+        }
+        .frame(width: rightSheetWidth)
+        .frame(maxHeight: .infinity)
+        .background(Theme.background)
+        .overlay(alignment: .leading) {
+            // Floating only — pinned, the sheet is part of the page and a
+            // border would read as a seam. Opacity (not removal) so the pin
+            // toggle fades it with the same spring.
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(width: 1)
+                .opacity(rightPanelDocked ? 0 : 1)
+        }
+    }
+
+    /// What the sheet renders: the open panel, or the last one while the
+    /// close animation runs.
+    private var effectiveRightPanel: RightPanel? { rightPanel ?? lastRightPanel }
+
+    private var rightSheetTitle: String {
+        switch effectiveRightPanel {
+        case .git: "GIT"
+        case .skills: "SKILLS"
+        case .tracked: "REMINDERS"
+        case .feed: "NOTIFICATIONS"
+        case nil: ""
+        }
+    }
+
+    @ViewBuilder
+    private var rightSheetContent: some View {
+        switch effectiveRightPanel {
+        case .git:
+            if let path = selection?.projectPath {
+                gitPanel(for: path)
+            } else {
+                rightSheetPlaceholder("Select a project to see its git state.")
+            }
+        case .skills:
+            if let path = selection?.projectPath, terminals.agents[path] != nil {
+                SkillsPanel(
+                    skills: skills,
+                    onRun: { skill in
+                        terminals.send("/\(skill.name)\n", to: path)
+                        if !rightPanelDocked { closeRightPanel() }
+                    },
+                    onInsert: { skill in
+                        terminals.send("/\(skill.name) ", to: path)
+                        if !rightPanelDocked { closeRightPanel() }
+                    }
+                )
+            } else {
+                rightSheetPlaceholder(
+                    "Skills apply to a running agent session — select a "
+                    + "project with one."
+                )
+            }
+        case .tracked:
+            TrackedPanel(store: tracked)
+        case .feed:
+            FeedSheet(feed: feed) { event in
+                if let path = event.projectPath {
+                    select(.project(path))
+                }
+                if !rightPanelDocked { closeRightPanel() }
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func gitPanel(for path: String) -> some View {
+        GitPanel(
+            info: git.info,
+            projectPath: path,
+            onInitialize: {
+                terminals.send("git init\n", to: path)
+                git.refresh()
+            },
+            onSwitchBranch: { branch in
+                terminals.send("git switch \"\(branch)\"\n", to: path)
+                git.refresh()
+            },
+            onNewBranch: {
+                guard let name = promptForText(
+                    title: "New Branch",
+                    message: "Created from the current branch and switched to.",
+                    placeholder: "feature/thing"
+                ), !name.isEmpty else { return }
+                terminals.send("git switch -c \"\(name)\"\n", to: path)
+                git.refresh()
+            },
+            onCommand: { command, execute in
+                if execute {
+                    terminals.send(command + "\n", to: path)
+                    git.refresh()
+                } else {
+                    // Destructive: type it and get out of the way — the
+                    // user's Return in the terminal is the confirm.
+                    terminals.send(command, to: path)
+                    if !rightPanelDocked { closeRightPanel() }
+                }
+            },
+            prompt: { promptForText(
+                title: $0, message: $1, placeholder: $2
+            ) }
+        )
+    }
+
+    private func rightSheetPlaceholder(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.textSecondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Aligns the flyout's top edge with the rail button that opened it —
@@ -598,28 +808,26 @@ struct MainWindowView: View {
         }
     }
 
-    /// Chrome shared by the rail popovers: a header with the section's glyph
-    /// in a rose-tinted tile and a count badge, the rows (capped at 400pt,
-    /// scrolling past that), and an optional pinned action footer.
+    /// Chrome shared by the rail popovers: a header with the section title
+    /// and a count badge (no glyph — the rail button that opened it already
+    /// is one), the rows (capped at 400pt, scrolling past that), and an
+    /// optional pinned action footer.
     private func railPopoverPanel(
         title: String,
         count: Int,
         rowsHeight: CGFloat,
-        @ViewBuilder icon: () -> some View,
+        width: CGFloat = 260,
         @ViewBuilder rows: () -> some View,
         @ViewBuilder footer: () -> some View
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                icon()
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Theme.rowSelected)
-                    )
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+                // Same quiet treatment as the expanded sidebar's section
+                // headers — the popover is the same section, restyled.
+                Text(title.uppercased())
+                    .font(.system(size: 10))
+                    .kerning(0.5)
+                    .foregroundStyle(Theme.heading)
                 Spacer(minLength: 8)
                 if count > 0 {
                     Text("\(count)")
@@ -640,7 +848,7 @@ struct MainWindowView: View {
             .frame(height: min(rowsHeight, 400))
             footer()
         }
-        .frame(width: 260)
+        .frame(width: width)
         .padding(.bottom, 8)
     }
 
@@ -694,10 +902,6 @@ struct MainWindowView: View {
             count: tabCount,
             rowsHeight: tabCount == 0 ? railEmptyStateHeight : CGFloat(tabCount) * 32
         ) {
-            Image(systemName: "terminal")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.textSecondary)
-        } rows: {
             if terminalPaths.isEmpty {
                 railEmptyState("No terminals open") {
                     Image(systemName: "terminal")
@@ -738,7 +942,7 @@ struct MainWindowView: View {
         } footer: {
             // Deliberately leaves the flyout open — the new row appearing in
             // place is the action's feedback.
-            railPopoverFooter("New Terminal") {
+            railPopoverFooter("New") {
                 runAction("new-terminal")
             }
         }
@@ -754,8 +958,6 @@ struct MainWindowView: View {
             count: list.count,
             rowsHeight: list.isEmpty ? railEmptyStateHeight : CGFloat(list.count) * 42
         ) {
-            ServerGlyph(color: Theme.textSecondary, size: 13)
-        } rows: {
             if list.isEmpty {
                 railEmptyState(
                     "No dev servers running",
@@ -805,10 +1007,6 @@ struct MainWindowView: View {
             count: pinned.count + libCount,
             rowsHeight: rowsHeight
         ) {
-            Image(systemName: "shippingbox")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.textSecondary)
-        } rows: {
             if empty {
                 railEmptyState(
                     "No projects yet",
@@ -992,7 +1190,7 @@ struct MainWindowView: View {
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 16, height: 16)
             Text(title)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12))
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -1003,21 +1201,48 @@ struct MainWindowView: View {
 
 
     private var sidebarFooter: some View {
-        // Gear + collapse, tucked into the bottom-left corner — no rule above.
-        HStack(spacing: 2) {
-            settingsMenu
+        // Notifications and Tracked stacked over the Settings row, all in the
+        // gear's icon+label style; collapse pinned right on the Settings row.
+        VStack(alignment: .leading, spacing: 2) {
+            FooterLabeledButton(
+                systemName: "bell",
+                label: "Notifications",
+                badgeCount: feed.unreadCount,
+                active: rightPanel == .feed,
+                help: "Notifications",
+                action: { toggleRightPanel(.feed) }
+            )
+            FooterLabeledButton(
+                systemName: "calendar",
+                label: "Reminders",
+                dot: tracked.attentionCount > 0,
+                active: rightPanel == .tracked,
+                help: "Reminders",
+                action: { toggleRightPanel(.tracked) }
+            )
+            HStack(spacing: 2) {
+                settingsMenu(labeled: true)
+                if let update = updates.available {
+                    UpdatePill(version: update.version, busy: installer.isBusy) {
+                        installer.requestInstall(update)
+                    }
+                    .padding(.leading, 4)
+                }
+                Spacer(minLength: 8)
+            }
+            // Collapse on its own row under Settings, set off by a short
+            // rule — the footer's quiet "end of list" mark.
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(width: 24, height: 1)
+                .padding(.leading, 4)
+                .padding(.top, 4)
             FooterIconButton(
                 systemName: "sidebar.left",
                 help: "Collapse sidebar",
                 action: toggleSidebarCollapse
             )
-            if let update = updates.available {
-                UpdatePill(version: update.version, busy: installer.isBusy) {
-                    installer.requestInstall(update)
-                }
-                .padding(.leading, 4)
-            }
-            Spacer(minLength: 8)
+            .padding(.top, 2)
         }
         .padding(.leading, 10)
         .padding(.trailing, 10)
@@ -1027,8 +1252,9 @@ struct MainWindowView: View {
     // MARK: - Settings
 
     /// Footer gear: appearance (System/Light/Dark) and the terminal's theme,
-    /// straight from ghostty's catalog.
-    private var settingsMenu: some View {
+    /// straight from ghostty's catalog. Labeled ("Settings") in the expanded
+    /// footer, bare glyph on the rail.
+    private func settingsMenu(labeled: Bool = false) -> some View {
         Menu {
             Picker("Appearance", selection: appearanceBinding) {
                 Text("System").tag("system")
@@ -1092,7 +1318,7 @@ struct MainWindowView: View {
                 UpdateChecker.shared.checkInteractively()
             }
         } label: {
-            GearLabel()
+            GearLabel(labeled: labeled)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -1302,12 +1528,9 @@ struct MainWindowView: View {
             .help("Handoff (log, reset context, re-brief) or end the mission")
         }
 
-        // Branch button: live git state at a glance, panel on click.
+        // Branch button: live git state at a glance, sheet on click.
         Button {
-            withAnimation(.easeOut(duration: 0.18)) {
-                showGit.toggle()
-                showSkills = false
-            }
+            toggleRightPanel(.git)
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "arrow.triangle.branch")
@@ -1328,18 +1551,14 @@ struct MainWindowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(HeaderButtonChrome(active: showGit))
+        .modifier(HeaderButtonChrome(active: rightPanel == .git))
         .help("Git status")
 
         // Skills only exist inside an agent session, so the button appears
         // with the agent and leaves with it.
         if terminals.agents[path] != nil {
             Button {
-                if !showSkills { skills = SkillsCatalog.load(projectPath: path) }
-                withAnimation(.easeOut(duration: 0.18)) {
-                    showSkills.toggle()
-                    showGit = false
-                }
+                toggleRightPanel(.skills)
             } label: {
                 Text("Skills")
                     .font(.system(size: 12, weight: .medium))
@@ -1349,7 +1568,7 @@ struct MainWindowView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .modifier(HeaderButtonChrome(active: showSkills))
+            .modifier(HeaderButtonChrome(active: rightPanel == .skills))
             .help("Apply a skill to this session")
         }
 
@@ -1486,91 +1705,14 @@ struct MainWindowView: View {
         switch selection {
         case let .project(path), let .shell(path, _):
             if terminals.hasPane(for: path) {
-                ZStack(alignment: .topTrailing) {
-                    // Inset from the right so the chrome wraps the terminal,
-                    // with the surface itself rounded off.
-                    TerminalHostView(path: path, tabID: selection?.tabID)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                        .padding(.trailing, 16)
-                        .padding(.bottom, 6)
-                    // Scrim under the floating panels: any click outside a
-                    // panel dismisses it (and is consumed, not passed to the
-                    // terminal — the standard popover bargain).
-                    if showSkills || showGit {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { closeFloatingPanels() }
-                    }
-                    // Floats over the terminal; the agent-gate mirrors the
-                    // button so the card leaves with the session.
-                    if showSkills, terminals.agents[path] != nil {
-                        SkillsPanel(
-                            skills: skills,
-                            onRun: { skill in
-                                terminals.send("/\(skill.name)\n", to: path)
-                                withAnimation(.easeOut(duration: 0.18)) { showSkills = false }
-                            },
-                            onInsert: { skill in
-                                terminals.send("/\(skill.name) ", to: path)
-                                withAnimation(.easeOut(duration: 0.18)) { showSkills = false }
-                            }
-                        )
-                        .padding(12)
-                        // Slides down from the header, as if out of the
-                        // button that opened it.
-                        .transition(.opacity)
-                    }
-                    if showGit {
-                        GitPanel(
-                            info: git.info,
-                            projectPath: path,
-                            onInitialize: {
-                                terminals.send("git init\n", to: path)
-                                git.refresh()
-                            },
-                            onSwitchBranch: { branch in
-                                terminals.send("git switch \"\(branch)\"\n", to: path)
-                                git.refresh()
-                            },
-                            onNewBranch: {
-                                guard let name = promptForText(
-                                    title: "New Branch",
-                                    message: "Created from the current branch and switched to.",
-                                    placeholder: "feature/thing"
-                                ), !name.isEmpty else { return }
-                                terminals.send("git switch -c \"\(name)\"\n", to: path)
-                                git.refresh()
-                            },
-                            onCommand: { command, execute in
-                                if execute {
-                                    terminals.send(command + "\n", to: path)
-                                    git.refresh()
-                                } else {
-                                    // Destructive: type it and get out of the
-                                    // way — the user's Return is the confirm.
-                                    terminals.send(command, to: path)
-                                    withAnimation(.easeOut(duration: 0.18)) {
-                                        showGit = false
-                                    }
-                                }
-                            },
-                            prompt: { promptForText(
-                                title: $0, message: $1, placeholder: $2
-                            ) }
-                        )
-                        .padding(12)
-                        .transition(.opacity)
-                    }
-                }
-                .background(
-                    GeometryReader { g in
-                        Color.clear.preference(
-                            key: DetailFrameKey.self,
-                            value: g.frame(in: .named(Self.rootSpace))
-                        )
-                    }
-                )
+                // Inset from the right so the chrome wraps the terminal,
+                // with the surface itself rounded off. The panels that used
+                // to float here live in the right sheet now.
+                TerminalHostView(path: path, tabID: selection?.tabID)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 6)
             } else {
                 // Selection normally clears when the last pane closes (see
                 // the terminalPaths onChange) — this is the transient frame
@@ -1599,10 +1741,16 @@ struct MainWindowView: View {
         }
     }
 
-    /// The empty-state sky. The collapsed rail is wider than the traffic
-    /// lights, so no shelf is needed under them anymore.
+    /// The empty-state sky, in the terminal's rounded container so the two
+    /// detail states read as the same surface swapping content. The 30pt
+    /// top/bottom insets leave chrome rails above and below the card — the
+    /// title bar's and status bar's bands, kept even with nothing in them.
     private var emptyState: some View {
         EmptyStateView()
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.top, 30)
+            .padding(.trailing, 16)
+            .padding(.bottom, 30)
     }
 
     // MARK: - Sidebar data
@@ -1666,7 +1814,9 @@ struct MainWindowView: View {
         // affordance stands in for the first row (same 32pt, so the sections
         // below don't jump when it's swapped for a real terminal).
         if terminalPaths.isEmpty {
-            out.append(.action(key: "new-terminal", title: "New Terminal"))
+            // Just "New" — it sits under the TERMINALS header, which already
+            // says what it makes.
+            out.append(.action(key: "new-terminal", title: "New"))
         }
         for path in terminalPaths {
             let list = terminals.tabs[path] ?? []
@@ -1792,8 +1942,9 @@ struct MainWindowView: View {
         switch entry {
         case let .header(title):
             HStack(alignment: .bottom, spacing: 0) {
-                Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                Text(title.uppercased())
+                    .font(.system(size: 10))
+                    .kerning(0.5)
                     .foregroundStyle(Theme.heading)
                     .padding(.bottom, 4)
                 Spacer(minLength: 0)
@@ -2181,13 +2332,6 @@ private enum RailSection: String, Identifiable {
 
 /// A rail icon button: quiet glyph, hover fill, selected fill while its
 /// popover is open.
-private struct DetailFrameKey: PreferenceKey {
-    static let defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
-    }
-}
-
 private struct RailButton<Icon: View>: View {
     let help: String
     let active: Bool
@@ -2265,6 +2409,68 @@ private struct UpdatePill: View {
         .help(busy
             ? "Updating Houston…"
             : "Update available — install Houston \(version)")
+    }
+}
+
+/// A footer control in the gear's icon+label style — the bell/calendar rows
+/// above Settings. With no label (the rail) it's the bare 22pt icon, badges
+/// riding the corner; with one, the unread count / attention dot sits inline
+/// after the text. Selected fill while its panel is open.
+private struct FooterLabeledButton: View {
+    let systemName: String
+    var label: String? = nil
+    var badgeCount: Int = 0
+    var dot: Bool = false
+    var active: Bool = false
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(hovered || active ? Theme.text : Theme.heading)
+                    .overlay(alignment: .topTrailing) {
+                        if label == nil { badge.offset(x: 5, y: -4) }
+                    }
+                if let label {
+                    Text(label)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(hovered || active ? Theme.text : Theme.heading)
+                    badge
+                }
+            }
+            .padding(.horizontal, label == nil ? 0 : 6)
+            .frame(width: label == nil ? 22 : nil, height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(active
+                        ? Theme.rowSelected
+                        : (hovered ? Theme.rowHovered : .clear))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        if badgeCount > 0 {
+            Text("\(badgeCount)")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 3.5)
+                .frame(height: 11)
+                .background(Capsule().fill(Color(hex: 0xD97706)))
+        } else if dot {
+            Circle()
+                .fill(Color(hex: 0xD97706))
+                .frame(width: 5, height: 5)
+        }
     }
 }
 
@@ -2626,8 +2832,11 @@ struct ServerRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            ServerGlyph(color: healthColor)
+            // Plain gray like the project rows' glyphs — no status color;
+            // a server in the list is either serving or it isn't.
+            ServerGlyph(color: Theme.textSecondary, size: 13)
                 .help(healthHelp)
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 1) {
                 Text(server.project ?? server.command)
                     .font(.system(size: 13, weight: .medium))
@@ -2650,15 +2859,6 @@ struct ServerRow: View {
         }
         .padding(.vertical, 4)
         .modifier(RowChrome(hovered: hovered, selected: selected))
-    }
-
-    private var healthColor: Color {
-        switch health {
-        case .healthy: Theme.dotActive
-        case .degraded: Color(hex: 0xD97706)
-        case .down: Theme.closeRed
-        case nil: Theme.textSecondary
-        }
     }
 
     private var healthHelp: String {
@@ -2700,19 +2900,29 @@ private struct HeaderPlusButton: View {
 /// The footer gear: quiet glyph that gets the row-hover fill under the
 /// pointer.
 private struct GearLabel: View {
+    /// Adds a "Settings" word next to the glyph (the expanded footer).
+    var labeled = false
     @State private var hovered = false
 
     var body: some View {
-        Image(systemName: "gearshape")
-            .font(.system(size: 12))
-            .foregroundStyle(hovered ? Theme.text : Theme.heading)
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(hovered ? Theme.rowHovered : .clear)
-            )
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
+        HStack(spacing: 5) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 12))
+                .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            if labeled {
+                Text("Settings")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            }
+        }
+        .padding(.horizontal, labeled ? 6 : 0)
+        .frame(width: labeled ? nil : 22, height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(hovered ? Theme.rowHovered : .clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
     }
 }
 

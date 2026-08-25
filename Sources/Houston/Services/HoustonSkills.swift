@@ -10,8 +10,9 @@ import Foundation
 /// tracked as an idea, not attempted here.
 enum HoustonSkills {
 
-    /// Lifecycle order, which is also their display order in the panel.
-    static let names = ["start-mission", "handoff", "log-mission", "end-mission"]
+    /// Lifecycle order, which is also their display order in the panel;
+    /// non-lifecycle skills (track) follow.
+    static let names = ["start-mission", "handoff", "log-mission", "end-mission", "track"]
 
     static func isHouston(_ name: String) -> Bool { names.contains(name) }
 
@@ -39,6 +40,12 @@ enum HoustonSkills {
                 + "to the top of missionlog.md, refreshes the project's "
                 + ".mc.json notes, and stops the dev server. Run /push first "
                 + "to commit and publish the session's changes."
+        case "track":
+            return "Records a dated obligation — a secret rotation, cert "
+                + "renewal, domain expiry — to Houston's tracked list. Say "
+                + "\"track …\" in any session; the sidebar footer's bell "
+                + "lists what's coming due and badges anything inside its "
+                + "lead window."
         default:
             return nil
         }

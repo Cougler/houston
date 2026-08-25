@@ -60,18 +60,11 @@ struct GitPanel: View {
                 .transition(.move(edge: .trailing))
             }
         }
-        .frame(width: 320)
+        .frame(maxWidth: .infinity)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Theme.gitPanelFill)
-                .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
-        )
+        // Flat on the sheet's background; clipped so the page-slide
+        // transitions can't escape the strip.
+        .clipped()
     }
 
     private func goBack() {

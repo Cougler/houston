@@ -46,34 +46,21 @@ struct SkillsPanel: View {
                     .transition(.opacity)
             }
         }
-        .frame(width: 300)
+        .frame(maxWidth: .infinity)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Theme.panelFill)
-                .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        // Flat on the sheet's background; clipped so the pushed detail
+        // page's slide transition can't escape the strip.
+        .clipped()
     }
 
     private var list: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Skills")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 8)
-
+        // The sheet's controls bar already says SKILLS — no second title.
+        Group {
             if skills.isEmpty {
                 emptyState
             } else {
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 6) {
                         if !houstonSkills.isEmpty {
                             sectionLabel("COMES WITH HOUSTON")
                             ForEach(houstonSkills) { skill in
@@ -87,8 +74,8 @@ struct SkillsPanel: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 8)
+                    .padding(.top, 2)
+                    .padding(.bottom, 12)
                 }
             }
         }
@@ -109,26 +96,26 @@ struct SkillsPanel: View {
             .font(.system(size: 9, weight: .semibold))
             .kerning(0.6)
             .foregroundStyle(Theme.heading)
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .padding(.bottom, 3)
+            .padding(.leading, 2)
+            .padding(.top, 6)
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 8) {
             Text("No skills found")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.text)
             Text("Skills live in ~/.claude/skills — one folder per skill with a SKILL.md inside.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
             Button("Open Skills Folder") {
                 Actions.openFolder(path: "~/.claude/skills".expandingTildePath)
             }
             .font(.system(size: 11))
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -184,12 +171,16 @@ private struct SkillRow: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.leading, 6)
+        .padding(.leading, 8)
         .padding(.trailing, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(hovered ? Theme.rowHovered : .clear)
+            RoundedRectangle(cornerRadius: 10)
+                .fill(hovered ? Theme.controlHovered : Theme.buttonFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
         )
         .onHover { hovered = $0 }
     }

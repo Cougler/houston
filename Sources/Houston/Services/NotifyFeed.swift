@@ -279,6 +279,12 @@ final class NotifyStore: ObservableObject {
             let changed = attention[event.paneID] != new
             attention[event.paneID] = new
             if changed {
+                EventFeed.shared.post(
+                    .needsInput,
+                    title: projectName(location.path),
+                    detail: event.message,
+                    projectPath: location.path
+                )
                 deliverBanner(
                     title: projectName(location.path),
                     body: event.message,
@@ -298,6 +304,12 @@ final class NotifyStore: ObservableObject {
             let changed = attention[event.paneID] != new
             attention[event.paneID] = new
             if changed && !hadNeedsInput {
+                EventFeed.shared.post(
+                    .finished,
+                    title: projectName(location.path),
+                    detail: new.message,
+                    projectPath: location.path
+                )
                 deliverBanner(
                     title: projectName(location.path),
                     body: new.message,
