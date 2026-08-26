@@ -292,7 +292,7 @@ private struct CommitDetailPage: View {
                 if commit.isUnpushed {
                     Text("not pushed")
                         .font(.system(size: 10))
-                        .foregroundStyle(Color(hex: 0xD97706))
+                        .foregroundStyle(Theme.textWarning)
                 }
             }
             .padding(.horizontal, 16)
@@ -492,7 +492,7 @@ private struct CommandRow: View {
                     Text(spec.command.replacingOccurrences(of: "%@", with: "…"))
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(
-                            spec.typeOnly ? Theme.closeRed : Theme.textSecondary
+                            spec.typeOnly ? Theme.textDanger : Theme.textSecondary
                         )
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -682,8 +682,8 @@ private struct FileDiffPage: View {
 
     private func color(for kind: GitDiffLine.Kind) -> Color {
         switch kind {
-        case .added: Color(hex: 0x16A34A)
-        case .removed: Theme.closeRed
+        case .added: Theme.textPositive
+        case .removed: Theme.textDanger
         case .context: Theme.textSecondary
         case .hunk: Theme.dotServer
         case .note: Theme.heading
@@ -714,10 +714,10 @@ private struct CommitFileRow: View {
             if let added = file.added, let deleted = file.deleted {
                 Text("+\(added)")
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Color(hex: 0x16A34A))
+                    .foregroundStyle(Theme.textPositive)
                 Text("−\(deleted)")
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Theme.closeRed)
+                    .foregroundStyle(Theme.textDanger)
             }
             Text(kindWord(file.kind))
                 .font(.system(size: 10))
@@ -738,7 +738,7 @@ private struct CommitRow: View {
         Button(action: action) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Circle()
-                    .fill(commit.isUnpushed ? Color(hex: 0xD97706) : Theme.dotActive)
+                    .fill(commit.isUnpushed ? Theme.dotDegraded : Theme.dotActive)
                     .frame(width: 6, height: 6)
                     .help(commit.isUnpushed ? "Not pushed yet" : "On the remote")
                 VStack(alignment: .leading, spacing: 1) {

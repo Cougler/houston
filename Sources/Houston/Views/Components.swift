@@ -1,4 +1,187 @@
+import AppKit
 import SwiftUI
+
+/// An inline text link in the brand rose (`Theme.link`) — use instead of
+/// `.buttonStyle(.link)`, whose system blue sat outside the palette. The
+/// hover underline and hand cursor keep the "this is a link" affordance the
+/// color change takes away.
+struct LinkButton: View {
+    let title: String
+    var size: CGFloat = 12
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: size))
+                .foregroundStyle(Theme.link)
+                .underline(hovered)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hovered = inside
+            // set(), not push()/pop() — a view that disappears mid-hover
+            // (sheet closing) would leave a pushed cursor stranded.
+            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+        }
+    }
+}
+
+/// A searchable, scrolling list for any menu too long for a native NSMenu
+/// (the terminal theme catalog is ~485 entries): a search field pinned on
+/// top, an optional Recents section while the query is empty, and a hard max
+/// height so the list scrolls instead of running past the screen. Present it
+/// from a `.popover`; native menus can't host a text field.
+struct SearchableMenuList<Item: Identifiable, Row: View>: View {
+    var items: [Item]
+    var recents: [Item] = []
+    var allTitle = "All"
+    var matches: (Item, String) -> Bool
+    var select: (Item) -> Void
+    @ViewBuilder var row: (Item) -> Row
+
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+
+    private var filtered: [Item] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return items }
+        return items.filter { matches($0, q) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                TextField("Search", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($searchFocused)
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(height: 1)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    if query.trimmingCharacters(in: .whitespaces).isEmpty,
+                       !recents.isEmpty {
+                        sectionHeader("Recents")
+                        ForEach(recents) { item in
+                            MenuListRow(action: { select(item) }) { row(item) }
+                        }
+                        sectionHeader(allTitle)
+                    }
+                    if filtered.isEmpty {
+                        Text("No matches")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                    }
+                    ForEach(filtered) { item in
+                        MenuListRow(action: { select(item) }) { row(item) }
+                    }
+                }
+                .padding(6)
+            }
+            // The whole point: the list scrolls, the popover never grows
+            // past a screenful.
+            .frame(maxHeight: 340)
+        }
+        .frame(width: 248)
+        .onAppear { searchFocused = true }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 9, weight: .semibold))
+            .kerning(0.5)
+            .foregroundStyle(Theme.heading)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 3)
+    }
+}
+
+/// One row of `SearchableMenuList` — quiet hover fill over caller content.
+private struct MenuListRow<Content: View>: View {
+    let action: () -> Void
+    @ViewBuilder let content: Content
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+    }
+}
+
+/// Copy-to-clipboard icon button that confirms: the doc glyph flips to a
+/// green check for a beat after copying. Hover chrome matches
+/// `ControlIconButton`'s quiet square.
+struct CopyIconButton: View {
+    let text: String
+    var help: String = "Copy"
+
+    @State private var hovered = false
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            withAnimation(.easeOut(duration: 0.12)) { copied = true }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.2))
+                withAnimation(.easeOut(duration: 0.3)) { copied = false }
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(
+                    copied ? Theme.dotActive : hovered ? Theme.text : Theme.textSecondary
+                )
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(hovered ? Theme.controlHovered : .clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+    }
+}
 
 /// Horizontal context-usage bar. The only piece kept from the old popover's
 /// component set.
@@ -29,6 +212,20 @@ func formatTokens(_ n: Int) -> String {
     if n < 10_000 { return String(format: "%.1fk", Double(n) / 1_000) }
     if n < 1_000_000 { return "\(Int((Double(n) / 1_000).rounded()))k" }
     return String(format: "%.1fM", Double(n) / 1_000_000)
+}
+
+/// Dusty-rose capsule marking the public-link share tier that isn't built yet.
+struct ComingSoonBadge: View {
+    var body: some View {
+        Text("COMING SOON")
+            .font(.system(size: 9, weight: .semibold))
+            .kerning(0.5)
+            .foregroundStyle(Theme.buttonActiveStroke)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Theme.buttonActiveFill))
+            .overlay(Capsule().stroke(Theme.buttonActiveStroke.opacity(0.5), lineWidth: 1))
+    }
 }
 
 /// The server-rack glyph from `Resources/icons/servers.svg`, drawn as a path

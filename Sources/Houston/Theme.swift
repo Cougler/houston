@@ -86,8 +86,36 @@ enum Theme {
     /// invisible to low-vision users; #15803D clears 3:1 (WCAG for non-text
     /// UI) while the dark surface keeps the bright signal color.
     static let dotActive = Color(light: 0x15803D, dark: 0x00DD21)
-    static let dotServer = Color(hex: 0x3B82F6)
+    /// Deepened in light mode: its only text use (diff hunk headers) sat at
+    /// 3.1:1 with the fixed #3B82F6.
+    static let dotServer = Color(light: 0x1D4ED8, dark: 0x3B82F6)
     static let dotShell = Color(hex: 0xA6A6A6)
+    /// Degraded / warning status. The classic amber #D97706 read 2.7:1 on
+    /// the light chrome; the light value deepens to clear 3:1 (non-text)
+    /// and 4.5:1 when it colors small text.
+    static let dotDegraded = Color(light: 0xB45309, dark: 0xD97706)
+
+    /// Inline text links — the brand rose instead of system blue, which was
+    /// the one color in the app from outside the palette. The light value
+    /// deepens #AD7370 (3.2:1 on the chrome, an accessibility miss at text
+    /// size) to clear 4.5:1; dark keeps the design's #C79491 (6.4:1).
+    static let link = Color(light: 0x8F5350, dark: 0xC79491)
+    /// Filled CTA buttons carrying white text (onboarding's Take the Tour /
+    /// Next). The brand rose deepened until white clears 4.5:1 in both modes:
+    /// `link` is tuned for text *on* the chrome, and its dark value (#C79491,
+    /// ~2:1 behind white) is far too light to sit under white text.
+    static let ctaFill = Color(light: 0x7E4340, dark: 0x8F5350)
+    /// Red *text* (deleted-line counts, destructive commands). `closeRed`
+    /// stays for glyphs and fills, but as small text it read 2.4:1 on the
+    /// light chrome.
+    static let textDanger = Color(light: 0xB91C1C, dark: 0xFF685F)
+    /// Green *text* (added-line counts, diff additions). The raw #16A34A
+    /// sat at 2.8:1 on the light chrome; `dotActive`'s dark #00DD21 is a
+    /// signal color, too loud as prose.
+    static let textPositive = Color(light: 0x166534, dark: 0x34C759)
+    /// Amber *text* ("not pushed"). Text-grade amber has to go brown —
+    /// #D97706 can't reach 4.5:1 on the light chrome at any small size.
+    static let textWarning = Color(light: 0x92400E, dark: 0xD97706)
 
     // MARK: - Metrics
 

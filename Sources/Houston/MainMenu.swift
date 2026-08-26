@@ -136,18 +136,33 @@ final class SettingsMenuBuilder: NSObject, NSMenuDelegate {
         }
         menu.addItem(submenu: appearance)
 
+        // Houston + recent picks only — the full ~485-theme catalog ran past
+        // the screen as a submenu. The searchable picker lives in the window.
         let theme = NSMenu(title: "Terminal Theme")
         let houston = ClosureMenuItem("Houston") { Self.update { $0.terminalTheme = "" } }
         houston.state = s.terminalTheme.isEmpty ? .on : .off
         theme.addItem(houston)
-        theme.addItem(.separator())
-        for definition in GhosttyThemeCatalog.allThemes {
-            let item = ClosureMenuItem(definition.name) {
-                Self.update { $0.terminalTheme = definition.name }
+        let recents = s.recentTerminalThemes
+            .filter { GhosttyThemeCatalog.theme(named: $0) != nil }
+        if !recents.isEmpty {
+            theme.addItem(.separator())
+            for name in recents {
+                let item = ClosureMenuItem(name) {
+                    Self.update { s in
+                        s.terminalTheme = name
+                        var r = s.recentTerminalThemes.filter { $0 != name }
+                        r.insert(name, at: 0)
+                        s.recentTerminalThemes = Array(r.prefix(10))
+                    }
+                }
+                item.state = s.terminalTheme == name ? .on : .off
+                theme.addItem(item)
             }
-            item.state = s.terminalTheme == definition.name ? .on : .off
-            theme.addItem(item)
         }
+        theme.addItem(.separator())
+        theme.addItem(ClosureMenuItem("All Themes…") {
+            NotificationCenter.default.post(name: .houstonShowThemePicker, object: nil)
+        })
         menu.addItem(submenu: theme)
 
         let bar = NSMenu(title: "Status Bar")

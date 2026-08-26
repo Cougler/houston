@@ -2,6 +2,92 @@
 
 ---
 
+## 2026-08-25 — Searchable theme picker, icon footer, paginated onboarding
+
+The terminal theme menu is now a searchable flyout card (max-height list, search field, last-10 recents) instead of a 485-item submenu, the sidebar footer collapsed to one horizontal icon row, and a new seven-page onboarding dialog replaced the old WelcomeView — it shows once per install and replays from the gear. All of today's work (this plus the morning's share-proxy/ServerPanel session) is uncommitted on main; next is reviewing the onboarding in the running debug build, then /push.
+
+**Done this session:**
+- `SearchableMenuList` in Components.swift: reusable searchable list for any over-long menu — pinned auto-focused search field, Recents section while the query is empty, 340pt max-height scroll; native NSMenus can't host a text field, hence a presented card
+- Theme picker rebuilt on it (`TerminalThemePicker` in MainWindowView): per-theme swatches drawn in each theme's own bg/fg colors, checkmark on current, Houston default pinned first; presented in the rail-flyout chrome (panelFill card, spring slide, full-window clear scrim, Esc closes) after an NSPopover first cut — anchored bottom-leading beside the gear in both sidebar states
+- `recentTerminalThemes` in settings.json (newest first, deduped, cap 10); picks from every entry point bump it
+- Menu-bar Settings menu's theme submenu now shows Houston + recents + "All Themes…" (posts `.houstonShowThemePicker` to open the window's picker) instead of the full catalog
+- Sidebar footer: one horizontal icon row — Collapse, Settings, Reminders, Notifications (labels and the short rule gone; badges ride icon corners); rail unchanged; dead `labeled` GearLabel variant removed
+- `OnboardingView.swift`: 7-page centered card over a 25% scrim — Terminals (animated typing vignette), Servers, Share Your Work (.local + COMING SOON), Projects, Status Bar, Reminders, Themes; illustration → title → two sentences → dots (active dot white, 2× wide) → Skip/Back/Next controls
+- Deleted WelcomeView.swift (git rm); `welcomeSeen` replaced by fresh `onboardingSeen` key so existing installs see the new onboarding once; "Show Onboarding" replay item in the footer gear
+
+**Up next:**
+- Review the onboarding in the running debug build (it should be up right now — fresh `onboardingSeen` key) and iterate on copy/vignettes
+- /push — everything from today's two sessions is uncommitted on main
+- Carried over: phone-test `hierarch.local`, tier-3 relay (Hetzner VPS + frp/sish), persist the right sheet's pin state
+
+**Handoff:**
+- The debug Houston binary was relaunched with the onboarding showing; Aaron hasn't reviewed it yet — expect tweak requests to OnboardingView.swift (copy, vignettes, sizing) before /push.
+- Theme-picker flyout keyboard focus is unverified: unlike the NSPopover cut (own window), the flyout lives in the main window — check the search field actually grabs first responder on open.
+- The onboarding scrim is inert by design (no click-away) — Skip/Esc/Start Exploring are the outs; the theme flyout DOES click-away-dismiss.
+- CLAUDE.md still documents `welcomeSeen` and the old footer/theme-menu layout in its Settings/gotchas prose; not updated this session.
+- The stale `welcomeSeen` key remains harmlessly in settings.json (write preserves unknown keys); `onboardingSeen` is the live flag.
+- Everything from the morning session's handoff still stands: Hierarch's Vite server runs from a nohup shell (not a Houston pane), `.local` is only Mac-side verified, Sequoia network prompts unobserved, light-mode Theme.link not eyeballed.
+
+---
+
+## 2026-08-25 — Shareable dev URLs (tiers 1+2), server sheet, design polish
+
+Shareable dev URLs are live: a reverse proxy serves `<project>.localhost` on this Mac and `<project>.local` to any device on the Wi-Fi (mDNS A records), with the public-link tier reserved as a Coming Soon card. The server page moved into the shared right sheet as `ServerPanel`, sheets are now swappable with no click-away scrim, and a design pass added brand-rose links plus accessible text-grade status color tokens. Next: exercise `.local` from a real phone and design the tier-3 relay.
+
+**Done this session:**
+- `ShareProxy.swift`: Host-header reverse proxy on port 80 (fallback 14080, outside the dev-scan range), byte-splice after first request headers so WebSockets/HMR/SSE work; unknown hosts get a listing page, dead backends a friendly offline page (`.waiting` = connection refused — Network.framework would retry forever)
+- `MDNSAdvertiser.swift`: `<project>.local` hostname A records via `DNSServiceRegisterRecord` (NWListener Bonjour can't register hostnames); re-registers on IP change, tears down when idle
+- Vite host-check fix twice over: `server.allowedHosts: ['.local']` added to Hierarch's vite config, and `TerminalEnvironment` now sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.local` so any Vite server launched from a Houston pane accepts `.local` names automatically
+- `ServerPanel` in the right sheet (RightPanel.server(id)): replaced both the dead full-page ServerDetailView (deleted) and the interim popover; strategic layout — name + health pill (ops trivia in its tooltip), ONE primary link (pretty URL, falls back to `localhost:<port>` when sharing is off), action buttons, then Sharing with two matching cards: "Any device on your Wi-Fi" (wifi icon, `.local` link) and "Anyone, anywhere" (COMING SOON badge)
+- Swappable sheets: no scrim; opener clicks swap content in place; project/shell rows select without dismissing; floating sheet closes on header gaps, empty-state sky, sidebar dead space (`onEmptyClick`), terminal clicks (`.houstonTerminalClicked` from `HoustonTerminalView.mouseDown`), and ✕; selection changes never auto-dismiss
+- Design pass: `Theme.link` (brand rose, AA in both modes) + reusable `LinkButton` (hover underline, hand cursor) and `CopyIconButton` (hover chrome, checkmark confirm); text-grade tokens `textPositive`/`textDanger`/`textWarning` replacing raw green/red/amber hexes across sidebar diff counts, GitPanel, FeedSheet, WelcomeView; amber unified as `dotDegraded`; sharing toggle tinted rose
+- `sharingDisabled` setting (default on) with the toggle in ServerPanel
+
+**Up next:**
+- Open `hierarch.local` from a real phone — the mDNS + proxy path is only verified Mac-side (curl with spoofed Host + `dns-sd` resolution)
+- Tier 3: buy the short share domain, stand up frp/sish on a VPS (Hetzner CX22 Ashburn chosen, ~$4.59/mo), wire the Coming Soon card
+- Persisting the right sheet's pin state (carried over from last session)
+
+**Handoff:**
+- The Hierarch Vite server is currently running from a plain background shell (nohup, pid on port 5173), NOT a Houston pane — it died with a Houston relaunch mid-session and was restarted to verify the `.local` fix. The next Houston-pane launch re-owns it.
+- The `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` env var only reaches servers launched from Houston panes; servers started elsewhere still need the vite.config line (Vite's own block page prints the fix).
+- The proxy splices raw bytes — the Host header is NOT rewritten (keep-alive would make per-first-request rewriting inconsistent). Frameworks that host-check see the pretty name; only Vite is known to care.
+- Sequoia's Local Network privacy prompt and the firewall "allow incoming connections" dialog have not been observed yet — first packaged-build run on a fresh machine may surface both.
+- Light-mode `Theme.link` (#8F5350) is computed-contrast approved but not eyeballed against the brand rose — Aaron may want it nudged.
+- Contrast numbers for all new tokens are hand-computed, not tool-verified.
+- The debug Houston binary was left running for review; the packaged-build items from last session's handoff (banners, self-updater verify) remain unexercised.
+
+---
+
+## 2026-08-24 — Reminders, notification feed, unified right sheet, v1.0.8 shipped
+
+Houston 1.0.8 is shipped (notarized DMG on GitHub Releases and tryhoustonapp.com) with two new systems: Reminders — dated obligations captured via the new bundled /track skill or a manual form with an inline calendar, stored in tracked.json and surfaced with lead-window badges and banners — and a Notifications feed collecting needs-you events, finished turns, due reminders, and commits. Git, Skills, Reminders, and Notifications all live in one full-height right sheet now, floating by default and pinnable inline. Next: install 1.0.8 and exercise the reminder banners and the /track skill end-to-end in the packaged build.
+
+**Done this session:**
+- `/track` skill (Resources/skills/track, auto-installed): Claude converts "track X in 24 months" to an absolute date and writes `Application Support/Houston/tracked.json`; handles list/done/untrack and `repeatMonths` recurrence
+- `TrackedStore`: polls tracked.json (mtime + day-rollover), computes lead windows, posts feed events + packaged-build banners once per item per launch; write-backs (done/undone/postpone/remove/add) mutate raw JSON so unknown skill fields survive
+- `EventFeed` + `FeedSheet`: in-session notification feed — needs-input/finished (via NotifyStore), reminders coming due, commits detected from GitInfo HEAD movement on the watched branch (branch-switch and rebase filtered out)
+- Unified right sheet (`rightSheet` in MainWindowView): one full-height strip for Git/Skills/Reminders/Notifications, spring slide-in, pin toggle — floating overlays with scrim + click-away, pinned reserves layout width and pushes the detail column; single always-mounted view so pin/unpin doesn't jump; replaced the old floating panels, their scrims, and the DetailFrameKey plumbing
+- Reminders sheet (TrackedPanel rewrite): card items with deterministic-color project tags, countdown pills swapping to actions on hover, sort (due/title/project) + project filter pills, "Track something" trailing the list until it pins to the bottom, manual add form with custom CalendarGrid (fixed 6-week grid, year pull-down, today dot, past days inert), HIG-style remind pull-down and inset fields, /track hint chip
+- Sidebar: Notifications + Reminders rows above a labeled Settings row (collapse below a short rule); rail back to 52pt; quiet all-caps section headers everywhere; server glyphs plain gray (health lives in the tooltip); "New" instead of "New Terminal"
+- Empty-state sky back to its own color inside the terminal's rounded container with 30pt top/bottom rails
+- Released v1.0.8 (signed, notarized, stapled; site DMG synced); featureideas.md started with the shareable-localhost-URLs concept
+
+**Up next:**
+- Install 1.0.8 and exercise the packaged loop: reminder banners, /track from a real session, feed events landing while unfocused
+- Consider persisting the right sheet's pin state in settings.json (session-only today)
+- The Hierarch client-secret reminder's due date (2028-08-24) was assumed from "24 months from today" — verify against the actual Azure expiry
+
+**Handoff:**
+- tracked.json is seeded with one real item (Hierarch client secret, due 2028-08-24, leadDays 30) — its date is an assumption, not read from Azure.
+- Reminder banners and the tracked-due notification path have never run in a packaged build; debug builds badge only (`UNUserNotificationCenter` needs a bundle).
+- Commit-feed events only watch the selected project (they ride GitStatusStore's existing poll); background projects' commits are invisible by design.
+- The self-updater in-place install remains unverified from an installed build — 1.0.8 is the third release without anyone exercising verify → swap → relaunch.
+- The right sheet's pin state and the Reminders sort/filter are session-only @State — deliberate, not an oversight.
+- The debug Houston binary was left running for the user to review the sheet redesign.
+
+---
+
 ## 2026-08-19 — Sidebar avatars + density, git commands page, v1.0.5 & v1.0.6 shipped
 
 Houston 1.0.5 and 1.0.6 are shipped — notarized DMGs on GitHub Releases and tryhoustonapp.com, both cut cleanly via /release. The sidebar got a full pass: terminal rows now lead with a git-status avatar (tinted circle, agent logo as a corner badge), everything is denser, and sidebar width/collapse plus the window frame persist in settings.json so they survive updates. The git panel gained a click-to-run Git Commands page. Next: actually exercise the self-updater's in-place install from an installed build, and enable the needs-you notification hooks.

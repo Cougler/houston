@@ -5,10 +5,54 @@ import SwiftUI
 /// closes. A slow solar system turns in the center of the pane under a field
 /// of twinkling stars and the occasional shooting star.
 struct EmptyStateView: View {
+    /// Vertical shift for the sky's contents (the background stays
+    /// full-bleed). The onboarding handoff sets this to the welcome
+    /// screen's -56 lift so the crossfade is static, then animates it to 0
+    /// in the same spring that slides the sidebar in — one diagonal glide.
+    var skyLift: CGFloat = 0
+
     /// Drives the entrance; reset on every appearance because the view is
     /// rebuilt each time the selection empties.
     @State private var appeared = false
 
+    var body: some View {
+        ZStack {
+            NightSky()
+
+            SolarSystem()
+                .reveal(appeared, delay: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            // What to do next, quietly under the animation.
+            VStack(spacing: 6) {
+                Text("Houston is standing by")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("Pick a project in the sidebar and start a mission or open a new terminal")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 360)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 48)
+            .reveal(appeared, delay: 0.4)
+        }
+        .offset(y: skyLift)
+        .background(Theme.emptyStateBackground)
+        .clipped()
+        .onAppear {
+            // Next runloop tick so the first frame renders hidden and the
+            // change actually animates.
+            DispatchQueue.main.async { appeared = true }
+        }
+    }
+}
+
+/// The sky behind the solar system: twinkling stars pinned to fractions of
+/// the pane plus the occasional comet. Fills whatever space it's given —
+/// shared by the empty state and the onboarding takeover.
+struct NightSky: View {
     /// The star field, positioned as fractions of the pane so it fills any
     /// window size. Mostly neutral, with one warm and one cool accent.
     private struct StarSpec: Identifiable {
@@ -75,33 +119,7 @@ struct EmptyStateView: View {
 
                 Comet()
                     .position(x: geo.size.width * 0.5, y: geo.size.height * 0.5)
-
-                SolarSystem()
-                    .reveal(appeared, delay: 0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                // What to do next, quietly under the animation.
-                VStack(spacing: 6) {
-                    Text("Houston is standing by")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                    Text("Pick a project in the sidebar and start a mission or open a new terminal")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: 360)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .padding(.bottom, 48)
-                .reveal(appeared, delay: 0.4)
             }
-        }
-        .background(Theme.emptyStateBackground)
-        .clipped()
-        .onAppear {
-            // Next runloop tick so the first frame renders hidden and the
-            // change actually animates.
-            DispatchQueue.main.async { appeared = true }
         }
     }
 }

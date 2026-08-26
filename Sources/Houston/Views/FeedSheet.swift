@@ -108,9 +108,9 @@ private struct FeedEventCard: View {
 
     private var glyphColor: Color {
         switch event.kind {
-        case .needsInput: Color(hex: 0xD97706)
+        case .needsInput: Theme.dotDegraded
         case .finished: Theme.dotActive
-        case .trackedDue: Color(hex: 0xD97706)
+        case .trackedDue: Theme.dotDegraded
         case .commit: Theme.textSecondary
         }
     }

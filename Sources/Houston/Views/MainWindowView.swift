@@ -31,10 +31,12 @@ enum SidebarSelection: Hashable {
     }
 }
 
-/// What the right sheet can show — Git, Skills, Tracked, or the
-/// notification feed. One sheet, so the four are exclusive by construction.
+/// What the right sheet can show — Git, Skills, Tracked, the notification
+/// feed, or a dev server (by `DevServer.id`). One sheet, so the panels are
+/// exclusive by construction.
 enum RightPanel: Equatable {
     case git, skills, tracked, feed
+    case server(String)
 }
 
 /// Houston's desktop window, laid out to the Figma design: a white sidebar
@@ -49,6 +51,7 @@ enum RightPanel: Equatable {
 struct MainWindowView: View {
     @StateObject private var store = ActiveSessionStore()
     @StateObject private var servers = DevServerStore()
+    @StateObject private var share = ShareProxyStore()
     @StateObject private var git = GitStatusStore()
     @StateObject private var statusFeed = StatusLineStore()
     @StateObject private var mcp = MCPStatusStore()
@@ -78,12 +81,12 @@ struct MainWindowView: View {
     @State private var agentMenuBox = MenuAnchorBox()
     /// Mirror of the settings file, for the footer gear's checkmarks.
     @State private var settings = HoustonSettings.read()
-    /// The server whose detail popover is open, by `DevServer.id`.
-    @State private var serverPopover: String?
     /// Whether Houston's feed script is Claude's configured statusline.
     @State private var statusFeedInstalled = StatusLineFeed.state == .houston
     /// Consent dialog for taking over the Claude statusline.
     @State private var showStatusPrompt = false
+    /// The searchable terminal-theme popover, opened from the footer gear.
+    @State private var showThemePicker = false
     /// Whether Houston's hooks feed notifications (mirrors settings.json).
     @State private var notifyInstalled = NotifyFeed.isInstalled
     /// Consent dialog for installing the notification hooks.
@@ -92,8 +95,15 @@ struct MainWindowView: View {
     @State private var statusPromptOffered = false
     /// Project folders currently collapsed, persisted in settings.
     @State private var collapsedFolders = Set(HoustonSettings.read().collapsedFolders)
-    /// First-launch welcome overlay, until dismissed once.
-    @State private var showWelcome = !HoustonSettings.read().welcomeSeen
+    /// First-launch onboarding: a full-window takeover on the empty-state
+    /// sky (sidebar hidden underneath), until dismissed once.
+    @State private var showOnboarding = !HoustonSettings.read().onboardingSeen
+    /// While the onboarding takeover is up, the sidebar isn't laid out at
+    /// all: the detail column spans the window, putting the empty state's
+    /// solar system at the same window center the onboarding's occupies.
+    /// Dismissal fades the overlay onto that aligned system, then slides
+    /// the sidebar in, gliding the system to the detail center with no jump.
+    @State private var sidebarRevealed = HoustonSettings.read().onboardingSeen
     /// Sidebar collapsed to the three-icon rail, persisted in settings.
     @State private var sidebarCollapsed = HoustonSettings.read().sidebarCollapsed
     /// The rail section whose popover is open, while collapsed.
@@ -131,15 +141,18 @@ struct MainWindowView: View {
         HStack(spacing: 0) {
             if sidebarCollapsed {
                 railColumn
-                    .frame(width: railWidth)
+                    .frame(width: sidebarRevealed ? railWidth : 0)
+                    .clipped()
             } else {
                 sidebarColumn
-                    .frame(width: sidebarWidth)
+                    .frame(width: sidebarRevealed ? sidebarWidth : 0)
+                    .clipped()
             }
             // One divider for both states, outside the branch so its view —
             // and any drag mid-flight through a collapse/expand — survives
             // the swap.
             splitDivider
+                .opacity(sidebarRevealed ? 1 : 0)
             detailColumn
                 .frame(maxWidth: .infinity)
             // Docked: reserve the sheet's width in the layout. The sheet
@@ -153,12 +166,20 @@ struct MainWindowView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
         .overlay(alignment: .topLeading) { railFlyoutLayer }
+        .overlay(alignment: .bottomLeading) { themePickerLayer }
         .overlay(alignment: .topTrailing) { rightSheetLayer }
         .overlay {
-            if showWelcome {
-                WelcomeView {
-                    withAnimation(.easeOut(duration: 0.3)) { showWelcome = false }
-                    updateSettings { $0.welcomeSeen = true }
+            if showOnboarding {
+                OnboardingView {
+                    withAnimation(.easeOut(duration: 0.25)) { showOnboarding = false }
+                    updateSettings { $0.onboardingSeen = true }
+                    // Once the overlay has faded onto the aligned empty-state
+                    // system, slide the sidebar in around it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        withAnimation(.spring(duration: 0.6, bounce: 0.12)) {
+                            sidebarRevealed = true
+                        }
+                    }
                 }
                 .transition(.opacity)
             }
@@ -172,6 +193,7 @@ struct MainWindowView: View {
         .onAppear {
             store.start()
             servers.start()
+            share.start()
             git.start()
             git.watchRows(gitWatchSet)
             statusFeed.start()
@@ -188,6 +210,9 @@ struct MainWindowView: View {
             }
         }
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
+        // Every dev-server tick re-feeds the share proxy's Host-header routes
+        // and the set of `<project>.local` names advertised over Bonjour.
+        .onChange(of: servers.devServers) { _, list in share.update(servers: list) }
         .onChange(of: gitWatchSet) { _, set in git.watchRows(set) }
         // Commit watch for the bell's feed: HEAD moving on the watched
         // project's branch becomes a "Committed"/"New commits" event.
@@ -203,12 +228,11 @@ struct MainWindowView: View {
             }
         }
         .onChange(of: selection) { _, newValue in
-            // A floating sheet is transient — navigation dismisses it. A
-            // docked one is furniture: it stays, its content following the
-            // selection (git already watches it; skills reload here).
-            if !rightPanelDocked {
-                closeRightPanel()
-            } else if rightPanel == .skills, let path = newValue?.projectPath {
+            // Navigation does NOT dismiss the sheet (docked or floating) —
+            // its content follows the selection instead (git already
+            // watches it; skills reload here). Dismissal is dead-chrome
+            // clicks and the ✕ only.
+            if rightPanel == .skills, let path = newValue?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
             terminals.activeProjectPath = newValue?.projectPath
@@ -229,6 +253,11 @@ struct MainWindowView: View {
             if let path = note.userInfo?["path"] as? String {
                 select(.project(path))
             }
+        }
+        // Clicking into a terminal pane dismisses a floating sheet — ghostty
+        // eats the click, so it arrives as a notification instead.
+        .onReceive(NotificationCenter.default.publisher(for: .houstonTerminalClicked)) { _ in
+            closeFloatingSheet()
         }
         // A nested shell closing (⇧⌘W, context menu) must not strand the
         // selection on a dead tab — fall back to the project's main
@@ -262,6 +291,9 @@ struct MainWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .houstonShowStatusFeedPrompt)) { _ in
             showStatusPrompt = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .houstonShowThemePicker)) { _ in
+            setThemePicker(true)
         }
         // A claude session appearing is the moment the status bar becomes
         // relevant — offer the takeover once, unless previously declined.
@@ -417,7 +449,9 @@ struct MainWindowView: View {
                 // but still means "put me in that terminal".
                 onRowClick: { entry in
                     if let target = entry.selection { select(target) }
-                }
+                },
+                // Sidebar dead space is "outside" too.
+                onEmptyClick: { closeFloatingSheet() }
             )
             // NSViewRepresentable has no intrinsic content size, so without
             // this SwiftUI hands it ~zero height and the whole column collapses
@@ -543,6 +577,59 @@ struct MainWindowView: View {
         }
     }
 
+    /// The theme picker in the rail flyout's chrome: a second-layer card
+    /// beside the sidebar (or rail), bottom-aligned with the footer gear
+    /// that opens it. Same scrim, card, and slide as `railFlyoutLayer`.
+    @ViewBuilder
+    private var themePickerLayer: some View {
+        if showThemePicker {
+            ZStack(alignment: .bottomLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { setThemePicker(false) }
+                TerminalThemePicker(
+                    current: settings.terminalTheme,
+                    recents: settings.recentTerminalThemes,
+                    select: { name in
+                        terminalThemeBinding.wrappedValue = name
+                        if !name.isEmpty {
+                            updateSettings { s in
+                                var r = s.recentTerminalThemes.filter { $0 != name }
+                                r.insert(name, at: 0)
+                                s.recentTerminalThemes = Array(r.prefix(10))
+                            }
+                        }
+                        setThemePicker(false)
+                    }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Theme.panelFill)
+                        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                )
+                .onExitCommand { setThemePicker(false) }
+                .offset(
+                    x: (sidebarCollapsed ? railWidth : sidebarWidth) + 6,
+                    y: -12
+                )
+                .transition(.opacity.combined(with: .offset(x: -8)))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// Open/close rides the rail flyout's animation so the card slides.
+    private func setThemePicker(_ open: Bool) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+            showThemePicker = open
+        }
+    }
+
     // MARK: - Right sheet
 
     /// The uniform card width inside the sheet; the strip adds its gutters.
@@ -571,7 +658,7 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
-        case .git, .tracked:
+        case .git, .tracked, .server:
             break
         }
     }
@@ -582,22 +669,26 @@ struct MainWindowView: View {
 
     /// The sheet always lives here, flush with the right edge, sliding in
     /// and out by offset — one continuously-mounted view for both modes, so
-    /// pin/unpin can't jump. Floating adds the click-away scrim and a depth
-    /// shadow that fades away when docked; docking itself just reserves
-    /// width in the root HStack.
+    /// pin/unpin can't jump. Docking just reserves width in the root HStack.
+    ///
+    /// Deliberately NO click-away scrim: a floating sheet must not eat the
+    /// rest of the window. Clicking another opener (a server row, the Git
+    /// button) swaps the sheet's content in place; clicking projects or the
+    /// terminal works normally and leaves the sheet up; only dead chrome
+    /// (header gaps, the empty-state sky) closes it — those taps are wired
+    /// where that chrome lives (`closeFloatingSheet`).
     @ViewBuilder
     private var rightSheetLayer: some View {
         let open = rightPanel != nil
-        ZStack(alignment: .topTrailing) {
-            if open, !rightPanelDocked {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { closeRightPanel() }
-            }
-            rightSheet
-                .offset(x: open ? 0 : rightSheetWidth + 40)
-                .allowsHitTesting(open)
-        }
+        rightSheet
+            .offset(x: open ? 0 : rightSheetWidth + 40)
+            .allowsHitTesting(open)
+    }
+
+    /// Click on dead chrome: dismiss a floating sheet, never a docked one.
+    private func closeFloatingSheet() {
+        guard rightPanel != nil, !rightPanelDocked else { return }
+        closeRightPanel()
     }
 
     /// The sheet itself: a full-height strip off the right edge — a controls
@@ -661,6 +752,7 @@ struct MainWindowView: View {
         case .skills: "SKILLS"
         case .tracked: "REMINDERS"
         case .feed: "NOTIFICATIONS"
+        case .server: "SERVER"
         case nil: ""
         }
     }
@@ -695,6 +787,21 @@ struct MainWindowView: View {
             }
         case .tracked:
             TrackedPanel(store: tracked)
+        case let .server(sid):
+            if let server = servers.devServers.first(where: { $0.id == sid }) {
+                ServerPanel(
+                    server: server,
+                    share: share,
+                    health: servers.health[sid],
+                    onOpenTerminal: {
+                        guard let cwd = server.cwd else { return }
+                        select(.project(cwd))
+                        if !rightPanelDocked { closeRightPanel() }
+                    }
+                )
+            } else {
+                rightSheetPlaceholder("This server is no longer listening.")
+            }
         case .feed:
             FeedSheet(feed: feed) { event in
                 if let path = event.projectPath {
@@ -1201,60 +1308,47 @@ struct MainWindowView: View {
 
 
     private var sidebarFooter: some View {
-        // Notifications and Tracked stacked over the Settings row, all in the
-        // gear's icon+label style; collapse pinned right on the Settings row.
-        VStack(alignment: .leading, spacing: 2) {
-            FooterLabeledButton(
-                systemName: "bell",
-                label: "Notifications",
-                badgeCount: feed.unreadCount,
-                active: rightPanel == .feed,
-                help: "Notifications",
-                action: { toggleRightPanel(.feed) }
-            )
-            FooterLabeledButton(
-                systemName: "calendar",
-                label: "Reminders",
-                dot: tracked.attentionCount > 0,
-                active: rightPanel == .tracked,
-                help: "Reminders",
-                action: { toggleRightPanel(.tracked) }
-            )
-            HStack(spacing: 2) {
-                settingsMenu(labeled: true)
-                if let update = updates.available {
-                    UpdatePill(version: update.version, busy: installer.isBusy) {
-                        installer.requestInstall(update)
-                    }
-                    .padding(.leading, 4)
-                }
-                Spacer(minLength: 8)
-            }
-            // Collapse on its own row under Settings, set off by a short
-            // rule — the footer's quiet "end of list" mark.
-            Rectangle()
-                .fill(Theme.borderSidebar)
-                .frame(width: 24, height: 1)
-                .padding(.leading, 4)
-                .padding(.top, 4)
+        // One row of bare icons: collapse first, then Settings, Reminders,
+        // Notifications — the same order the rail stacks upward from its
+        // collapse button.
+        HStack(spacing: 2) {
             FooterIconButton(
                 systemName: "sidebar.left",
                 help: "Collapse sidebar",
                 action: toggleSidebarCollapse
             )
-            .padding(.top, 2)
+            settingsMenu()
+            FooterLabeledButton(
+                systemName: "calendar",
+                dot: tracked.attentionCount > 0,
+                active: rightPanel == .tracked,
+                help: "Reminders",
+                action: { toggleRightPanel(.tracked) }
+            )
+            FooterLabeledButton(
+                systemName: "bell",
+                badgeCount: feed.unreadCount,
+                active: rightPanel == .feed,
+                help: "Notifications",
+                action: { toggleRightPanel(.feed) }
+            )
+            if let update = updates.available {
+                UpdatePill(version: update.version, busy: installer.isBusy) {
+                    installer.requestInstall(update)
+                }
+                .padding(.leading, 4)
+            }
+            Spacer(minLength: 0)
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 10)
+        .padding(.horizontal, 10)
         .padding(.vertical, 8)
     }
 
     // MARK: - Settings
 
     /// Footer gear: appearance (System/Light/Dark) and the terminal's theme,
-    /// straight from ghostty's catalog. Labeled ("Settings") in the expanded
-    /// footer, bare glyph on the rail.
-    private func settingsMenu(labeled: Bool = false) -> some View {
+    /// straight from ghostty's catalog. A bare glyph in both footer states.
+    private func settingsMenu() -> some View {
         Menu {
             Picker("Appearance", selection: appearanceBinding) {
                 Text("System").tag("system")
@@ -1263,15 +1357,11 @@ struct MainWindowView: View {
             }
             .pickerStyle(.inline)
 
-            Menu("Terminal Theme") {
-                Picker("Terminal Theme", selection: terminalThemeBinding) {
-                    Text("Houston").tag("")
-                    ForEach(GhosttyThemeCatalog.allThemes) { theme in
-                        Text(theme.name).tag(theme.name)
-                    }
-                }
-                .pickerStyle(.inline)
-                .labelsHidden()
+            // The catalog is ~485 themes — a submenu ran past the screen and
+            // couldn't be searched. A Button here dismisses the menu, then
+            // the popover below opens on the gear.
+            Button("Terminal Theme…") {
+                setThemePicker(true)
             }
 
             Divider()
@@ -1314,11 +1404,17 @@ struct MainWindowView: View {
 
             Divider()
 
+            Button("Show Onboarding") {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    showOnboarding = true
+                    sidebarRevealed = false
+                }
+            }
             Button("Check for Updates…") {
                 UpdateChecker.shared.checkInteractively()
             }
         } label: {
-            GearLabel(labeled: labeled)
+            GearLabel()
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -1391,6 +1487,11 @@ struct MainWindowView: View {
             // The empty state stands alone — no title bar over it.
             if selection != nil {
                 topPanel
+                    // Gaps between the header's controls are dead chrome —
+                    // clicking them dismisses a floating sheet. The buttons
+                    // themselves win their own clicks first.
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeFloatingSheet() }
             }
             detailContent
             // The bar keeps its place under every open pane; its components
@@ -1542,7 +1643,7 @@ struct MainWindowView: View {
                     .lineLimit(1)
                 if let info = git.info, info.isRepo, !info.changes.isEmpty {
                     Circle()
-                        .fill(Color(hex: 0xD97706))
+                        .fill(Theme.dotDegraded)
                         .frame(width: 5, height: 5)
                 }
             }
@@ -1721,14 +1822,20 @@ struct MainWindowView: View {
                 emptyState
             }
         case let .server(id):
+            // Unreachable today — server rows aren't selectable (they open
+            // the right-sheet panel) — but kept sensible: same view, centered.
             if let server = servers.devServers.first(where: { $0.id == id }) {
-                ServerDetailView(
+                ServerPanel(
                     server: server,
+                    share: share,
+                    health: servers.health[id],
                     onOpenTerminal: {
                         guard let cwd = server.cwd else { return }
                         select(.project(cwd))
                     }
                 )
+                .frame(maxWidth: 400)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView(
                     "Server stopped",
@@ -1746,11 +1853,18 @@ struct MainWindowView: View {
     /// top/bottom insets leave chrome rails above and below the card — the
     /// title bar's and status bar's bands, kept even with nothing in them.
     private var emptyState: some View {
-        EmptyStateView()
+        // While the sidebar is hidden for onboarding, the sky holds the
+        // welcome screen's 56pt lift so the dismissal crossfade lands on an
+        // already-aligned solar system; the reveal spring then glides it
+        // down to center as the sidebar slides in.
+        EmptyStateView(skyLift: sidebarRevealed ? 0 : -56)
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .padding(.top, 30)
             .padding(.trailing, 16)
             .padding(.bottom, 30)
+            // Dead chrome — a click on the sky dismisses a floating sheet.
+            .contentShape(Rectangle())
+            .onTapGesture { closeFloatingSheet() }
     }
 
     // MARK: - Sidebar data
@@ -2051,28 +2165,14 @@ struct MainWindowView: View {
                     ServerRow(
                         server: server,
                         health: servers.health[sid],
-                        hovered: hovered || serverPopover == sid,
+                        hovered: hovered || rightPanel == .server(sid),
                         selected: false,
                         onOpen: { Actions.openExternal(server.url) }
                     )
                     .contentShape(Rectangle())
-                    .onTapGesture { serverPopover = sid }
-                    .popover(
-                        isPresented: Binding(
-                            get: { serverPopover == sid },
-                            set: { if !$0 { serverPopover = nil } }
-                        ),
-                        arrowEdge: .trailing
-                    ) {
-                        ServerPopover(
-                            server: server,
-                            health: servers.health[sid],
-                            onOpenTerminal: {
-                                serverPopover = nil
-                                if let cwd = server.cwd { select(.project(cwd)) }
-                            }
-                        )
-                    }
+                    // The server page is a right-sheet panel, same as Git —
+                    // clicking the row toggles it, never the selection.
+                    .onTapGesture { toggleRightPanel(.server(sid)) }
                 }
             }
         }
@@ -2120,9 +2220,9 @@ struct MainWindowView: View {
             case let .server(sid):
                 let port = servers.devServers.first { $0.id == sid }.map { String($0.port) } ?? "-"
                 let health = servers.health[sid].map { String(describing: $0) } ?? "-"
-                // While the popover is up, hover changes must NOT re-host the
-                // row — that would tear down the view anchoring the popover.
-                let state = serverPopover == sid ? "P" : (hovered ? "h" : "-")
+                // The row stays lit while its sheet panel is open — that
+                // state must be in the key or the highlight never updates.
+                let state = rightPanel == .server(sid) ? "P" : (hovered ? "h" : "-")
                 return "\(title)|\(port)|\(health)|\(state)"
             }
         }
@@ -2465,10 +2565,10 @@ private struct FooterLabeledButton: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 3.5)
                 .frame(height: 11)
-                .background(Capsule().fill(Color(hex: 0xD97706)))
+                .background(Capsule().fill(Theme.dotDegraded))
         } else if dot {
             Circle()
-                .fill(Color(hex: 0xD97706))
+                .fill(Theme.dotDegraded)
                 .frame(width: 5, height: 5)
         }
     }
@@ -2667,9 +2767,9 @@ struct SidebarRow: View {
             if let diff, !diffTooltipOnly {
                 HStack(spacing: 3) {
                     Text("+\(diff.added)")
-                        .foregroundStyle(Color(hex: 0x16A34A))
+                        .foregroundStyle(Theme.textPositive)
                     Text("−\(diff.removed)")
-                        .foregroundStyle(Theme.closeRed)
+                        .foregroundStyle(Theme.textDanger)
                 }
                 .font(.system(size: 9, weight: .medium))
                 .help("Uncommitted line changes")
@@ -2736,7 +2836,7 @@ struct SidebarRow: View {
     private var gitColor: Color {
         switch gitStatus {
         case .none: Theme.dotShell
-        case .dirty: Color(hex: 0xD97706)
+        case .dirty: Theme.dotDegraded
         case .clean: Theme.dotActive
         }
     }
@@ -2750,65 +2850,208 @@ struct SidebarRow: View {
     }
 }
 
-/// The server detail, as a popover off its sidebar row — replaces the old
-/// full detail page.
-struct ServerPopover: View {
+/// The server page, rendered in the right sheet like Git/Skills/Tracked —
+/// flat on the sheet's background, filling its width.
+struct ServerPanel: View {
     let server: DevServer
+    @ObservedObject var share: ShareProxyStore
     var health: ServerHealth? = nil
     var onOpenTerminal: () -> Void = {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                ServerGlyph(color: healthColor)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(server.project ?? server.command)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                    Text(healthLabel)
-                        .font(.system(size: 10))
+        VStack(alignment: .leading, spacing: 14) {
+            // Name left, health right — one line. Everything an operator
+            // might dig for (command, pid, port, path) lives in the health
+            // pill's tooltip instead of stacked prose: this page's job is
+            // open / share / stop, not ops trivia.
+            HStack(spacing: 9) {
+                ServerGlyph(color: Theme.textSecondary, size: 16)
+                Text(server.project ?? server.command)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(healthColor)
+                        .frame(width: 6, height: 6)
+                    Text(healthWord)
+                        .font(.system(size: 11))
                         .foregroundStyle(Theme.textSecondary)
                 }
+                .help(details)
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Button("localhost:" + String(server.port)) {
-                    Actions.openExternal(server.url)
+            // ONE link — the pretty name while the proxy is up, the raw
+            // port URL otherwise. Never both: they open the same app.
+            HStack(spacing: 5) {
+                LinkButton(
+                    title: primaryURL.replacingOccurrences(of: "http://", with: ""),
+                    size: 13
+                ) {
+                    Actions.openExternal(primaryURL)
                 }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
-                if let cwd = server.cwd {
-                    Text(cwd)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Theme.textPath)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Text("\(server.command) · pid \(server.pid)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Theme.textSecondary)
+                CopyIconButton(text: primaryURL, help: "Copy link")
+                Spacer(minLength: 0)
             }
 
             HStack(spacing: 8) {
-                Button("Open in Browser") { Actions.openExternal(server.url) }
+                Button("Open in Browser") { Actions.openExternal(primaryURL) }
                 if server.cwd != nil {
                     Button("Open Terminal") { onOpenTerminal() }
                 }
+                Spacer()
                 Button("Stop") { Actions.killPid(server.pid) }
+                    .help("Stops the dev server (pid \(String(server.pid)))")
             }
-            .font(.system(size: 11))
+            .font(.system(size: 12))
             .controlSize(.small)
+
+            Divider()
+            sharing
         }
-        .padding(14)
-        .frame(width: 260, alignment: .leading)
+        .padding(.horizontal, 6)
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The tooltip behind the health pill: the full verdict plus the facts
+    /// the page no longer prints.
+    private var details: String {
+        var lines = [healthLabel, "\(server.command) · pid \(server.pid) · port \(String(server.port))"]
+        if let cwd = server.cwd { lines.append(cwd) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// True once the proxy is actually answering — what makes the pretty
+    /// URLs live, and what flips the primary link between them and the raw
+    /// port form.
+    private var shareReady: Bool { share.enabled && share.running }
+
+    /// The one URL this panel opens: pretty when the proxy serves it, raw
+    /// `localhost:<port>` when it doesn't.
+    private var primaryURL: String {
+        shareReady
+            ? share.localURL(forProjectNamed: server.project ?? server.command)
+            : server.url
+    }
+
+    /// What's genuinely *extra* about sharing — the reach beyond this Mac.
+    /// The `.localhost` name is just cosmetics over a server the sidebar
+    /// already tracks, so it doesn't get a card; the two tiers that put the
+    /// app on OTHER screens do: Mobile (Wi-Fi, live) and Live server
+    /// (public link, coming soon). Both disclose only while the toggle is on.
+    private var sharing: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Sharing")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { share.enabled },
+                    set: { share.setEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .tint(Theme.buttonActiveStroke)
+            }
+
+            if shareReady {
+                shareCard(
+                    icon: "wifi",
+                    title: "Any device on your Wi-Fi",
+                    trailing: { EmptyView() }
+                ) {
+                    let url = share.lanURL(forProjectNamed: server.project ?? server.command)
+                    HStack(spacing: 4) {
+                        LinkButton(
+                            title: url.replacingOccurrences(of: "http://", with: "")
+                        ) {
+                            Actions.openExternal(url)
+                        }
+                        CopyIconButton(text: url, help: "Copy link")
+                    }
+                }
+                .help("Phone, tablet, or another computer on the same network.")
+                shareCard(
+                    icon: "globe",
+                    title: "Anyone, anywhere",
+                    trailing: { ComingSoonBadge() }
+                ) {
+                    Text("Share a live link beyond your network")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                if share.port != ShareProxyStore.defaultPort {
+                    Text("Port 80 was busy — links carry :\(String(share.port ?? 0)).")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else if share.enabled {
+                Text("Starting the share proxy…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                Text("Turn on to open this app on any device on your Wi-Fi.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+    }
+
+    /// A thin two-line card: icon beside a title row (badge trailing) over
+    /// the tier's payload — a link for the live tier, a sentence for the
+    /// promised one. Same skeleton, so siblings always match height.
+    private func shareCard<Trailing: View, Content: View>(
+        icon: String, title: String,
+        @ViewBuilder trailing: () -> Trailing,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 18)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 6)
+                    trailing()
+                }
+                content()
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.buttonFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Theme.buttonStroke, lineWidth: 1)
+        )
     }
 
     private var healthColor: Color {
         switch health {
         case .healthy: Theme.dotActive
-        case .degraded: Color(hex: 0xD97706)
+        case .degraded: Theme.dotDegraded
         case .down: Theme.closeRed
         case nil: Theme.textSecondary
+        }
+    }
+
+    /// One quiet word beside the dot; the nuance lives in the tooltip.
+    private var healthWord: String {
+        switch health {
+        case .healthy: "Responding"
+        case .degraded: "Slow"
+        case .down: "Down"
+        case nil: "Checking…"
         }
     }
 
@@ -2900,29 +3143,19 @@ private struct HeaderPlusButton: View {
 /// The footer gear: quiet glyph that gets the row-hover fill under the
 /// pointer.
 private struct GearLabel: View {
-    /// Adds a "Settings" word next to the glyph (the expanded footer).
-    var labeled = false
     @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "gearshape")
-                .font(.system(size: 12))
-                .foregroundStyle(hovered ? Theme.text : Theme.heading)
-            if labeled {
-                Text("Settings")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(hovered ? Theme.text : Theme.heading)
-            }
-        }
-        .padding(.horizontal, labeled ? 6 : 0)
-        .frame(width: labeled ? nil : 22, height: 22)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(hovered ? Theme.rowHovered : .clear)
-        )
-        .contentShape(Rectangle())
-        .onHover { hovered = $0 }
+        Image(systemName: "gearshape")
+            .font(.system(size: 12))
+            .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            .frame(width: 22, height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(hovered ? Theme.rowHovered : .clear)
+            )
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
     }
 }
 
@@ -2959,4 +3192,85 @@ final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError() }
 
     @objc private func fire() { handler() }
+}
+
+/// The terminal-theme picker: `SearchableMenuList` over ghostty's catalog,
+/// Houston's design default pinned first, recents from settings. Each row
+/// carries a swatch in the theme's own background/foreground so the list
+/// can be scanned without applying anything.
+private struct TerminalThemePicker: View {
+    let current: String
+    let recents: [String]
+    let select: (String) -> Void
+
+    /// "" is Houston's design default — pinned first, never in Recents.
+    private struct Option: Identifiable {
+        let name: String
+        let title: String
+        let background: Color
+        let foreground: Color
+        var id: String { name }
+    }
+
+    private static let houston = Option(
+        name: "",
+        title: "Houston",
+        background: Color(light: 0xE0E0E0, dark: 0x181818),
+        foreground: Color(light: 0x111111, dark: 0xE8E8E8)
+    )
+
+    private static func option(for theme: GhosttyThemeDefinition) -> Option {
+        Option(
+            name: theme.name,
+            title: theme.name,
+            background: Color(themeHex: theme.background),
+            foreground: Color(themeHex: theme.foreground)
+        )
+    }
+
+    var body: some View {
+        SearchableMenuList(
+            items: [Self.houston] + GhosttyThemeCatalog.allThemes.map(Self.option(for:)),
+            recents: recents.compactMap { name in
+                GhosttyThemeCatalog.theme(named: name).map(Self.option(for:))
+            },
+            allTitle: "All Themes",
+            matches: { option, query in
+                option.title.localizedCaseInsensitiveContains(query)
+            },
+            select: { select($0.name) }
+        ) { option in
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(option.background)
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                    Text("A")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(option.foreground)
+                }
+                .frame(width: 18, height: 18)
+                Text(option.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if option.name == current {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                }
+            }
+        }
+    }
+}
+
+private extension Color {
+    /// Ghostty catalog colors are hex strings ("1d1f21", with or without a
+    /// leading #).
+    init(themeHex: String) {
+        let hex = themeHex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        self.init(hex: UInt32(hex, radix: 16) ?? 0)
+    }
 }

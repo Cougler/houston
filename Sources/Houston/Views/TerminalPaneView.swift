@@ -34,6 +34,13 @@ final class HoustonTerminalView: AppTerminalView {
         NSMenu.popUpContextMenu(contextMenu, with: event, for: self)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        // Clicking into the terminal counts as "outside" the right sheet —
+        // ghostty consumes the click, so the dismiss rides a notification.
+        NotificationCenter.default.post(name: .houstonTerminalClicked, object: nil)
+        super.mouseDown(with: event)
+    }
+
     // MARK: - Drag & drop
 
     private static let dropTypes: [NSPasteboard.PasteboardType] = {

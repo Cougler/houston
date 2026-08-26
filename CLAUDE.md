@@ -77,6 +77,27 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   non-destructive *merge* into settings.json's `hooks` arrays — install
   appends Houston's entry, restore removes exactly it — but still gated on
   the same consent-dialog pattern (gear menu).
+- `TrackedStore` / `EventFeed` — Reminders and the bell's notification feed.
+  The bundled `/track` skill (ships like the mission skills) writes dated
+  obligations to `Application Support/Houston/tracked.json`; `TrackedStore`
+  polls it (mtime + day rollover) and its write-backs mutate the *raw* JSON
+  dictionaries so fields only the skill knows survive the round trip.
+  `EventFeed` is the in-memory session feed (needs-you, finished turns, due
+  reminders, commits on the watched branch — HEAD moving on the *same*
+  branch, so a branch switch isn't a "commit"). Git / Skills / Reminders /
+  Notifications (and the server page, `ServerPanel`) share one full-height
+  right sheet in `MainWindowView`: the
+  sheet is ONE always-mounted overlay view sliding by offset, and pinning
+  just animates a width reservation in the root HStack — re-parenting it
+  between overlay and layout is what made pin/unpin jump. There is NO
+  click-away scrim (2026-08-25, deliberate): sheets are swappable — clicking
+  another opener (server row, Git button) swaps content in place, and
+  sidebar project/shell rows select without dismissing. `closeFloatingSheet`
+  fires from: header gaps, the empty-state sky, the sidebar's dead space
+  (`onEmptyClick`, a click hitting no row), and clicks INTO the terminal
+  (`.houstonTerminalClicked`, posted from `HoustonTerminalView.mouseDown`
+  because ghostty consumes clicks before SwiftUI sees them). Selection
+  changes alone never auto-dismiss; docked sheets ignore all of it.
 - `StatusLineFeed` / `StatusBarView` — the native status bar under the
   terminal (model menu → `/model`, context bar, rate-limit meters), fed by
   the statusline hook (see Gotchas). `MCPStatusStore` adds MCP health via
@@ -86,8 +107,34 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 - `ProcessDetect` / `AgentDetect` / `DevServerDetect` — everything Houston knows
   about the machine. All three sit on `ProcScan`, the one implementation of the
   `ps` snapshot, pid→cwd lookup, and parent-chain walk.
+- `ShareProxy` / `MDNSAdvertiser` — shareable dev URLs (featureideas.md tiers
+  1+2). A reverse proxy on port 80 (fallback 14080 — deliberately outside the
+  3000–9999 scan range so Houston never lists itself as a dev server) routes
+  `<project>.localhost` by Host header to the detected dev port, then
+  byte-splices untouched after the first request's headers, so WebSockets/
+  HMR/SSE work with zero protocol knowledge. `MDNSAdvertiser` registers
+  `<project>.local` **A records** via `DNSServiceRegisterRecord` — hostname
+  registration, which `NWListener`'s Bonjour support (services only) cannot
+  do — so phones on the Wi-Fi reach the proxy, which forwards to loopback;
+  the dev server never has to bind beyond localhost. UI is the Sharing
+  section in `ServerPanel`, a right-sheet panel like Git — clicking a server
+  row toggles `RightPanel.server(id)`, never the selection (server rows
+  aren't selectable; the old full-page `ServerDetailView` and the interim
+  popover are both gone). Toggle persists as
+  `sharingDisabled`; unknown hosts get a listing page; tier 3 (public relay
+  links) is only a Coming Soon slot there. Vite blocks non-localhost Host
+  headers ("Blocked request"), so `TerminalEnvironment` sets
+  `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.local` — Vite's official escape
+  hatch — meaning Vite servers started from Houston panes accept `.local`
+  names automatically; servers started elsewhere need
+  `server.allowedHosts: ['.local']` in their own vite config.
 
 ## Gotchas — all of these were bugs, not theory
+
+- **A refused backend connect surfaces as `.waiting`, not `.failed`.**
+  Network.framework retries a refused localhost connection forever, so
+  ShareProxy treats `.waiting` as down (server died since the lsof scan) and
+  serves its offline page instead of hanging the request.
 
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
   anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
@@ -175,6 +222,30 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   arrow keys go to the shell, not sidebar navigation — that tradeoff is
   chosen, don't "fix" it back. Focus stays put if it's already in one of
   the tab's split panes.
+- **`focusTerminal` must retry until the pane is mounted.** A first open
+  mounts the pane on the *next* render pass, and one async hop isn't always
+  enough — an in-flight animation (the onboarding dismissal springs) pushes
+  the mount past it, and a single-shot `makeFirstResponder` silently drops
+  focus: the terminal looks open but typing goes nowhere until the row is
+  clicked again. `focusWhenMounted` retries (50ms × 10) until the view has
+  a window and `makeFirstResponder` returns true.
+- **Onboarding is a full-window takeover, and its dismissal is a
+  choreographed handoff** (`OnboardingView`, `onboardingSeen`, replay from
+  the footer gear). While it shows, `sidebarRevealed` keeps the sidebar at
+  zero width and `EmptyStateView(skyLift: -56)` holds the empty state's sky
+  at the welcome screen's lift, so the overlay's solar system and the one
+  underneath are aligned; dismissal fades the overlay (0.25s), then one
+  spring animates sidebar width + skyLift together — a single diagonal
+  glide, no jump. Don't re-anchor the welcome solar system or the empty
+  state's without keeping the two lifts equal.
+- **Links are `LinkButton` (brand rose, `Theme.link`), never
+  `.buttonStyle(.link)`** — system blue was the one color outside the
+  palette. Status *text* gets its own text-grade tokens (`textPositive`,
+  `textDanger`, `textWarning`): the dot/fill colors (`dotActive`,
+  `closeRed`, `dotDegraded`) pass 3:1 non-text contrast but not the 4.5:1
+  small text needs on the light chrome — that's why each hue exists twice.
+  Copy-to-clipboard is `CopyIconButton` (hover chrome + checkmark confirm),
+  both in `Components.swift`.
 - **Theming: every chrome color is a dynamic token in `Theme.swift`**
   (`Color(light:dark:)` over `NSColor(name:dynamicProvider:)`), so the
   System/Light/Dark setting restyles everything live — never hard-code a hex

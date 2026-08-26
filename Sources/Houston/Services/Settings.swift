@@ -7,9 +7,16 @@ extension Notification.Name {
     static let houstonSettingsChanged = Notification.Name("HoustonSettingsChanged")
     /// The menu bar asked for the Claude status-bar consent prompt.
     static let houstonShowStatusFeedPrompt = Notification.Name("HoustonShowStatusFeedPrompt")
+    /// The menu bar's "All Themes…" asked for the searchable theme picker,
+    /// which lives on the window's footer gear.
+    static let houstonShowThemePicker = Notification.Name("HoustonShowThemePicker")
     /// A macOS notification was clicked — select this project
     /// (`userInfo["path"]`).
     static let houstonOpenProject = Notification.Name("HoustonOpenProject")
+    /// A left click landed in a terminal pane. The ghostty view consumes
+    /// clicks before SwiftUI sees them, so dismissing the floating right
+    /// sheet on terminal clicks needs this side channel.
+    static let houstonTerminalClicked = Notification.Name("HoustonTerminalClicked")
 }
 
 /// Houston's settings. Unknown keys in the JSON are preserved on write.
@@ -26,6 +33,9 @@ struct HoustonSettings {
     /// A ghostty theme name for the terminal, or "" for Houston's default
     /// (design-matched light/dark).
     var terminalTheme: String
+    /// Catalog themes most recently picked, newest first, capped at 10 —
+    /// the theme picker's Recents section.
+    var recentTerminalThemes: [String]
     /// The user said "Not Now" to the status-bar offer — never re-prompt;
     /// enabling stays available from the footer gear.
     var statusLinePromptDeclined: Bool
@@ -36,8 +46,13 @@ struct HoustonSettings {
     /// Status-bar items switched off individually. Known keys:
     /// "model", "context", "mcp", "peak", "limits".
     var statusBarHiddenItems: [String]
-    /// The first-launch welcome card has been dismissed.
-    var welcomeSeen: Bool
+    /// The first-launch onboarding has been dismissed (replayable from the
+    /// footer gear). A fresh key on purpose — existing installs see the
+    /// paginated onboarding once, even if they saw the old welcome card.
+    var onboardingSeen: Bool
+    /// The share proxy (`<project>.localhost` / `<project>.local`) is
+    /// switched off. Stored inverted so the default JSON absence means on.
+    var sharingDisabled: Bool
     /// The sidebar is collapsed to the three-icon rail.
     var sidebarCollapsed: Bool
     /// Expanded sidebar width in points (user-dragged).
@@ -55,11 +70,13 @@ struct HoustonSettings {
             collapsedFolders: [],
             appearance: "system",
             terminalTheme: "",
+            recentTerminalThemes: [],
             statusLinePromptDeclined: false,
             statusBarDisabled: false,
             statusBarCollapsed: false,
             statusBarHiddenItems: [],
-            welcomeSeen: false,
+            onboardingSeen: false,
+            sharingDisabled: false,
             sidebarCollapsed: false,
             sidebarWidth: Double(Theme.sidebarWidth),
             windowFrame: []
@@ -111,6 +128,9 @@ struct HoustonSettings {
         if let t = json["terminalTheme"] as? String {
             s.terminalTheme = t
         }
+        if let recents = json["recentTerminalThemes"] as? [String] {
+            s.recentTerminalThemes = Array(recents.prefix(10))
+        }
         if let declined = json["statusLinePromptDeclined"] as? Bool {
             s.statusLinePromptDeclined = declined
         }
@@ -123,8 +143,11 @@ struct HoustonSettings {
         if let hidden = json["statusBarHiddenItems"] as? [String] {
             s.statusBarHiddenItems = hidden
         }
-        if let seen = json["welcomeSeen"] as? Bool {
-            s.welcomeSeen = seen
+        if let seen = json["onboardingSeen"] as? Bool {
+            s.onboardingSeen = seen
+        }
+        if let off = json["sharingDisabled"] as? Bool {
+            s.sharingDisabled = off
         }
         if let railed = json["sidebarCollapsed"] as? Bool {
             s.sidebarCollapsed = railed
@@ -155,11 +178,13 @@ struct HoustonSettings {
         obj["collapsedFolders"] = s.collapsedFolders
         obj["appearance"] = s.appearance
         obj["terminalTheme"] = s.terminalTheme
+        obj["recentTerminalThemes"] = s.recentTerminalThemes
         obj["statusLinePromptDeclined"] = s.statusLinePromptDeclined
         obj["statusBarDisabled"] = s.statusBarDisabled
         obj["statusBarCollapsed"] = s.statusBarCollapsed
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
-        obj["welcomeSeen"] = s.welcomeSeen
+        obj["onboardingSeen"] = s.onboardingSeen
+        obj["sharingDisabled"] = s.sharingDisabled
         obj["sidebarCollapsed"] = s.sidebarCollapsed
         obj["sidebarWidth"] = s.sidebarWidth
         obj["windowFrame"] = s.windowFrame

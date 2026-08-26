@@ -34,6 +34,14 @@ enum TerminalEnvironment {
     /// overridden to empty, the session file appears as normal.
     static func surfaceEnv(paneID: String) -> [String: String] {
         var env: [String: String] = [paneIDKey: paneID]
+        // Vite (≥6.1 / backports) blocks non-localhost Host headers by
+        // default, which breaks the share proxy's `<project>.local` tier
+        // with "Blocked request. This host is not allowed." This is Vite's
+        // official escape hatch for tunnels/proxies: any Vite dev server
+        // started from a Houston pane accepts `.local` names with no config
+        // edit. `.local` resolves only via mDNS on the LAN, so this doesn't
+        // reopen the DNS-rebinding hole the allowlist exists to close.
+        env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] = ".local"
         for (key, _) in ProcessInfo.processInfo.environment
         where blockedPrefixes.contains(where: { key.hasPrefix($0) }) {
             env[key] = ""

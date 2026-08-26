@@ -401,8 +401,26 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         }
         guard let pane = tab.panes.first else { return }
         pane.hasAutoFocused = true
+        Self.focusWhenMounted(pane.view)
+    }
+
+    /// A first open mounts the pane on the *next* render pass, and one async
+    /// hop isn't always enough — an in-flight animation (the onboarding
+    /// dismissal springs, a sheet transition) can push the mount past it,
+    /// and the old single-shot `makeFirstResponder` then silently dropped
+    /// focus: the terminal looked open but typing went nowhere until the
+    /// row was clicked again. Retry briefly instead. A retry can only ever
+    /// land on a mounted, displayed pane (unmounted views have no window),
+    /// so a stale one after a quick selection change is a harmless no-op.
+    private static func focusWhenMounted(_ view: NSView, attempts: Int = 10) {
         DispatchQueue.main.async {
-            pane.view.window?.makeFirstResponder(pane.view)
+            if let window = view.window, window.makeFirstResponder(view) {
+                return
+            }
+            guard attempts > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                focusWhenMounted(view, attempts: attempts - 1)
+            }
         }
     }
 

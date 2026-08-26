@@ -94,6 +94,9 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
     /// one that's already selected, which `selection` alone can't report.
     /// Used to hand keyboard focus back to the row's terminal.
     var onRowClick: ((SidebarEntry) -> Void)? = nil
+    /// Fired when a left click lands below/between the rows — the sidebar's
+    /// dead space. Used to dismiss the floating right sheet.
+    var onEmptyClick: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -127,6 +130,9 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
         }
         table.onRowClick = { [weak coordinator = context.coordinator] row in
             coordinator?.rowClicked(row)
+        }
+        table.onEmptyClick = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onEmptyClick?()
         }
         context.coordinator.table = table
 
@@ -395,6 +401,8 @@ private final class HoverTableView: NSTableView {
     /// Every left click on a row, selected or not — `selectionDidChange`
     /// stays silent when the clicked row is already selected.
     var onRowClick: ((Int) -> Void)?
+    /// A click that hits no row at all — the space below the last row.
+    var onEmptyClick: (() -> Void)?
     private var tracking: NSTrackingArea?
 
     override func mouseDown(with event: NSEvent) {
@@ -403,7 +411,7 @@ private final class HoverTableView: NSTableView {
         super.mouseDown(with: event)
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point)
-        if row >= 0 { onRowClick?(row) }
+        if row >= 0 { onRowClick?(row) } else { onEmptyClick?() }
     }
 
     override func updateTrackingAreas() {
