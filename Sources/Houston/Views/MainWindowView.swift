@@ -2631,11 +2631,14 @@ private struct FooterLabeledButton: View {
     @ViewBuilder
     private var badge: some View {
         if badgeCount > 0 {
-            Text("\(badgeCount)")
-                .font(.system(size: 8, weight: .bold))
+            // 14×14 fully-rounded; double digits widen the pill, never
+            // taller.
+            Text(String(badgeCount))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 3.5)
-                .frame(height: 11)
+                .padding(.horizontal, 4)
+                .frame(minWidth: 14)
+                .frame(height: 14)
                 .background(Capsule().fill(Theme.dotDegraded))
         } else if dot {
             Circle()
