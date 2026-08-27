@@ -69,4 +69,33 @@ enum ProjectList {
         }
         return projects
     }
+
+    /// Every project Houston knows about: pinned projects plus scans of
+    /// every parent folder, deduped by path (pinned wins), sorted by name.
+    /// For pickers living outside the sidebar (e.g. the App Inspector).
+    static func allProjects(settings: HoustonSettings) -> [Project] {
+        let fm = FileManager.default
+        var seen = Set<String>()
+        var projects: [Project] = []
+        for path in settings.pinnedProjects {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue,
+                  seen.insert(path).inserted else { continue }
+            let mtime = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            projects.append(Project(
+                id: path,
+                name: (path as NSString).lastPathComponent,
+                path: path,
+                modifiedMs: mtime.map { Int64($0.timeIntervalSince1970 * 1000) } ?? 0
+            ))
+        }
+        for dir in settings.projectsDirs {
+            for project in scan(projectsDir: dir) where seen.insert(project.path).inserted {
+                projects.append(project)
+            }
+        }
+        return projects.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
 }

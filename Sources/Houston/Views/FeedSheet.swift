@@ -86,7 +86,11 @@ private struct FeedEventCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(hovered ? Theme.controlHovered : Theme.buttonFill)
+                .fill(Theme.buttonFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)

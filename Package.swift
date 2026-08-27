@@ -23,6 +23,7 @@ let package = Package(
             resources: [
                 .copy("Resources/icons"),
                 .copy("Resources/skills"),
+                .copy("Resources/inspect.js"),
             ]
         )
     ]

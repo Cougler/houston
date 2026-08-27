@@ -481,7 +481,7 @@ private struct TrackedCard: View {
                     .frame(width: 20, height: 20)
                     .background(
                         RoundedRectangle(cornerRadius: 5)
-                            .fill(Theme.controlHovered)
+                            .fill(Theme.controlChip)
                     )
                     .contentShape(Rectangle())
             }
@@ -628,7 +628,7 @@ private struct CalendarGrid: View {
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5).fill(Theme.controlHovered)
+                    RoundedRectangle(cornerRadius: 5).fill(Theme.controlChip)
                 )
                 .contentShape(Rectangle())
         }
@@ -761,7 +761,7 @@ struct QuietCardButton<Label: View>: View {
             label()
                 .background(
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(hovered ? Theme.buttonFill : .clear)
+                        .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
@@ -778,23 +778,48 @@ struct QuietCardButton<Label: View>: View {
 struct ControlIconButton: View {
     let systemName: String
     let help: String
+    /// No resting chrome — the glyph sits bare, hover still fills.
+    var bare = false
+    /// Round background of this size instead of the 20pt rounded square.
+    var circleSize: CGFloat? = nil
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
-                .frame(width: 20, height: 20)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(hovered ? Theme.rowSelected : Theme.controlHovered)
-                )
-                .contentShape(Rectangle())
+            // ZStack, not `.background` on the glyph: the chrome fills the
+            // fixed frame and the glyph centers in the same frame, so the
+            // two can never drift apart.
+            ZStack {
+                chrome
+                // 12pt, not 11: an odd-sized glyph centered in an even
+                // frame straddles the pixel grid and reads off-center.
+                Image(systemName: systemName)
+                    .font(.system(size: circleSize == nil ? 9 : 12, weight: .semibold))
+                    .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
+            }
+            .frame(width: circleSize ?? 20, height: circleSize ?? 20)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .help(help)
+    }
+
+    /// Resting chip (unless `bare`), the hover wash layered on top — never
+    /// a swap, so hovering always steps the fill up.
+    @ViewBuilder
+    private var chrome: some View {
+        if circleSize != nil {
+            ZStack {
+                if !bare { Circle().fill(Theme.controlChip) }
+                if hovered { Circle().fill(Theme.rowHovered) }
+            }
+        } else {
+            ZStack {
+                if !bare { RoundedRectangle(cornerRadius: 5).fill(Theme.controlChip) }
+                if hovered { RoundedRectangle(cornerRadius: 5).fill(Theme.rowHovered) }
+            }
+        }
     }
 }

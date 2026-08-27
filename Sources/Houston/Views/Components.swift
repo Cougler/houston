@@ -173,7 +173,7 @@ struct CopyIconButton: View {
                 .frame(width: 20, height: 20)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(hovered ? Theme.controlHovered : .clear)
+                        .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
         }
@@ -214,17 +214,14 @@ func formatTokens(_ n: Int) -> String {
     return String(format: "%.1fM", Double(n) / 1_000_000)
 }
 
-/// Dusty-rose capsule marking the public-link share tier that isn't built yet.
+/// Small-caps marker for the public-link share tier that isn't built yet —
+/// plain text, no chrome, per the Figma server page.
 struct ComingSoonBadge: View {
     var body: some View {
         Text("COMING SOON")
             .font(.system(size: 9, weight: .semibold))
             .kerning(0.5)
-            .foregroundStyle(Theme.buttonActiveStroke)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Theme.buttonActiveFill))
-            .overlay(Capsule().stroke(Theme.buttonActiveStroke.opacity(0.5), lineWidth: 1))
+            .foregroundStyle(Theme.textSecondary)
     }
 }
 
@@ -286,9 +283,16 @@ struct SVGIcon: View {
 
     @MainActor private static func template(named name: String) -> NSImage? {
         if let hit = cache[name] { return hit }
-        guard let url = Bundle.module.resourceURL?
-            .appendingPathComponent("icons/\(name).svg"),
-            let image = NSImage(contentsOf: url) else { return nil }
+        // SVG first, PNG as the fallback (alpha-masked art templates the
+        // same way).
+        let image = ["svg", "png"].lazy
+            .compactMap { ext in
+                Bundle.module.resourceURL
+                    .map { $0.appendingPathComponent("icons/\(name).\(ext)") }
+                    .flatMap { NSImage(contentsOf: $0) }
+            }
+            .first
+        guard let image else { return nil }
         image.isTemplate = true
         cache[name] = image
         return image

@@ -35,7 +35,7 @@ enum SidebarSelection: Hashable {
 /// feed, or a dev server (by `DevServer.id`). One sheet, so the panels are
 /// exclusive by construction.
 enum RightPanel: Equatable {
-    case git, skills, tracked, feed
+    case git, skills, tracked, feed, tasks
     case server(String)
 }
 
@@ -69,6 +69,9 @@ struct MainWindowView: View {
     /// Docked: the sheet joins the layout and pushes the detail column.
     /// Floating (default): it overlays the content, click-away dismisses.
     @State private var rightPanelDocked = false
+    /// The tasks sheet's navigation: nil shows All Tasks (the root), a path
+    /// shows that project's page nested under it (Back pops to nil).
+    @State private var taskSheetProject: String? = nil
     /// Last panel shown — what the sheet renders while sliding closed.
     @State private var lastRightPanel: RightPanel?
     /// Agent the header's split button launches; the chevron menu changes it.
@@ -511,6 +514,12 @@ struct MainWindowView: View {
                 help: "Reminders",
                 action: { toggleRightPanel(.tracked) }
             )
+            FooterLabeledButton(
+                systemName: "checklist",
+                active: rightPanel == .tasks,
+                help: "Tasks across all projects",
+                action: { openAllTasks() }
+            )
             settingsMenu()
             // Same short rule as the expanded footer, centered on the rail.
             Rectangle()
@@ -658,13 +667,35 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
-        case .git, .tracked, .server:
+        case .git, .tracked, .server, .tasks:
             break
         }
     }
 
     private func closeRightPanel() {
         withAnimation(sheetSpring) { rightPanel = nil }
+    }
+
+    /// Open the tasks sheet at its All Tasks root (the footer checklist),
+    /// or close it if that's already showing.
+    private func openAllTasks() {
+        if rightPanel == .tasks && taskSheetProject == nil {
+            closeRightPanel()
+            return
+        }
+        taskSheetProject = nil
+        if rightPanel != .tasks { toggleRightPanel(.tasks) }
+    }
+
+    /// Open the tasks sheet pushed into one project's page (the terminal
+    /// header's Tasks button), or close it if that page is already showing.
+    private func openProjectTasks(_ path: String) {
+        if rightPanel == .tasks && taskSheetProject == path {
+            closeRightPanel()
+            return
+        }
+        taskSheetProject = path
+        if rightPanel != .tasks { toggleRightPanel(.tasks) }
     }
 
     /// The sheet always lives here, flush with the right edge, sliding in
@@ -696,36 +727,44 @@ struct MainWindowView: View {
     /// view in both modes; only who owns its geometry changes.
     private var rightSheet: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                Text(rightSheetTitle)
-                    .font(.system(size: 10))
-                    .kerning(0.5)
-                    .foregroundStyle(Theme.heading)
-                Spacer(minLength: 8)
-                ControlIconButton(
-                    systemName: rightPanelDocked
-                        ? "pin.slash" : "pin",
-                    help: rightPanelDocked
-                        ? "Float over the content"
-                        : "Dock beside the content",
-                    action: {
-                        withAnimation(sheetSpring) {
-                            rightPanelDocked.toggle()
+            // The server panel embeds pin/close in its own header (per the
+            // Figma design), so the shared controls bar stands down there.
+            if !serverChromeHidden {
+                HStack(spacing: 4) {
+                    Text(rightSheetTitle)
+                        .font(.system(size: 10))
+                        .kerning(0.5)
+                        .foregroundStyle(Theme.heading)
+                    Spacer(minLength: 8)
+                    ControlIconButton(
+                        systemName: rightPanelDocked
+                            ? "pin.slash" : "pin",
+                        help: rightPanelDocked
+                            ? "Float over the content"
+                            : "Dock beside the content",
+                        bare: true,
+                        circleSize: 32,
+                        action: {
+                            withAnimation(sheetSpring) {
+                                rightPanelDocked.toggle()
+                            }
                         }
-                    }
-                )
-                ControlIconButton(
-                    systemName: "xmark",
-                    help: "Close",
-                    action: closeRightPanel
-                )
+                    )
+                    ControlIconButton(
+                        systemName: "xmark",
+                        help: "Close",
+                        circleSize: 32,
+                        action: closeRightPanel
+                    )
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 8)
             rightSheetContent
                 .frame(maxHeight: .infinity, alignment: .top)
                 .padding(.horizontal, 12)
+                .padding(.top, serverChromeHidden ? 14 : 0)
                 .padding(.bottom, 12)
         }
         .frame(width: rightSheetWidth)
@@ -746,6 +785,11 @@ struct MainWindowView: View {
     /// close animation runs.
     private var effectiveRightPanel: RightPanel? { rightPanel ?? lastRightPanel }
 
+    private var serverChromeHidden: Bool {
+        if case .server = effectiveRightPanel { return true }
+        return false
+    }
+
     private var rightSheetTitle: String {
         switch effectiveRightPanel {
         case .git: "GIT"
@@ -753,6 +797,7 @@ struct MainWindowView: View {
         case .tracked: "REMINDERS"
         case .feed: "NOTIFICATIONS"
         case .server: "SERVER"
+        case .tasks: taskSheetProject == nil ? "ALL TASKS" : "TASKS"
         case nil: ""
         }
     }
@@ -787,6 +832,12 @@ struct MainWindowView: View {
             }
         case .tracked:
             TrackedPanel(store: tracked)
+        case .tasks:
+            TasksNavigator(
+                projectPath: taskSheetProject,
+                onOpenProject: { taskSheetProject = $0 },
+                onBack: { taskSheetProject = nil }
+            )
         case let .server(sid):
             if let server = servers.devServers.first(where: { $0.id == sid }) {
                 ServerPanel(
@@ -797,7 +848,12 @@ struct MainWindowView: View {
                         guard let cwd = server.cwd else { return }
                         select(.project(cwd))
                         if !rightPanelDocked { closeRightPanel() }
-                    }
+                    },
+                    docked: rightPanelDocked,
+                    onTogglePin: {
+                        withAnimation(sheetSpring) { rightPanelDocked.toggle() }
+                    },
+                    onClose: closeRightPanel
                 )
             } else {
                 rightSheetPlaceholder("This server is no longer listening.")
@@ -1086,8 +1142,7 @@ struct MainWindowView: View {
                             server: server,
                             health: servers.health[server.id],
                             hovered: hovered,
-                            selected: false,
-                            onOpen: { Actions.openExternal(server.url) }
+                            selected: false
                         )
                     }
                 }
@@ -1318,6 +1373,12 @@ struct MainWindowView: View {
                 action: toggleSidebarCollapse
             )
             settingsMenu()
+            FooterLabeledButton(
+                systemName: "checklist",
+                active: rightPanel == .tasks,
+                help: "Tasks across all projects",
+                action: { openAllTasks() }
+            )
             FooterLabeledButton(
                 systemName: "calendar",
                 dot: tracked.attentionCount > 0,
@@ -1654,6 +1715,15 @@ struct MainWindowView: View {
         .buttonStyle(.plain)
         .modifier(HeaderButtonChrome(active: rightPanel == .git))
         .help("Git status")
+
+        // The project's tasks — the queue built from the web preview's and
+        // the App Inspector's "Add to Tasks", plus manual entries. Opens
+        // nested under All Tasks, so Back in the sheet goes up.
+        NotesHeaderButton(
+            store: AnnotationStores.store(for: path),
+            active: rightPanel == .tasks && taskSheetProject == path,
+            action: { openProjectTasks(path) }
+        )
 
         // Skills only exist inside an agent session, so the button appears
         // with the agent and leaves with it.
@@ -2166,8 +2236,7 @@ struct MainWindowView: View {
                         server: server,
                         health: servers.health[sid],
                         hovered: hovered || rightPanel == .server(sid),
-                        selected: false,
-                        onOpen: { Actions.openExternal(server.url) }
+                        selected: false
                     )
                     .contentShape(Rectangle())
                     // The server page is a right-sheet panel, same as Git —
@@ -2532,9 +2601,6 @@ private struct FooterLabeledButton: View {
                 Image(systemName: systemName)
                     .font(.system(size: 12))
                     .foregroundStyle(hovered || active ? Theme.text : Theme.heading)
-                    .overlay(alignment: .topTrailing) {
-                        if label == nil { badge.offset(x: 5, y: -4) }
-                    }
                 if let label {
                     Text(label)
                         .font(.system(size: 11, weight: .medium))
@@ -2544,6 +2610,11 @@ private struct FooterLabeledButton: View {
             }
             .padding(.horizontal, label == nil ? 0 : 6)
             .frame(width: label == nil ? 22 : nil, height: 22)
+            // Badge INSIDE the button's frame, not overhanging the glyph —
+            // an ancestor clips at the frame edge and was slicing the pill.
+            .overlay(alignment: .topTrailing) {
+                if label == nil { badge }
+            }
             .background(
                 RoundedRectangle(cornerRadius: 5)
                     .fill(active
@@ -2603,6 +2674,42 @@ struct FooterIconButton: View {
 
 /// The design's header buttons: 30pt tall, #F3F3F3 fill, #E0E0E0 hairline,
 /// 6pt radius. Also used by the empty state's quick-open buttons.
+/// The header's Saved Changes opener — its own view because the badge
+/// count comes from the project's AnnotationStore, a nested
+/// ObservableObject the header wouldn't otherwise re-render for.
+private struct NotesHeaderButton: View {
+    @ObservedObject var store: AnnotationStore
+    let active: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.text.opacity(0.75))
+                Text("Tasks")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                if !store.open.isEmpty {
+                    Text(String(store.open.count))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .frame(minWidth: 14, minHeight: 14)
+                        .background(Capsule().fill(Theme.buttonActiveStroke))
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .modifier(HeaderButtonChrome(active: active))
+        .help("Tasks saved from the web preview and App Inspector")
+    }
+}
+
 struct HeaderButtonChrome: ViewModifier {
     /// Accent fill + 2px inside border while the button's menu or panel is
     /// open.
@@ -2857,62 +2964,130 @@ struct ServerPanel: View {
     @ObservedObject var share: ShareProxyStore
     var health: ServerHealth? = nil
     var onOpenTerminal: () -> Void = {}
+    /// Sheet chrome, embedded in the panel's own header per the design —
+    /// the server sheet hides the shared controls bar.
+    var docked: Bool = false
+    var onTogglePin: () -> Void = {}
+    var onClose: () -> Void = {}
+
+    /// In-sheet drill-down: the project's change list replaces the server
+    /// page until its back button pops it.
+    @State private var showingChangeList = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Name left, health right — one line. Everything an operator
-            // might dig for (command, pid, port, path) lives in the health
-            // pill's tooltip instead of stacked prose: this page's job is
-            // open / share / stop, not ops trivia.
-            HStack(spacing: 9) {
-                ServerGlyph(color: Theme.textSecondary, size: 16)
-                Text(server.project ?? server.command)
-                    .font(.system(size: 15, weight: .semibold))
+        if showingChangeList, let cwd = server.cwd {
+            changeList(cwd: cwd)
+        } else {
+            serverContent
+        }
+    }
+
+    private func changeList(cwd: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                ControlIconButton(
+                    systemName: "chevron.left",
+                    help: "Back to server",
+                    bare: true,
+                    circleSize: 32,
+                    action: { showingChangeList = false }
+                )
+                Text("Tasks")
+                    .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(healthColor)
-                        .frame(width: 6, height: 6)
-                    Text(healthWord)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .help(details)
+                pinCloseControls
             }
+            AnnotationsSheetPanel(
+                store: AnnotationStores.store(for: cwd),
+                projectPath: cwd
+            )
+            .frame(maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
-            // ONE link — the pretty name while the proxy is up, the raw
-            // port URL otherwise. Never both: they open the same app.
-            HStack(spacing: 5) {
-                LinkButton(
-                    title: primaryURL.replacingOccurrences(of: "http://", with: ""),
-                    size: 13
-                ) {
-                    Actions.openExternal(primaryURL)
+    private var serverContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Health dot + name left, sheet controls right — one line.
+            // Everything an operator might dig for (command, pid, port,
+            // path) lives in the tooltip: this page's job is open / edit /
+            // share / stop, not ops trivia.
+            // Title with the URL tucked tight beneath it — one lockup.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(healthColor)
+                            .frame(width: 8, height: 8)
+                        Text(displayName)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                    }
+                    .help(details)
+                    Spacer(minLength: 8)
+                    pinCloseControls
                 }
-                CopyIconButton(text: primaryURL, help: "Copy link")
-                Spacer(minLength: 0)
+
+                // ONE link — the pretty name while the proxy is up, the raw
+                // port URL otherwise. Never both: they open the same app.
+                HStack(spacing: 5) {
+                    LinkButton(
+                        title: primaryURL.replacingOccurrences(of: "http://", with: ""),
+                        size: 13
+                    ) {
+                        Actions.openExternal(primaryURL)
+                    }
+                    CopyIconButton(text: primaryURL, help: "Copy link")
+                    Spacer(minLength: 0)
+                }
             }
 
             HStack(spacing: 8) {
-                Button("Open in Browser") { Actions.openExternal(primaryURL) }
-                if server.cwd != nil {
-                    Button("Open Terminal") { onOpenTerminal() }
+                PanelChromeButton(action: { Actions.openExternal(primaryURL) }) {
+                    Text("Open in Browser")
                 }
-                Spacer()
-                Button("Stop") { Actions.killPid(server.pid) }
-                    .help("Stops the dev server (pid \(String(server.pid)))")
+                if server.cwd != nil {
+                    PanelChromeButton(action: onOpenTerminal) {
+                        Text("Open Terminal")
+                    }
+                }
+                Spacer(minLength: 0)
+                PanelChromeButton(action: { Actions.killPid(server.pid) }) {
+                    HStack(spacing: 5) {
+                        // Record-style glyph: red ring around a red dot.
+                        ZStack {
+                            Circle()
+                                .stroke(Theme.closeRed, lineWidth: 1.5)
+                                .frame(width: 10, height: 10)
+                            Circle()
+                                .fill(Theme.closeRed)
+                                .frame(width: 4, height: 4)
+                        }
+                        Text("Stop")
+                    }
+                }
+                .help("Stops the dev server (pid \(String(server.pid)))")
             }
-            .font(.system(size: 12))
-            .controlSize(.small)
 
-            Divider()
+            sectionRule
+            previewEdit
+            sectionRule
             sharing
         }
         .padding(.horizontal, 6)
         .padding(.top, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "hierarch" the folder reads as "Hierarch" the app — title case for
+    /// the page header only; links and rows keep the literal name.
+    private var displayName: String {
+        let name = server.project ?? server.command
+        guard let first = name.first else { return name }
+        return first.uppercased() + name.dropFirst()
     }
 
     /// The tooltip behind the health pill: the full verdict plus the facts
@@ -2936,53 +3111,91 @@ struct ServerPanel: View {
             : server.url
     }
 
+    /// Pin + close, shared by the server header and the change-list header.
+    private var pinCloseControls: some View {
+        HStack(spacing: 4) {
+            ControlIconButton(
+                systemName: docked ? "pin.slash" : "pin",
+                help: docked ? "Float over the content" : "Dock beside the content",
+                bare: true,
+                circleSize: 32,
+                action: onTogglePin
+            )
+            ControlIconButton(
+                systemName: "xmark",
+                help: "Close",
+                circleSize: 32,
+                action: onClose
+            )
+        }
+    }
+
+    private var sectionRule: some View {
+        Rectangle()
+            .fill(Theme.sectionRule)
+            .frame(height: 1)
+    }
+
+    /// The Preview & Edit tier: the web editor window, and the project's
+    /// change list (drills down in place).
+    private var previewEdit: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Preview & Edit")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Theme.text)
+            ActionCard(
+                title: "Web editor",
+                subtitle: "Inspect, prompt, and ID files from browser",
+                action: { PreviewWindowController.present(server: server) }
+            )
+            if let cwd = server.cwd {
+                ChangeListCard(store: AnnotationStores.store(for: cwd)) {
+                    showingChangeList = true
+                }
+            }
+        }
+    }
+
     /// What's genuinely *extra* about sharing — the reach beyond this Mac.
     /// The `.localhost` name is just cosmetics over a server the sidebar
     /// already tracks, so it doesn't get a card; the two tiers that put the
-    /// app on OTHER screens do: Mobile (Wi-Fi, live) and Live server
-    /// (public link, coming soon). Both disclose only while the toggle is on.
+    /// app on OTHER screens do: Local Wi-Fi (live) and Live URL (public
+    /// link, coming soon). Both disclose only while the toggle is on.
     private var sharing: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Sharing")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Theme.text)
                 Spacer()
                 Toggle("", isOn: Binding(
                     get: { share.enabled },
                     set: { share.setEnabled($0) }
                 ))
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
-                .tint(Theme.buttonActiveStroke)
+                .toggleStyle(PanelSwitchStyle())
             }
 
             if shareReady {
-                shareCard(
-                    icon: "wifi",
-                    title: "Any device on your Wi-Fi",
-                    trailing: { EmptyView() }
-                ) {
-                    let url = share.lanURL(forProjectNamed: server.project ?? server.command)
-                    HStack(spacing: 4) {
-                        LinkButton(
-                            title: url.replacingOccurrences(of: "http://", with: "")
-                        ) {
-                            Actions.openExternal(url)
-                        }
-                        CopyIconButton(text: url, help: "Copy link")
+                let url = share.lanURL(forProjectNamed: server.project ?? server.command)
+                panelCard {
+                    Text("Local Wi-Fi")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                    Spacer(minLength: 8)
+                    LinkButton(
+                        title: url.replacingOccurrences(of: "http://", with: "")
+                    ) {
+                        Actions.openExternal(url)
                     }
+                    CopyIconButton(text: url, help: "Copy link")
                 }
                 .help("Phone, tablet, or another computer on the same network.")
-                shareCard(
-                    icon: "globe",
-                    title: "Anyone, anywhere",
-                    trailing: { ComingSoonBadge() }
-                ) {
-                    Text("Share a live link beyond your network")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
+                panelCard {
+                    Text("Live URL")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                    Spacer(minLength: 8)
+                    ComingSoonBadge()
                 }
                 if share.port != ShareProxyStore.defaultPort {
                     Text("Port 80 was busy — links carry :\(String(share.port ?? 0)).")
@@ -3001,37 +3214,21 @@ struct ServerPanel: View {
         }
     }
 
-    /// A thin two-line card: icon beside a title row (badge trailing) over
-    /// the tier's payload — a link for the live tier, a sentence for the
-    /// promised one. Same skeleton, so siblings always match height.
-    private func shareCard<Trailing: View, Content: View>(
-        icon: String, title: String,
-        @ViewBuilder trailing: () -> Trailing,
+    /// One row-card of the server page: label left, payload right — the
+    /// Figma design's list tile (node 511:7). Fixed 52pt so siblings
+    /// always match regardless of payload.
+    private func panelCard<Content: View>(
         @ViewBuilder content: () -> Content
     ) -> some View {
-        HStack(alignment: .top, spacing: 9) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: 18)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Spacer(minLength: 6)
-                    trailing()
-                }
-                content()
-            }
+        HStack(spacing: 6) {
+            content()
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.buttonFill))
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .frame(height: 52)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panelFill))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 10)
                 .stroke(Theme.buttonStroke, lineWidth: 1)
         )
     }
@@ -3065,13 +3262,140 @@ struct ServerPanel: View {
     }
 }
 
+/// The server page's switch, drawn to the Figma design (node 511:7): a
+/// capsule track with a sliding knob that goes green when on — replaces
+/// the system `.switch` style, whose tint/metrics can't match the file.
+struct PanelSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(configuration.isOn ? Theme.switchTrackOn : Theme.switchTrack)
+                    .frame(width: 38, height: 22)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 16, height: 16)
+                    .padding(3)
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(
+            .spring(response: 0.25, dampingFraction: 0.85),
+            value: configuration.isOn
+        )
+    }
+}
+
+/// A full-width clickable card for the server page's Preview & Edit tier:
+/// title (+ optional subtitle) left, the redirect glyph pinned to the
+/// card's top-right at 40% until the card is hovered.
+private struct ActionCard: View {
+    let title: String
+    var subtitle: String? = nil
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .frame(height: 52)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Theme.panelFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(hovered ? Theme.cardHovered : .clear)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.buttonStroke, lineWidth: 1)
+            )
+            .overlay(alignment: .topTrailing) {
+                SVGIcon(name: "redirect", size: 24)
+                    .foregroundStyle(Theme.text)
+                    .opacity(hovered ? 1 : 0.4)
+                    .padding(6)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+    }
+}
+
+/// The Tasks card — its own view because the count comes from the
+/// project's AnnotationStore, a nested ObservableObject the panel wouldn't
+/// otherwise re-render for.
+private struct ChangeListCard: View {
+    @ObservedObject var store: AnnotationStore
+    let action: () -> Void
+
+    var body: some View {
+        ActionCard(title: "Tasks  (\(store.open.count))", action: action)
+            .help("Tasks saved from the web preview and App Inspector")
+    }
+}
+
+/// A rounded chrome button for the server page — the Figma design's pill
+/// buttons (fill + 1px border), used both standalone and nested in cards.
+struct PanelChromeButton<Label: View>: View {
+    var height: CGFloat = 30
+    let action: () -> Void
+    @ViewBuilder let label: Label
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            label
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .frame(height: height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Theme.buttonFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Theme.buttonStroke, lineWidth: 1)
+        )
+        .onHover { hovered = $0 }
+    }
+}
+
 struct ServerRow: View {
     let server: DevServer
     /// Last probe verdict; nil until the first probe lands.
     var health: ServerHealth? = nil
     var hovered: Bool = false
     var selected: Bool = false
-    var onOpen: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -3093,12 +3417,6 @@ struct ServerRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            // Quick open — the detail view's "Open in Browser" without the
-            // detour. Appears on hover, when the pointer is already here.
-            if hovered {
-                OpenInBrowserButton(action: onOpen)
-                    .frame(maxHeight: .infinity)
-            }
         }
         .padding(.vertical, 4)
         .modifier(RowChrome(hovered: hovered, selected: selected))
@@ -3156,25 +3474,6 @@ private struct GearLabel: View {
             )
             .contentShape(Rectangle())
             .onHover { hovered = $0 }
-    }
-}
-
-/// Small arrow button that brightens under its own hover.
-private struct OpenInBrowserButton: View {
-    let action: () -> Void
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "arrow.up.forward")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(hovered ? Theme.text : Theme.heading)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .help("Open in Browser")
     }
 }
 

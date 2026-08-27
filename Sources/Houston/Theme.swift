@@ -67,15 +67,18 @@ enum Theme {
             ? NSColor.white.withAlphaComponent(0.08)
             : NSColor.black.withAlphaComponent(0.05)
     })
-    static let rowHovered = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.isDark
-            ? NSColor.white.withAlphaComponent(0.05)
-            : NSColor.black.withAlphaComponent(0.03)
-    })
-    /// A small inline control (icon/pill button) under the pointer —
-    /// markedly darker than the row tints, because these buttons usually sit
-    /// ON an already row-tinted surface where rowSelected reads as nothing.
-    static let controlHovered = Color(nsColor: NSColor(name: nil) { appearance in
+    /// THE hover fill, app-wide: the link blue at 15%. Every control that
+    /// tints under the pointer uses this wash (or `controlHovered` when it
+    /// sits on an already-washed surface).
+    static let rowHovered = link.opacity(0.15)
+    /// A small inline control (icon/pill button) under the pointer while
+    /// its ROW is also washed — the same blue, stepped up so it still reads
+    /// on top of `rowHovered`.
+    static let controlHovered = link.opacity(0.28)
+    /// Resting chip behind always-chromed icon buttons (the sheet header's
+    /// close circle, the tracked panel's menu chips) — neutral, NOT the
+    /// hover wash; the wash layers on top under the pointer.
+    static let controlChip = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.isDark
             ? NSColor.white.withAlphaComponent(0.16)
             : NSColor.black.withAlphaComponent(0.11)
@@ -95,11 +98,27 @@ enum Theme {
     /// and 4.5:1 when it colors small text.
     static let dotDegraded = Color(light: 0xB45309, dark: 0xD97706)
 
-    /// Inline text links — the brand rose instead of system blue, which was
-    /// the one color in the app from outside the palette. The light value
-    /// deepens #AD7370 (3.2:1 on the chrome, an accessibility miss at text
-    /// size) to clear 4.5:1; dark keeps the design's #C79491 (6.4:1).
-    static let link = Color(light: 0x8F5350, dark: 0xC79491)
+    /// Inline text links — the design's blues (Figma server page, node
+    /// 511:7): #9EC9EF on the dark chrome, #628DB3 on the light.
+    static let link = Color(light: 0x628DB3, dark: 0x9EC9EF)
+    /// The server page's custom switch (Figma node 511:7): off-state track;
+    /// the knob is white in both states.
+    static let switchTrack = Color(light: 0xD9D9D9, dark: 0x141414)
+    /// On-state track — a deeper blue than `link`, so the white knob holds.
+    static let switchTrackOn = Color(hex: 0x266CCD)
+    /// The server page's card hover — a whisper of ink, not the blue wash:
+    /// 5% white on dark, 5% black on light.
+    static let cardHovered = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.05)
+            : NSColor.black.withAlphaComponent(0.05)
+    })
+    /// Hairline between the server page's sections — 10% ink either way.
+    static let sectionRule = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.10)
+            : NSColor.black.withAlphaComponent(0.10)
+    })
     /// Filled CTA buttons carrying white text (onboarding's Take the Tour /
     /// Next). The brand rose deepened until white clears 4.5:1 in both modes:
     /// `link` is tuned for text *on* the chrome, and its dark value (#C79491,

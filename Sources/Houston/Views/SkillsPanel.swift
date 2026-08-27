@@ -176,7 +176,11 @@ private struct SkillRow: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(hovered ? Theme.controlHovered : Theme.buttonFill)
+                .fill(Theme.buttonFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(hovered ? Theme.rowHovered : .clear)
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -298,7 +302,11 @@ private struct DetailActionButton: View {
             .frame(height: 26)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(hovered ? Theme.controlHovered : Theme.buttonFill)
+                    .fill(Theme.buttonFill)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(hovered ? Theme.rowHovered : .clear)
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)

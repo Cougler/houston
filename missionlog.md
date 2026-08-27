@@ -2,6 +2,57 @@
 
 ---
 
+## 2026-08-26 — Full-window onboarding polish, terminal focus fix, 1.0.9 released
+
+Houston 1.0.9 is live: the onboarding is now a full-window takeover (welcome sky with the solar system, a seven-page tour with parallax space decor, and a dismissal that slides the sidebar in around a perfectly aligned solar system), and terminals no longer refuse keystrokes until their row is clicked again. Everything is committed on main (bd7a755), tagged v1.0.9, notarized, and serving from both GitHub Releases and tryhoustonapp.com. Next: phone-test hierarch.local, provision the Hetzner relay for tier-3 links, and persist the right sheet's pin state.
+
+**Done this session:**
+- Onboarding rebuilt as a full-window takeover on the empty-state sky: welcome screen (lifted solar system, headline, rose CTA), then a 7-page tour — the solar system flies past on entry, `ParallaxSpace` gives each page peripheral planets/glows pinned to home pages that slide with depth-scaled parallax, under a spotlight radial gradient
+- `NightSky` (stars + comet) extracted from EmptyStateView and shared; vignette spacing pass; fixed the typing vignette's traffic lights drifting (fixed frame was center-aligned, re-centering on every keystroke)
+- Jump-free dismissal: `sidebarRevealed` holds the sidebar at zero width and `EmptyStateView(skyLift: -56)` matches the welcome lift, so the crossfade is static and ONE spring then animates sidebar width + skyLift together (single diagonal glide); gear replay runs it in reverse
+- `Theme.ctaFill` (rose deepened for white text, AA both modes) after the Theme.link CTA failed contrast; em dashes removed from all onboarding copy (saved as a durable preference)
+- Fixed the frozen-terminal bug: `focusWhenMounted` retries (50ms × 10) until the pane has a window and `makeFirstResponder` succeeds — the old single async hop silently dropped focus under in-flight animations
+- Released 1.0.9: committed both sessions' work, added the focus-retry and onboarding-handoff gotchas to CLAUDE.md, notarized DMG, GitHub release v1.0.9, site deploy verified
+
+**Up next:**
+- Open hierarch.local from a real phone (mDNS + proxy path still only Mac-verified)
+- Tier 3: provision the Hetzner VPS (missiongo.live is purchased; plan lives in tier3-share-build.md)
+- Persist the right sheet's pin state (carried over)
+
+**Handoff:**
+- The frozen-terminal fix's root cause was diagnosed from code (one-tick mount race in `focusTerminal`), and Aaron hasn't yet confirmed the fix under the exact repro: launch → dismiss onboarding → click a project → type immediately. If it recurs, next suspect is ghostty's surface refusing first responder while initializing; add logging at the retry site.
+- The gear "Show Onboarding" replay with a terminal open (sidebar slides out under the fading overlay, terminal resizes beneath) was never visually verified — only the first-launch path was reviewed.
+- The dismissal crossfade still swaps planet positions between the two solar-system instances (separate views, separate orbits); rings/sun align and Aaron accepted it. Making it perfect means sharing one live system between OnboardingView and EmptyStateView.
+- Aaron runs the debug build; the packaged 1.0.9 (onboarding on a truly fresh prefs domain, UNUserNotificationCenter banners) hasn't been installed and walked through locally.
+- Carried from earlier sessions: Sequoia's Local Network prompt and the firewall dialog remain unobserved, and light-mode Theme.link is still not eyeballed.
+
+---
+
+## 2026-08-26 — Tier-3 share-link infra decided, domain bought
+
+Tier-3 public share links now have a settled architecture: a Hetzner VPS relay (US region) plus Cloudflare DNS-only for wildcard cert issuance, never proxying live traffic. The domain `missiongo.live` is purchased, and the monetization plan (subscription gates only the relay-dependent feature, local features stay free) and security requirements are written up in a new `tier3-share-build.md`. Nothing was coded this session — next step is provisioning the actual Hetzner box.
+
+**Done this session:**
+- Compared Cloudflare Tunnel/Workers vs. a self-hosted VPS relay for tier-3 public share links; decided on Hetzner (CPX11-class, ~$18/mo) running frp/sish, with Cloudflare DNS set to "DNS only" (proxy off) purely for DNS-01 wildcard cert issuance
+- Wrote `tier3-share-build.md`: infra decision, monetization mechanics ($9-12/mo subscription gating the relay-dependent feature only, enforced server-side since the repo is public), and a security checklist (mandatory rate-limited PIN, no cross-tenant listing-page leak on 404, no secrets in URLs, path-blocking as a bonus not the defense, relay-side rate limits, honest TLS-termination messaging)
+- Worked through domain naming: rejected `houston.place` (breaks brand/abuse isolation, `.place` TLD trust risk), `housto.live` (typosquat risk), `hstn.live` (not pronounceable, still reads as Houston); landed on and purchased `missiongo.live`
+- Confirmed `~/Apps/mission-control` is fully unused and deletable (not just decoupled) — updated in memory, no longer a naming-collision concern
+- Discussed US region choice for the Hetzner box (Ashburn, VA vs. Hillsboro, OR) and rough EU latency to expect (~90-110ms RTT from Ashburn, ~140-170ms from Hillsboro)
+
+**Up next:**
+- Provision the Hetzner VPS (Ashburn recommended over Hillsboro for EU latency, but not yet finalized in writing)
+- Point `missiongo.live`'s Cloudflare DNS (proxy off) at the box, verify wildcard cert issues via DNS-01
+- Start building the frp/sish relay + subscription-gating backend per `tier3-share-build.md`
+- Carried over from 2026-08-25: /push (everything from that session is still uncommitted on main), review onboarding in the debug build, phone-test `hierarch.local`, persist the right sheet's pin state
+
+**Handoff:**
+- Purely a planning session — no source files touched. All decisions live in `tier3-share-build.md` plus this entry; read that file before starting implementation.
+- Region choice leans Ashburn but Aaron only said "planning on going with the U.S. option" — confirm Ashburn specifically before provisioning, don't assume it's locked in.
+- Relay software choice (frp vs. sish vs. eventually hand-rolled Go) is still open per `tier3-share-build.md`'s "Open / deferred" section — pick one before writing the PIN/rate-limit/path-blocking layer.
+- Everything in the 2026-08-25 entry below is still outstanding and untouched this session (uncommitted changes on main, onboarding review, etc.) — this session didn't advance that work.
+
+---
+
 ## 2026-08-25 — Searchable theme picker, icon footer, paginated onboarding
 
 The terminal theme menu is now a searchable flyout card (max-height list, search field, last-10 recents) instead of a 485-item submenu, the sidebar footer collapsed to one horizontal icon row, and a new seven-page onboarding dialog replaced the old WelcomeView — it shows once per install and replays from the gear. All of today's work (this plus the morning's share-proxy/ServerPanel session) is uncommitted on main; next is reviewing the onboarding in the running debug build, then /push.

@@ -111,6 +111,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
             keyEquivalent: ""
         ).target = self
         menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem("Inspect an App…") {
+            // The status menu runs a modal tracking loop via performClick —
+            // defer window creation until it unwinds.
+            DispatchQueue.main.async { AXInspector.shared.begin() }
+        })
+        menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Check for Updates…") {
             UpdateChecker.shared.checkInteractively()
         })

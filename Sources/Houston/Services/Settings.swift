@@ -62,6 +62,10 @@ struct HoustonSettings {
     /// store that survives updates AND is shared by debug and packaged
     /// builds — UserDefaults domains differ between the two.
     var windowFrame: [Double]
+    /// Last web-preview window frame as [x, y, w, h]; one shared frame for
+    /// all preview windows (last moved wins), same rationale as
+    /// `windowFrame`.
+    var previewWindowFrame: [Double]
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -79,7 +83,8 @@ struct HoustonSettings {
             sharingDisabled: false,
             sidebarCollapsed: false,
             sidebarWidth: Double(Theme.sidebarWidth),
-            windowFrame: []
+            windowFrame: [],
+            previewWindowFrame: []
         )
     }
 
@@ -161,6 +166,10 @@ struct HoustonSettings {
            f[2] >= 400, f[3] >= 300 {
             s.windowFrame = f
         }
+        if let f = json["previewWindowFrame"] as? [Double], f.count == 4,
+           f[2] >= 500, f[3] >= 400 {
+            s.previewWindowFrame = f
+        }
         return s
     }
 
@@ -188,6 +197,7 @@ struct HoustonSettings {
         obj["sidebarCollapsed"] = s.sidebarCollapsed
         obj["sidebarWidth"] = s.sidebarWidth
         obj["windowFrame"] = s.windowFrame
+        obj["previewWindowFrame"] = s.previewWindowFrame
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default
