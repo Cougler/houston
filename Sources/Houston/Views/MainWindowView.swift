@@ -3075,10 +3075,11 @@ struct ServerPanel: View {
                 .help("Stops the dev server (pid \(String(server.pid)))")
             }
 
-            sectionRule
+            // Sections separate by air alone — ~36pt with the stack's 16.
             previewEdit
-            sectionRule
+                .padding(.top, 20)
             sharing
+                .padding(.top, 20)
         }
         .padding(.horizontal, 6)
         .padding(.top, 4)
@@ -3133,22 +3134,18 @@ struct ServerPanel: View {
         }
     }
 
-    private var sectionRule: some View {
-        Rectangle()
-            .fill(Theme.sectionRule)
-            .frame(height: 1)
-    }
-
     /// The Preview & Edit tier: the web editor window, and the project's
     /// change list (drills down in place).
     private var previewEdit: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Preview & Edit")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(Theme.text)
             ActionCard(
+                icon: "cursorarrow.rays",
                 title: "Web editor",
-                subtitle: "Inspect, prompt, and ID files from browser",
+                subtitle: "Click any element, tell Claude what to change",
+                trailing: .redirect,
                 action: { PreviewWindowController.present(server: server) }
             )
             if let cwd = server.cwd {
@@ -3159,16 +3156,14 @@ struct ServerPanel: View {
         }
     }
 
-    /// What's genuinely *extra* about sharing — the reach beyond this Mac.
-    /// The `.localhost` name is just cosmetics over a server the sidebar
-    /// already tracks, so it doesn't get a card; the two tiers that put the
-    /// app on OTHER screens do: Local Wi-Fi (live) and Live URL (public
-    /// link, coming soon). Both disclose only while the toggle is on.
+    /// The two tiers that put the app on OTHER screens, each its own
+    /// labeled toggle row: Wi-Fi sharing (live — the URL field discloses
+    /// under it) and the public link (relay-backed, coming soon, disabled).
     private var sharing: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Sharing")
-                    .font(.system(size: 13, weight: .bold))
+                Text("Share on your Wi-Fi")
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.text)
                 Spacer()
                 Toggle("", isOn: Binding(
@@ -3177,29 +3172,10 @@ struct ServerPanel: View {
                 ))
                 .toggleStyle(PanelSwitchStyle())
             }
+            .help("Phone, tablet, or another computer on the same network.")
 
             if shareReady {
-                let url = share.lanURL(forProjectNamed: server.project ?? server.command)
-                panelCard {
-                    Text("Local Wi-Fi")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    Spacer(minLength: 8)
-                    LinkButton(
-                        title: url.replacingOccurrences(of: "http://", with: "")
-                    ) {
-                        Actions.openExternal(url)
-                    }
-                    CopyIconButton(text: url, help: "Copy link")
-                }
-                .help("Phone, tablet, or another computer on the same network.")
-                panelCard {
-                    Text("Live URL")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.text)
-                    Spacer(minLength: 8)
-                    ComingSoonBadge()
-                }
+                urlField(share.lanURL(forProjectNamed: server.project ?? server.command))
                 if share.port != ShareProxyStore.defaultPort {
                     Text("Port 80 was busy — links carry :\(String(share.port ?? 0)).")
                         .font(.system(size: 11))
@@ -3209,27 +3185,41 @@ struct ServerPanel: View {
                 Text("Starting the share proxy…")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textSecondary)
-            } else {
-                Text("Turn on to open this app on any device on your Wi-Fi.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
             }
+
+            HStack(spacing: 8) {
+                Text("Share to the web")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                ComingSoonBadge()
+                Spacer()
+                Toggle("", isOn: .constant(false))
+                    .toggleStyle(PanelSwitchStyle())
+                    .disabled(true)
+                    .opacity(0.45)
+            }
+            .padding(.top, 10)
+            .help("A public link anyone can open — relay-backed, coming soon.")
         }
     }
 
-    /// One row-card of the server page: label left, payload right — the
-    /// Figma design's list tile (node 511:7). Fixed 52pt so siblings
-    /// always match regardless of payload.
-    private func panelCard<Content: View>(
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack(spacing: 6) {
-            content()
+    /// The share URL, framed like an input: full address left, a Copy chip
+    /// living inside the field.
+    private func urlField(_ url: String) -> some View {
+        HStack(spacing: 8) {
+            Text(url)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            CopyChipButton(text: url)
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
         .frame(maxWidth: .infinity)
-        .frame(height: 52)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panelFill))
+        .frame(height: 40)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.gitPanelFill))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Theme.buttonStroke, lineWidth: 1)
@@ -3292,32 +3282,51 @@ struct PanelSwitchStyle: ToggleStyle {
     }
 }
 
-/// A full-width clickable card for the server page's Preview & Edit tier:
-/// title (+ optional subtitle) left, the redirect glyph pinned to the
-/// card's top-right at 40% until the card is hovered.
+/// A full-width clickable row-card for the server page's Preview & Edit
+/// tier, in the icon-tile pattern: leading glyph tile, title + subtitle,
+/// and a trailing affordance that says what the click does — the redirect
+/// glyph for "opens a window", a chevron for "drills into this sheet".
+/// The affordance sits at 40% until the card is hovered.
 private struct ActionCard: View {
+    enum Trailing {
+        case redirect, chevron
+    }
+
+    let icon: String
     let title: String
-    var subtitle: String? = nil
+    let subtitle: String
+    var trailing: Trailing = .redirect
     let action: () -> Void
 
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                if let subtitle {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Theme.buttonFill)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
                     Text(subtitle)
                         .font(.system(size: 10.5))
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                trailingGlyph
+                    .opacity(hovered ? 1 : 0.4)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 52)
             .background(
                 RoundedRectangle(cornerRadius: 10)
@@ -3331,16 +3340,62 @@ private struct ActionCard: View {
                 RoundedRectangle(cornerRadius: 10)
                     .stroke(Theme.buttonStroke, lineWidth: 1)
             )
-            .overlay(alignment: .topTrailing) {
-                SVGIcon(name: "redirect", size: 24)
-                    .foregroundStyle(Theme.text)
-                    .opacity(hovered ? 1 : 0.4)
-                    .padding(6)
-            }
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
+    }
+
+    @ViewBuilder
+    private var trailingGlyph: some View {
+        switch trailing {
+        case .redirect:
+            SVGIcon(name: "redirect", size: 20)
+                .foregroundStyle(Theme.text)
+        case .chevron:
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.text)
+        }
+    }
+}
+
+/// The url field's Copy chip — link-blue label that confirms with a beat
+/// of "Copied".
+private struct CopyChipButton: View {
+    let text: String
+
+    @State private var hovered = false
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            withAnimation(.easeOut(duration: 0.12)) { copied = true }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.2))
+                withAnimation(.easeOut(duration: 0.3)) { copied = false }
+            }
+        } label: {
+            Text(copied ? "Copied" : "Copy")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(copied ? Theme.textPositive : Theme.link)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Theme.buttonFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(hovered ? Theme.cardHovered : .clear)
+                        )
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help("Copy link")
     }
 }
 
@@ -3352,8 +3407,22 @@ private struct ChangeListCard: View {
     let action: () -> Void
 
     var body: some View {
-        ActionCard(title: "Tasks  (\(store.open.count))", action: action)
-            .help("Tasks saved from the web preview and App Inspector")
+        ActionCard(
+            icon: "checklist",
+            title: "Tasks",
+            subtitle: subtitle,
+            trailing: .chevron,
+            action: action
+        )
+        .help("Tasks saved from the web preview and App Inspector")
+    }
+
+    private var subtitle: String {
+        switch store.open.count {
+        case 0: "Nothing queued yet"
+        case 1: "1 change queued for Claude"
+        case let n: "\(n) changes queued for Claude"
+        }
     }
 }
 

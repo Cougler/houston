@@ -113,12 +113,6 @@ enum Theme {
             ? NSColor.white.withAlphaComponent(0.05)
             : NSColor.black.withAlphaComponent(0.05)
     })
-    /// Hairline between the server page's sections — 10% ink either way.
-    static let sectionRule = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.isDark
-            ? NSColor.white.withAlphaComponent(0.10)
-            : NSColor.black.withAlphaComponent(0.10)
-    })
     /// Filled CTA buttons carrying white text (onboarding's Take the Tour /
     /// Next). The brand rose deepened until white clears 4.5:1 in both modes:
     /// `link` is tuned for text *on* the chrome, and its dark value (#C79491,

@@ -373,7 +373,8 @@ private struct AnnotationsPanel: View {
             onToggleDone: {
                 item.done ? store.markUndone(item.id) : store.markDone(item.id)
             },
-            onDelete: { store.remove(item.id) }
+            onDelete: { store.remove(item.id) },
+            onEdit: { store.updateComment(item.id, comment: $0) }
         )
     }
 }

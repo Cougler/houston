@@ -13,8 +13,13 @@ struct AnnotationRowView: View {
     let onSend: () -> Void
     let onToggleDone: () -> Void
     let onDelete: () -> Void
+    /// Commit an edited comment. Clicking the text starts editing.
+    let onEdit: (String) -> Void
 
     @State private var hovered = false
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var editFocused: Bool
 
     var body: some View {
         // Center-aligned with the action strip ALWAYS mounted (opacity
@@ -31,12 +36,22 @@ struct AnnotationRowView: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(item.comment)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.text)
-                        .strikethrough(item.done)
-                        .lineLimit(3)
-                    if item.sent && !item.done {
+                    if editing {
+                        TextField("", text: $draft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.text)
+                            .focused($editFocused)
+                            .onSubmit { commitEdit() }
+                            .onExitCommand { editing = false }
+                    } else {
+                        Text(item.comment)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.text)
+                            .strikethrough(item.done)
+                            .lineLimit(3)
+                    }
+                    if item.sent && !item.done && !editing {
                         Text("SENT")
                             .font(.system(size: 8, weight: .semibold))
                             .kerning(0.5)
@@ -51,6 +66,14 @@ struct AnnotationRowView: View {
                         .truncationMode(.middle)
                 }
             }
+            // Click the text to edit it in place; Enter commits, Escape
+            // (or focus leaving) backs out.
+            .contentShape(Rectangle())
+            .onTapGesture { beginEdit() }
+            .onChange(of: editFocused) { _, focused in
+                if !focused && editing { commitEdit() }
+            }
+            .help(editing ? "" : "Click to edit")
             Spacer(minLength: 4)
             HStack(spacing: 2) {
                 if !item.done {
@@ -76,6 +99,20 @@ struct AnnotationRowView: View {
         )
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
+    }
+
+    private func beginEdit() {
+        guard !editing else { return }
+        draft = item.comment
+        editing = true
+        DispatchQueue.main.async { editFocused = true }
+    }
+
+    private func commitEdit() {
+        guard editing else { return }
+        editing = false
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed != item.comment { onEdit(trimmed) }
     }
 
     private var detail: String {
@@ -206,7 +243,8 @@ struct AnnotationsSheetPanel: View {
             onToggleDone: {
                 item.done ? store.markUndone(item.id) : store.markDone(item.id)
             },
-            onDelete: { store.remove(item.id) }
+            onDelete: { store.remove(item.id) },
+            onEdit: { store.updateComment(item.id, comment: $0) }
         )
     }
 
@@ -342,7 +380,8 @@ private struct ProjectTasksSection: View {
             onToggleDone: {
                 item.done ? store.markUndone(item.id) : store.markDone(item.id)
             },
-            onDelete: { store.remove(item.id) }
+            onDelete: { store.remove(item.id) },
+            onEdit: { store.updateComment(item.id, comment: $0) }
         )
     }
 }

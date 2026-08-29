@@ -117,6 +117,14 @@ final class AnnotationStore: ObservableObject {
         mutateRaw { $0.append(dict) }
     }
 
+    func updateComment(_ id: String, comment: String) {
+        mutateRaw { dicts in
+            for index in dicts.indices where dicts[index]["id"] as? String == id {
+                dicts[index]["comment"] = comment
+            }
+        }
+    }
+
     func markDone(_ id: String) { setFlag(id, key: "done", to: true) }
     func markUndone(_ id: String) { setFlag(id, key: "done", to: false) }
     func markSent(_ id: String) { setFlag(id, key: "sent", to: true) }
