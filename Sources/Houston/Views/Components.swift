@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import SwiftUI
 
 /// An inline text link in the brand rose (`Theme.link`) — use instead of
@@ -212,6 +213,81 @@ func formatTokens(_ n: Int) -> String {
     if n < 10_000 { return String(format: "%.1fk", Double(n) / 1_000) }
     if n < 1_000_000 { return "\(Int((Double(n) / 1_000).rounded()))k" }
     return String(format: "%.1fM", Double(n) / 1_000_000)
+}
+
+/// Inline alert banner for panel sections: red hairline, 5% red wash,
+/// title in the primary text color with the body at 60% — the red stays
+/// in the chrome, not the words. (`Theme.text`, not literal white, so the
+/// light theme keeps its contrast.)
+struct AlertBanner: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.textDanger)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.text.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.closeRed.opacity(0.05)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Theme.closeRed, lineWidth: 1)
+        )
+    }
+}
+
+/// QR code for a share URL, shown from the Wi-Fi row's "View QR Code"
+/// button so a phone can jump straight to the link.
+struct QRCodePopover: View {
+    let url: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if let image = Self.qrImage(for: url) {
+                Image(nsImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 180, height: 180)
+                    .accessibilityLabel("QR code for \(url)")
+            } else {
+                Text("Could not render a QR code.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Text(url.replacingOccurrences(of: "http://", with: ""))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+        }
+        .padding(16)
+    }
+
+    static func qrImage(for string: String) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(string.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let rep = NSCIImageRep(ciImage: scaled)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }
 }
 
 /// Small-caps marker for the public-link share tier that isn't built yet —

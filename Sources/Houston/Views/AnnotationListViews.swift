@@ -35,21 +35,20 @@ struct AnnotationRowView: View {
                     .frame(width: 6, height: 6)
             }
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if editing {
-                        TextField("", text: $draft)
+                        // Vertical axis so a long task wraps while editing
+                        // instead of scrolling inside a one-line field.
+                        TextField("", text: $draft, axis: .vertical)
                             .textFieldStyle(.plain)
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.text)
+                            .lineLimit(1...8)
                             .focused($editFocused)
                             .onSubmit { commitEdit() }
                             .onExitCommand { editing = false }
                     } else {
-                        Text(item.comment)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.text)
-                            .strikethrough(item.done)
-                            .lineLimit(3)
+                        ExpandableTaskText(text: item.comment, done: item.done)
                     }
                     if item.sent && !item.done && !editing {
                         Text("SENT")
@@ -131,6 +130,61 @@ struct AnnotationRowView: View {
     }
 }
 
+/// Task text clamped to 3 lines, with a "more"/"less" toggle that only
+/// appears when the text is actually clipped — a long task stays readable
+/// without every short row paying for the affordance.
+private struct ExpandableTaskText: View {
+    let text: String
+    let done: Bool
+
+    @State private var expanded = false
+    @State private var truncated = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.text)
+                .strikethrough(done)
+                .lineLimit(expanded ? nil : 3)
+                .background(expanded ? nil : truncationProbe)
+            if truncated || expanded {
+                // A Button so the click doesn't bubble into the row's
+                // tap-to-edit gesture.
+                Button(expanded ? "less" : "more") {
+                    withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.textSecondary)
+            }
+        }
+    }
+
+    /// A hidden unclamped copy at the same width, measured against the
+    /// clamped render — taller means the visible text is truncated.
+    private var truncationProbe: some View {
+        GeometryReader { clamped in
+            Text(text)
+                .font(.system(size: 12))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: clamped.size.width, alignment: .leading)
+                .hidden()
+                .background(
+                    GeometryReader { full in
+                        Color.clear
+                            .onAppear {
+                                truncated = full.size.height > clamped.size.height + 1
+                            }
+                            .onChange(of: full.size.height) { _, height in
+                                truncated = height > clamped.size.height + 1
+                            }
+                    }
+                )
+        }
+    }
+}
+
 /// The Saved Changes list rendered in the main window's right sheet —
 /// element comments queued from the web preview and the App Inspector,
 /// sendable to this project's terminal one at a time or batched.
@@ -196,8 +250,8 @@ struct AnnotationsSheetPanel: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
-                    .background(Circle().fill(Theme.switchTrackOn))
-                    .contentShape(Circle())
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.switchTrackOn))
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
             .disabled(newChangeEmpty)
@@ -207,8 +261,8 @@ struct AnnotationsSheetPanel: View {
         .padding(.leading, 14)
         .padding(.trailing, 8)
         .frame(height: 48)
-        .background(Capsule().fill(Theme.panelFill))
-        .overlay(Capsule().stroke(Theme.buttonStroke, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
         .padding(.horizontal, 8)
         .padding(.top, 8)
     }
@@ -304,27 +358,128 @@ struct AllTasksPanel: View {
     let onOpenProject: (String) -> Void
 
     @State private var stores: [AnnotationStore] = []
+    @State private var projects: [Project] = []
+    @State private var newTask = ""
+    @State private var targetProject: String?
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                if stores.isEmpty {
-                    Text("No tasks yet. Queue changes from a web preview, the App Inspector, or a project's Tasks page.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 4)
-                }
-                ForEach(stores, id: \.projectPath) { store in
-                    ProjectTasksSection(store: store) {
-                        onOpenProject(store.projectPath)
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    if stores.isEmpty {
+                        Text("No tasks yet. Queue changes from a web preview, the App Inspector, or type one below.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 4)
+                    }
+                    ForEach(stores, id: \.projectPath) { store in
+                        ProjectTasksSection(store: store) {
+                            onOpenProject(store.projectPath)
+                        }
                     }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .frame(maxHeight: .infinity)
+            chatInput
         }
-        .frame(maxHeight: .infinity)
-        .onAppear { stores = AnnotationStores.allStores() }
+        .onAppear {
+            stores = AnnotationStores.allStores()
+            reloadProjects()
+        }
+    }
+
+    /// Same pill as a project's Tasks page, with a project picker sitting
+    /// above it so the task lands in the right list.
+    private var chatInput: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Menu {
+                ForEach(projects) { project in
+                    Button(project.name) { targetProject = project.path }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(targetProjectName ?? "Project")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundStyle(targetProject == nil ? Theme.textSecondary : Theme.text)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.rowHovered))
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help("Which project this task belongs to")
+            HStack(spacing: 8) {
+                TextField("Add a task…", text: $newTask)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .onSubmit { addTask() }
+                Button(action: addTask) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.switchTrackOn))
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canAdd)
+                .opacity(canAdd ? 1 : 0.4)
+                .help(targetProject == nil ? "Pick a project first" : "Add to the task list")
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .frame(height: 48)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
+    }
+
+    private var targetProjectName: String? {
+        targetProject.map { ($0 as NSString).lastPathComponent }
+    }
+
+    private var canAdd: Bool {
+        targetProject != nil
+            && !newTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func addTask() {
+        guard canAdd, let path = targetProject else { return }
+        let trimmed = newTask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        AnnotationStores.store(for: path).add(comment: trimmed)
+        newTask = ""
+        // A first task for a project creates its store — re-list so the new
+        // section appears without waiting for a reopen.
+        stores = AnnotationStores.allStores()
+    }
+
+    /// Sidebar projects plus any project that already has a task file but
+    /// lives outside the configured folders.
+    private func reloadProjects() {
+        var list = ProjectList.allProjects(settings: HoustonSettings.read())
+        var seen = Set(list.map(\.path))
+        for store in stores where seen.insert(store.projectPath).inserted {
+            list.append(Project(
+                id: store.projectPath,
+                name: (store.projectPath as NSString).lastPathComponent,
+                path: store.projectPath,
+                modifiedMs: 0
+            ))
+        }
+        projects = list.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
     }
 }
 

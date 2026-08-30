@@ -53,6 +53,15 @@ struct HoustonSettings {
     /// The share proxy (`<project>.localhost` / `<project>.local`) is
     /// switched off. Stored inverted so the default JSON absence means on.
     var sharingDisabled: Bool
+    /// Houston Pro token for the public share relay (gohouston.live).
+    /// Empty = no entitlement; the web-share UI shows its locked state.
+    var relayToken: String
+    /// Project labels (ShareProxyStore.label form) with "Share to the web"
+    /// switched on.
+    var relayEnabled: [String]
+    /// Optional 4-digit viewer code per project label ("" or absent = no
+    /// code). Rides the tunnel handshake; the relay enforces it.
+    var relayPins: [String: String]
     /// The sidebar is collapsed to the three-icon rail.
     var sidebarCollapsed: Bool
     /// Expanded sidebar width in points (user-dragged).
@@ -66,6 +75,10 @@ struct HoustonSettings {
     /// all preview windows (last moved wins), same rationale as
     /// `windowFrame`.
     var previewWindowFrame: [Double]
+    /// Stopped dev servers kept as gray sidebar rows, keyed by project path.
+    /// String-valued dicts ("path", "name", "port") so the JSON round-trips
+    /// through the same reader/writer as everything else.
+    var recentServers: [[String: String]]
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -81,10 +94,14 @@ struct HoustonSettings {
             statusBarHiddenItems: [],
             onboardingSeen: false,
             sharingDisabled: false,
+            relayToken: "",
+            relayEnabled: [],
+            relayPins: [:],
             sidebarCollapsed: false,
             sidebarWidth: Double(Theme.sidebarWidth),
             windowFrame: [],
-            previewWindowFrame: []
+            previewWindowFrame: [],
+            recentServers: []
         )
     }
 
@@ -154,6 +171,15 @@ struct HoustonSettings {
         if let off = json["sharingDisabled"] as? Bool {
             s.sharingDisabled = off
         }
+        if let tok = json["relayToken"] as? String {
+            s.relayToken = tok
+        }
+        if let enabled = json["relayEnabled"] as? [String] {
+            s.relayEnabled = enabled
+        }
+        if let pins = json["relayPins"] as? [String: String] {
+            s.relayPins = pins
+        }
         if let railed = json["sidebarCollapsed"] as? Bool {
             s.sidebarCollapsed = railed
         }
@@ -169,6 +195,9 @@ struct HoustonSettings {
         if let f = json["previewWindowFrame"] as? [Double], f.count == 4,
            f[2] >= 500, f[3] >= 400 {
             s.previewWindowFrame = f
+        }
+        if let recents = json["recentServers"] as? [[String: String]] {
+            s.recentServers = recents
         }
         return s
     }
@@ -194,10 +223,14 @@ struct HoustonSettings {
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
         obj["onboardingSeen"] = s.onboardingSeen
         obj["sharingDisabled"] = s.sharingDisabled
+        obj["relayToken"] = s.relayToken
+        obj["relayEnabled"] = s.relayEnabled
+        obj["relayPins"] = s.relayPins
         obj["sidebarCollapsed"] = s.sidebarCollapsed
         obj["sidebarWidth"] = s.sidebarWidth
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
+        obj["recentServers"] = s.recentServers
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

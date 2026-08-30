@@ -19,6 +19,10 @@ enum Theme {
     /// The git panel: chrome-colored in light mode like the other cards,
     /// darker than the UI in dark mode.
     static let gitPanelFill = Color(light: 0xEBEBEB, dark: 0x181818)
+    /// The viewer-code row attached under the live-link field: barely off
+    /// the drawer background (0x1E1E1E dark / 0xEBEBEB light) so the row
+    /// reads as recessed, not as a second field.
+    static let attachedWellFill = Color(light: 0xE7E7E7, dark: 0x1C1C1C)
     /// The faded helmet on the empty state.
     static let watermark = Color(light: 0xEBEBEB, dark: 0x323232)
 

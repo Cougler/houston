@@ -18,6 +18,10 @@ final class DevServerStore: ObservableObject {
     @Published private(set) var devServers: [DevServer] = []
     /// Probe verdicts by `DevServer.id`; absent until a first probe lands.
     @Published private(set) var health: [String: ServerHealth] = [:]
+    /// Servers that have stopped since Houston saw them — the sidebar's
+    /// gray "off" rows. One per project path, persisted in settings so the
+    /// list survives relaunches.
+    @Published private(set) var recents: [RecentServer] = []
 
     private var projectsDirs: [String] = HoustonSettings.defaults.projectsDirs
     private var pinnedProjects: [String] = HoustonSettings.defaults.pinnedProjects
@@ -31,6 +35,7 @@ final class DevServerStore: ObservableObject {
 
     func start() {
         reloadSettings()
+        loadRecents()
         refresh()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
@@ -54,7 +59,9 @@ final class DevServerStore: ObservableObject {
                 // its own node listeners (MCP bridges etc.) in the dev port
                 // range — from a home shell those have no project and were
                 // cluttering the section.
+                let previous = self.devServers
                 self.devServers = dev.filter { $0.project != nil }
+                self.updateRecents(previous: previous)
                 let ids = Set(dev.map(\.id))
                 self.health = self.health.filter { ids.contains($0.key) }
                 self.probedAt = self.probedAt.filter { ids.contains($0.key) }
@@ -126,5 +133,67 @@ final class DevServerStore: ObservableObject {
         if s.pinnedProjects != pinnedProjects {
             pinnedProjects = s.pinnedProjects
         }
+    }
+
+    // MARK: - Recents (stopped servers)
+
+    /// The recent entry a sheet id addresses — its own off-id, or the live
+    /// "pid:port" id it replaced (so an open server sheet survives the stop).
+    func recent(matching sid: String) -> RecentServer? {
+        recents.first { $0.id == sid || $0.lastLiveID == sid }
+    }
+
+    /// "Remove from Sidebar" — temporary by design: the next time a server
+    /// runs (and stops) in that project, the row comes back.
+    func removeRecent(_ id: String) {
+        guard recents.contains(where: { $0.id == id }) else { return }
+        recents.removeAll { $0.id == id }
+        saveRecents()
+    }
+
+    /// Servers in the last snapshot that vanished from this one become
+    /// recents; a project whose server is live again drops its recent row.
+    private func updateRecents(previous: [DevServer]) {
+        let liveIDs = Set(devServers.map(\.id))
+        let livePaths = Set(devServers.compactMap(\.cwd))
+        var next = recents
+        for gone in previous where !liveIDs.contains(gone.id) {
+            guard let cwd = gone.cwd, let project = gone.project else { continue }
+            next.removeAll { $0.projectPath == cwd }
+            next.append(RecentServer(
+                projectPath: cwd, name: project, port: gone.port, lastLiveID: gone.id
+            ))
+        }
+        next.removeAll { livePaths.contains($0.projectPath) }
+        if next != recents {
+            recents = next.sorted {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            saveRecents()
+        }
+    }
+
+    private func loadRecents() {
+        recents = HoustonSettings.read().recentServers.compactMap { dict in
+            guard let path = dict["path"], let name = dict["name"],
+                  let port = dict["port"].flatMap(Int.init) else { return nil }
+            return RecentServer(
+                projectPath: path, name: name, port: port,
+                lastLiveID: dict["lastLiveID"] ?? ""
+            )
+        }
+    }
+
+    private func saveRecents() {
+        var s = HoustonSettings.read()
+        s.recentServers = recents.map {
+            [
+                "path": $0.projectPath,
+                "name": $0.name,
+                "port": String($0.port),
+                "lastLiveID": $0.lastLiveID,
+            ]
+        }
+        HoustonSettings.write(s)
     }
 }

@@ -52,6 +52,7 @@ struct MainWindowView: View {
     @StateObject private var store = ActiveSessionStore()
     @StateObject private var servers = DevServerStore()
     @StateObject private var share = ShareProxyStore()
+    @StateObject private var relay = RelayTunnelStore()
     @StateObject private var git = GitStatusStore()
     @StateObject private var statusFeed = StatusLineStore()
     @StateObject private var mcp = MCPStatusStore()
@@ -215,7 +216,10 @@ struct MainWindowView: View {
         .onChange(of: ownedSessions.map(\.cwd)) { _, _ in pruneSelectionIfStale() }
         // Every dev-server tick re-feeds the share proxy's Host-header routes
         // and the set of `<project>.local` names advertised over Bonjour.
-        .onChange(of: servers.devServers) { _, list in share.update(servers: list) }
+        .onChange(of: servers.devServers) { _, list in
+            share.update(servers: list)
+            relay.update(servers: list)
+        }
         .onChange(of: gitWatchSet) { _, set in git.watchRows(set) }
         // Commit watch for the bell's feed: HEAD moving on the watched
         // project's branch becomes a "Committed"/"New commits" event.
@@ -785,6 +789,15 @@ struct MainWindowView: View {
     /// close animation runs.
     private var effectiveRightPanel: RightPanel? { rightPanel ?? lastRightPanel }
 
+    /// The running server a sheet id addresses — directly, or through the
+    /// recent entry's project path once the server restarts under a new pid.
+    private func liveServer(for sid: String) -> DevServer? {
+        servers.devServers.first { $0.id == sid }
+            ?? servers.recent(matching: sid).flatMap { recent in
+                servers.devServers.first { $0.cwd == recent.projectPath }
+            }
+    }
+
     private var serverChromeHidden: Bool {
         if case .server = effectiveRightPanel { return true }
         return false
@@ -839,11 +852,15 @@ struct MainWindowView: View {
                 onBack: { taskSheetProject = nil }
             )
         case let .server(sid):
-            if let server = servers.devServers.first(where: { $0.id == sid }) {
+            // Resolve by live id first, then through the recent entry the id
+            // maps to — so the sheet morphs live↔off in place as the server
+            // stops or comes back, whichever id it was opened under.
+            if let server = liveServer(for: sid) {
                 ServerPanel(
                     server: server,
                     share: share,
-                    health: servers.health[sid],
+                    relay: relay,
+                    health: servers.health[server.id],
                     onOpenTerminal: {
                         guard let cwd = server.cwd else { return }
                         select(.project(cwd))
@@ -854,6 +871,24 @@ struct MainWindowView: View {
                         withAnimation(sheetSpring) { rightPanelDocked.toggle() }
                     },
                     onClose: closeRightPanel
+                )
+            } else if let recent = servers.recent(matching: sid) {
+                OffServerPanel(
+                    recent: recent,
+                    busyPorts: Dictionary(
+                        servers.devServers.map { ($0.port, $0.project ?? $0.command) },
+                        uniquingKeysWith: { a, _ in a }
+                    ),
+                    docked: rightPanelDocked,
+                    onTogglePin: {
+                        withAnimation(sheetSpring) { rightPanelDocked.toggle() }
+                    },
+                    onClose: closeRightPanel,
+                    onStart: { command in
+                        terminals.pane(for: recent.projectPath)
+                        select(.project(recent.projectPath))
+                        terminals.send(command + "\n", to: recent.projectPath)
+                    }
                 )
             } else {
                 rightSheetPlaceholder("This server is no longer listening.")
@@ -1898,6 +1933,7 @@ struct MainWindowView: View {
                 ServerPanel(
                     server: server,
                     share: share,
+                    relay: relay,
                     health: servers.health[id],
                     onOpenTerminal: {
                         guard let cwd = server.cwd else { return }
@@ -2017,10 +2053,15 @@ struct MainWindowView: View {
                 ))
             }
         }
-        if !servers.devServers.isEmpty {
+        if !servers.devServers.isEmpty || !servers.recents.isEmpty {
             out.append(.header("Servers"))
             out += servers.devServers.map {
                 .row(id: .server($0.id), title: $0.project ?? $0.command)
+            }
+            // Stopped servers stay listed as gray "off" rows below the live
+            // ones — click for the start page, right-click to remove.
+            out += servers.recents.map {
+                .row(id: .server($0.id), title: $0.name)
             }
         }
         // Projects is the stable library: rows never leave it when a project
@@ -2242,6 +2283,13 @@ struct MainWindowView: View {
                     // The server page is a right-sheet panel, same as Git —
                     // clicking the row toggles it, never the selection.
                     .onTapGesture { toggleRightPanel(.server(sid)) }
+                } else if let recent = servers.recents.first(where: { $0.id == sid }) {
+                    ServerRow(
+                        recent: recent,
+                        hovered: hovered || rightPanel == .server(sid)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggleRightPanel(.server(sid)) }
                 }
             }
         }
@@ -2287,12 +2335,15 @@ struct MainWindowView: View {
                 let bang = notify.hasAttention(path: path, tab: tab) ? "!" : "-"
                 return "sh:\(title)|\(tab)|\(agent)|\(status)|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
             case let .server(sid):
-                let port = servers.devServers.first { $0.id == sid }.map { String($0.port) } ?? "-"
+                let live = servers.devServers.first { $0.id == sid }
+                let port = live.map { String($0.port) }
+                    ?? servers.recents.first { $0.id == sid }.map { String($0.port) }
+                    ?? "-"
                 let health = servers.health[sid].map { String(describing: $0) } ?? "-"
                 // The row stays lit while its sheet panel is open — that
                 // state must be in the key or the highlight never updates.
                 let state = rightPanel == .server(sid) ? "P" : (hovered ? "h" : "-")
-                return "\(title)|\(port)|\(health)|\(state)"
+                return "\(title)|\(port)|\(health)|\(live != nil ? "on" : "off")|\(state)"
             }
         }
     }
@@ -2378,7 +2429,25 @@ struct MainWindowView: View {
                 })
             }
         case let .server(sid):
-            guard let server = servers.devServers.first(where: { $0.id == sid }) else { return nil }
+            guard let server = servers.devServers.first(where: { $0.id == sid }) else {
+                guard let recent = servers.recents.first(where: { $0.id == sid }) else { return nil }
+                let path = recent.projectPath
+                menu.addItem(ClosureMenuItem("Open Terminal Here") {
+                    terminals.pane(for: path)
+                    selection = .project(path)
+                })
+                menu.addItem(ClosureMenuItem("Reveal in Finder") {
+                    Actions.revealInFinder(path: path)
+                })
+                menu.addItem(.separator())
+                // Temporary by design: the row returns the next time a
+                // server runs (and stops) in this project.
+                menu.addItem(ClosureMenuItem("Remove from Sidebar") {
+                    if rightPanel == .server(sid) { closeRightPanel() }
+                    servers.removeRecent(sid)
+                })
+                return menu
+            }
             menu.addItem(ClosureMenuItem("Open in Browser") {
                 Actions.openExternal(server.url)
             })
@@ -2965,6 +3034,7 @@ struct SidebarRow: View {
 struct ServerPanel: View {
     let server: DevServer
     @ObservedObject var share: ShareProxyStore
+    @ObservedObject var relay: RelayTunnelStore
     var health: ServerHealth? = nil
     var onOpenTerminal: () -> Void = {}
     /// Sheet chrome, embedded in the panel's own header per the design —
@@ -2976,6 +3046,16 @@ struct ServerPanel: View {
     /// In-sheet drill-down: the project's change list replaces the server
     /// page until its back button pops it.
     @State private var showingChangeList = false
+    /// Drafts for the web-share section: the Pro token paste field and the
+    /// 4-digit viewer code, committed on submit.
+    @State private var tokenDraft = ""
+    @State private var pinDraft = ""
+    /// The viewer-code field is revealed ("+" pressed) but not yet saved.
+    @State private var pinEditing = false
+    @FocusState private var pinFocused: Bool
+    /// The Wi-Fi link's QR popover.
+    @State private var showQR = false
+    @State private var stopHovered = false
 
     var body: some View {
         if showingChangeList, let cwd = server.cwd {
@@ -3017,73 +3097,82 @@ struct ServerPanel: View {
             // Everything an operator might dig for (command, pid, port,
             // path) lives in the tooltip: this page's job is open / edit /
             // share / stop, not ops trivia.
-            // Title with the URL tucked tight beneath it — one lockup.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    HStack(spacing: 7) {
-                        Circle()
-                            .fill(healthColor)
-                            .frame(width: 8, height: 8)
-                        Text(displayName)
-                            .font(.system(size: 17, weight: .bold))
-                            .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                    }
-                    .help(details)
-                    Spacer(minLength: 8)
-                    pinCloseControls
-                }
-
-                // ONE link — the pretty name while the proxy is up, the raw
-                // port URL otherwise. Never both: they open the same app.
-                HStack(spacing: 5) {
-                    LinkButton(
-                        title: primaryURL.replacingOccurrences(of: "http://", with: ""),
-                        size: 13
-                    ) {
-                        Actions.openExternal(primaryURL)
-                    }
-                    CopyIconButton(text: primaryURL, help: "Copy link")
-                    Spacer(minLength: 0)
-                }
-            }
-
+            // Title lockup: health dot + name. The URL moved into the
+            // "On this Mac" access row — one home per link.
             HStack(spacing: 8) {
-                PanelChromeButton(action: { Actions.openExternal(primaryURL) }) {
-                    Text("Open in Browser")
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(healthColor)
+                        .frame(width: 8, height: 8)
+                    Text(displayName)
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
                 }
-                if server.cwd != nil {
-                    PanelChromeButton(action: onOpenTerminal) {
-                        Text("Open Terminal")
-                    }
-                }
-                Spacer(minLength: 0)
-                PanelChromeButton(action: { Actions.killPid(server.pid) }) {
-                    HStack(spacing: 5) {
-                        // Record-style glyph: red ring around a red dot.
-                        ZStack {
-                            Circle()
-                                .stroke(Theme.closeRed, lineWidth: 1.5)
-                                .frame(width: 10, height: 10)
-                            Circle()
-                                .fill(Theme.closeRed)
-                                .frame(width: 4, height: 4)
-                        }
-                        Text("Stop")
-                    }
-                }
-                .help("Stops the dev server (pid \(String(server.pid)))")
+                .help(details)
+                Spacer(minLength: 8)
+                moreMenu
+                pinCloseControls
             }
 
-            // Sections separate by air alone — ~36pt with the stack's 16.
-            previewEdit
-                .padding(.top, 20)
-            sharing
-                .padding(.top, 20)
+            // Sections separate by air alone.
+            editAndTrack
+                .padding(.top, 16)
+            access
+                .padding(.top, 26)
+
+            Spacer(minLength: 24)
+
+            // Stop lives alone at the drawer's foot — full width, outlined
+            // in red, away from everything a stray click could hit.
+            Button(action: { Actions.killPid(server.pid) }) {
+                HStack(spacing: 7) {
+                    Image(systemName: "stop.circle")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("Stop Server")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(Theme.textDanger)
+                .frame(maxWidth: .infinity)
+                .frame(height: 42)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(stopHovered ? Theme.closeRed.opacity(0.08) : .clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Theme.closeRed, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .onHover { stopHovered = $0 }
+            .help("Stops the dev server (pid \(String(server.pid)))")
         }
         .padding(.horizontal, 6)
         .padding(.top, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// Secondary actions tucked behind an ellipsis beside the pin.
+    private var moreMenu: some View {
+        Menu {
+            Button("Open in Browser") { Actions.openExternal(server.url) }
+            if server.cwd != nil {
+                Button("Open Terminal", action: onOpenTerminal)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("More actions")
     }
 
     /// "hierarch" the folder reads as "Hierarch" the app — title case for
@@ -3102,18 +3191,11 @@ struct ServerPanel: View {
         return lines.joined(separator: "\n")
     }
 
-    /// True once the proxy is actually answering — what makes the pretty
-    /// URLs live, and what flips the primary link between them and the raw
-    /// port form.
+    /// True once the proxy is actually answering — what lights up the
+    /// pretty `.local` URL in the Wi-Fi row. The "On this Mac" row shows
+    /// the raw `localhost:<port>` on purpose: no masked name unless a
+    /// deliberate action turns one on.
     private var shareReady: Bool { share.enabled && share.running }
-
-    /// The one URL this panel opens: pretty when the proxy serves it, raw
-    /// `localhost:<port>` when it doesn't.
-    private var primaryURL: String {
-        shareReady
-            ? share.localURL(forProjectNamed: server.project ?? server.command)
-            : server.url
-    }
 
     /// Pin + close, shared by the server header and the change-list header.
     private var pinCloseControls: some View {
@@ -3136,22 +3218,13 @@ struct ServerPanel: View {
 
     /// The Preview & Edit tier: the web editor window, and the project's
     /// change list (drills down in place).
+    /// The project's change list. The web editor itself moved up into the
+    /// "Open in Houston" access row.
+    @ViewBuilder
     private var previewEdit: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Preview & Edit")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(Theme.text)
-            ActionCard(
-                icon: "cursorarrow.rays",
-                title: "Web editor",
-                subtitle: "Click any element, tell Claude what to change",
-                trailing: .redirect,
-                action: { PreviewWindowController.present(server: server) }
-            )
-            if let cwd = server.cwd {
-                ChangeListCard(store: AnnotationStores.store(for: cwd)) {
-                    showingChangeList = true
-                }
+        if let cwd = server.cwd {
+            ChangeListCard(store: AnnotationStores.store(for: cwd)) {
+                showingChangeList = true
             }
         }
     }
@@ -3159,71 +3232,280 @@ struct ServerPanel: View {
     /// The two tiers that put the app on OTHER screens, each its own
     /// labeled toggle row: Wi-Fi sharing (live — the URL field discloses
     /// under it) and the public link (relay-backed, coming soon, disabled).
-    private var sharing: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Share on your Wi-Fi")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { share.enabled },
-                    set: { share.setEnabled($0) }
-                ))
-                .toggleStyle(PanelSwitchStyle())
-            }
-            .help("Phone, tablet, or another computer on the same network.")
-
-            if shareReady {
-                urlField(share.lanURL(forProjectNamed: server.project ?? server.command))
-                if share.port != ShareProxyStore.defaultPort {
-                    Text("Port 80 was busy — links carry :\(String(share.port ?? 0)).")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-            } else if share.enabled {
-                Text("Starting the share proxy…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
-            }
-
-            HStack(spacing: 8) {
-                Text("Share to the web")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                ComingSoonBadge()
-                Spacer()
-                Toggle("", isOn: .constant(false))
-                    .toggleStyle(PanelSwitchStyle())
-                    .disabled(true)
-                    .opacity(0.45)
-            }
-            .padding(.top, 10)
-            .help("A public link anyone can open — relay-backed, coming soon.")
+    /// The three ways to view this server, one line item each: on this
+    /// Mac (localhost), on the Wi-Fi (`.local` via the share proxy), and
+    /// on the web (the relay live link). Same row anatomy throughout:
+    /// icon + title + trailing control, detail indented underneath.
+    /// "Edit and track": the web editor and the project's change list,
+    /// as matching cards.
+    private var editAndTrack: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("Edit and track")
+            ActionCard(
+                icon: "cursorarrow.rays",
+                title: "Open in Houston",
+                subtitle: "Inspect elements and edit with Claude.",
+                trailing: .redirect,
+                action: { PreviewWindowController.present(server: server) }
+            )
+            previewEdit
         }
     }
 
-    /// The share URL, framed like an input: full address left, a Copy chip
-    /// living inside the field.
-    private func urlField(_ url: String) -> some View {
-        HStack(spacing: 8) {
-            Text(url)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            CopyChipButton(text: url)
+    /// "View & Share": the three ways to reach the server, each a plain
+    /// label (with its toggle where sharing is optional) over a
+    /// code-styled URL field whose action button lives inside the field.
+    private var access: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            sectionTitle("View & Share")
+
+            VStack(alignment: .leading, spacing: 8) {
+                rowLabel("Open in the browser")
+                urlField(server.url) {
+                    Button(action: { Actions.openExternal(server.url) }) {
+                        SVGIcon(name: "redirect", size: 18)
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in your browser")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    rowLabel("Any device on your Wi-Fi")
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: Binding(
+                        get: { share.enabled },
+                        set: { share.setEnabled($0) }
+                    ))
+                    .toggleStyle(PanelSwitchStyle())
+                }
+                if shareReady {
+                    let lanURL = share.lanURL(forProjectNamed: server.project ?? server.command)
+                    urlField(lanURL) {
+                        Button(action: { showQR = true }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "qrcode")
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("View QR")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.textSecondary)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show a QR code phones can scan")
+                        .popover(isPresented: $showQR, arrowEdge: .bottom) {
+                            QRCodePopover(url: lanURL)
+                        }
+                    }
+                    if share.port != ShareProxyStore.defaultPort {
+                        caption("Port 80 was busy — links carry :\(String(share.port ?? 0)).")
+                    }
+                } else if share.enabled {
+                    caption("Starting the share proxy…")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    rowLabel("Live link on the web")
+                    Spacer(minLength: 8)
+                    Toggle("", isOn: Binding(
+                        get: { relay.isEnabled(projectLabel) },
+                        set: { relay.setEnabled(projectLabel, $0) }
+                    ))
+                    .toggleStyle(PanelSwitchStyle())
+                    .disabled(relay.token.isEmpty)
+                    .opacity(relay.token.isEmpty ? 0.45 : 1)
+                }
+                webDetail
+            }
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 6)
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 12, weight: .semibold))
+            .kerning(1.1)
+            .foregroundStyle(Theme.textSecondary)
+    }
+
+    private func rowLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Theme.text)
+    }
+
+    /// A share URL in code dress: monospaced in a borderless filled field
+    /// with its action controls living inside. The address itself opens
+    /// the link.
+    private func urlField<Trailing: View>(
+        _ url: String,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(
+                url
+                    .replacingOccurrences(of: "https://", with: "")
+                    .replacingOccurrences(of: "http://", with: "")
+            )
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .onTapGesture { Actions.openExternal(url) }
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 40)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.gitPanelFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Theme.buttonStroke, lineWidth: 1)
-        )
+        .frame(height: 52)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.gitPanelFill))
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// This project's label in relay/proxy routing terms.
+    private var projectLabel: String {
+        ShareProxyStore.label(for: server.project ?? server.command)
+    }
+
+    /// Tier 3 detail: the public `https://<name>.gohouston.live` link.
+    /// Locked behind the Pro token; the relay enforces everything
+    /// server-side.
+    @ViewBuilder
+    private var webDetail: some View {
+        if relay.token.isEmpty {
+            caption("Needs a Houston Pro token.")
+            HStack(spacing: 8) {
+                TextField("Paste token (hstn_…)", text: $tokenDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(.horizontal, 10)
+                    .frame(height: 32)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                    .onSubmit(saveToken)
+                PanelChromeButton(action: saveToken) { Text("Save") }
+                    .disabled(tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        } else if relay.tokenRejected {
+            Text("The relay rejected this token — it may have been revoked.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textDanger)
+        } else if let other = relay.portConflicts[projectLabel] {
+            AlertBanner(
+                title: "Two servers on one port",
+                message: "This server and \(other) share port \(String(server.port)). Move one to its own port to share it live."
+            )
+        } else if relay.isEnabled(projectLabel) {
+            switch relay.states[projectLabel] {
+            case .online(let url):
+                urlField(url) {
+                    HStack(spacing: 4) {
+                        CopyIconButton(text: url, help: "Copy link")
+                        if let shareURL = URL(string: url) {
+                            ShareLink(item: shareURL) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Share the link")
+                        }
+                    }
+                }
+                viewerCodeRow
+            case .offline:
+                caption("Waiting for the dev server…")
+            case .connecting, nil:
+                caption("Connecting to the relay…")
+            }
+        } else {
+            caption("A public link you can send to anyone.")
+        }
+    }
+
+    /// The optional 4-digit gate, right-aligned under the live link:
+    /// "+ Add access code" reveals the code field; typing the fourth
+    /// digit saves on the spot; the floating × clears it.
+    private var viewerCodeRow: some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if pinEditing || !relay.pin(for: projectLabel).isEmpty {
+                Text("Access code")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .help("Visitors type this on the splash page before the app loads.")
+                TextField("----", text: $pinDraft)
+                    .textFieldStyle(.plain)
+                    .focused($pinFocused)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .kerning(3)
+                    .multilineTextAlignment(.center)
+                    .frame(width: 72, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
+                    .onChange(of: pinDraft) { _, new in
+                        let clean = String(new.filter(\.isNumber).prefix(4))
+                        if clean != new { pinDraft = clean }
+                        if clean.count == 4, clean != relay.pin(for: projectLabel) {
+                            relay.setPin(projectLabel, clean)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            pinDraft = ""
+                            pinEditing = false
+                            relay.setPin(projectLabel, "")
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.textSecondary)
+                                .background(Circle().fill(Theme.background))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 7, y: -7)
+                        .help("Remove the code")
+                    }
+            } else {
+                Button {
+                    pinEditing = true
+                    pinFocused = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("Add access code")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Require a 4-digit code from visitors")
+            }
+        }
+        .padding(.top, 4)
+        .onAppear { pinDraft = relay.pin(for: projectLabel) }
+    }
+
+    private func saveToken() {
+        let tok = tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tok.isEmpty else { return }
+        relay.setToken(tok)
+        tokenDraft = ""
     }
 
     private var healthColor: Color {
@@ -3252,6 +3534,179 @@ struct ServerPanel: View {
         case .down: "Not responding"
         case nil: "Checking…"
         }
+    }
+}
+
+/// The server page for a stopped server: gray dot, the project's declared
+/// default command (package.json's dev-ish script), an optional port
+/// override, and Start — which types the command into the project's
+/// terminal. Once the scan sees the new socket, the sheet morphs into the
+/// live server page in place.
+struct OffServerPanel: View {
+    let recent: RecentServer
+    /// Ports live dev servers already hold, port → project name. The
+    /// guardrail: Start is blocked while the chosen port collides.
+    var busyPorts: [Int: String] = [:]
+    var docked: Bool = false
+    var onTogglePin: () -> Void = {}
+    var onClose: () -> Void = {}
+    /// Runs the finished command line in the project's terminal.
+    var onStart: (String) -> Void = { _ in }
+
+    @State private var commandDraft = ""
+    @State private var portDraft = ""
+    @State private var detected: DevCommandDetect.DefaultCommand?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(Theme.textSecondary)
+                            .frame(width: 8, height: 8)
+                        Text(displayName)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                    }
+                    .help("Not running\n\(recent.projectPath)")
+                    Spacer(minLength: 8)
+                    HStack(spacing: 4) {
+                        ControlIconButton(
+                            systemName: docked ? "pin.slash" : "pin",
+                            help: docked ? "Float over the content" : "Dock beside the content",
+                            bare: true,
+                            circleSize: 32,
+                            action: onTogglePin
+                        )
+                        ControlIconButton(
+                            systemName: "xmark",
+                            help: "Close",
+                            circleSize: 32,
+                            action: onClose
+                        )
+                    }
+                }
+                Text("Not running · was localhost:" + String(recent.port))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Start server")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                if let detected {
+                    // What the project itself declares — the command runs
+                    // this script.
+                    Text("Default for this project: \(detected.script)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                }
+                TextField(
+                    detected == nil ? "npm run dev" : "",
+                    text: $commandDraft
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: .monospaced))
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                .onSubmit(startNow)
+                HStack(spacing: 8) {
+                    TextField(String(recent.port), text: $portDraft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .frame(width: 76, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                        .onSubmit(startNow)
+                        .help("Port to run on — leave empty to use the project's own")
+                    Text("port")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                    Spacer(minLength: 0)
+                    PanelChromeButton(action: startNow) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Theme.dotActive)
+                            Text("Start")
+                        }
+                    }
+                    .disabled(startBlocked)
+                    .opacity(startBlocked ? 0.5 : 1)
+                    .help(
+                        conflictProject != nil
+                            ? "That port is already serving — pick another"
+                            : "Runs the command in this project's terminal"
+                    )
+                }
+                if let conflictProject {
+                    // The guardrail: same-port launches mostly fail or shadow
+                    // each other, so Start stays off until the port is free.
+                    HStack(spacing: 6) {
+                        Text("Port \(String(effectivePort)) is already in use by \(conflictProject).")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDanger)
+                        LinkButton(title: "Use \(String(nextFreePort)) instead", size: 11) {
+                            portDraft = String(nextFreePort)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            detected = DevCommandDetect.detect(projectPath: recent.projectPath)
+            commandDraft = detected?.command ?? ""
+        }
+    }
+
+    /// Same title-casing as the live page.
+    private var displayName: String {
+        guard let first = recent.name.first else { return recent.name }
+        return first.uppercased() + recent.name.dropFirst()
+    }
+
+    private var finalCommand: String {
+        let base = commandDraft.trimmingCharacters(in: .whitespaces)
+        guard !base.isEmpty else { return "" }
+        let usesVite = detected?.usesVite ?? base.contains("vite")
+        return DevCommandDetect.apply(port: portDraft, to: base, usesVite: usesVite)
+    }
+
+    /// The port this launch will land on: the field's value, or the
+    /// server's last port when the field is empty (the best guess Houston
+    /// has for what the project will pick on its own).
+    private var effectivePort: Int {
+        Int(portDraft.trimmingCharacters(in: .whitespaces)) ?? recent.port
+    }
+
+    /// Who holds the effective port right now, if anyone.
+    private var conflictProject: String? { busyPorts[effectivePort] }
+
+    private var nextFreePort: Int {
+        var port = effectivePort
+        repeat { port += 1 } while busyPorts[port] != nil
+        return port
+    }
+
+    private var startBlocked: Bool {
+        finalCommand.isEmpty || conflictProject != nil
+    }
+
+    private func startNow() {
+        let command = finalCommand
+        guard !command.isEmpty, conflictProject == nil else { return }
+        onStart(command)
     }
 }
 
@@ -3302,45 +3757,41 @@ private struct ActionCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 14) {
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 40, height: 40)
                     .background(
-                        RoundedRectangle(cornerRadius: 7)
+                        RoundedRectangle(cornerRadius: 10)
                             .fill(Theme.buttonFill)
                     )
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Text(subtitle)
-                        .font(.system(size: 10.5))
+                        .font(.system(size: 12))
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 trailingGlyph
-                    .opacity(hovered ? 1 : 0.4)
+                    .opacity(hovered ? 1 : 0.5)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 52)
+            .frame(height: 72)
             .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Theme.panelFill)
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Theme.gitPanelFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: 14)
                             .fill(hovered ? Theme.cardHovered : .clear)
                     )
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Theme.buttonStroke, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
@@ -3463,27 +3914,53 @@ struct PanelChromeButton<Label: View>: View {
 }
 
 struct ServerRow: View {
-    let server: DevServer
+    let name: String
+    let port: Int
     /// Last probe verdict; nil until the first probe lands.
     var health: ServerHealth? = nil
+    /// Green glyph while the socket is live, gray for a stopped (recent)
+    /// server row.
+    var running: Bool = true
     var hovered: Bool = false
     var selected: Bool = false
 
+    init(
+        server: DevServer, health: ServerHealth? = nil,
+        hovered: Bool = false, selected: Bool = false
+    ) {
+        name = server.project ?? server.command
+        port = server.port
+        self.health = health
+        running = true
+        self.hovered = hovered
+        self.selected = selected
+    }
+
+    init(recent: RecentServer, hovered: Bool = false) {
+        name = recent.name
+        port = recent.port
+        health = nil
+        running = false
+        self.hovered = hovered
+        selected = false
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            // Plain gray like the project rows' glyphs — no status color;
-            // a server in the list is either serving or it isn't.
-            ServerGlyph(color: Theme.textSecondary, size: 13)
-                .help(healthHelp)
-                .padding(.top, 1)
+            ServerGlyph(
+                color: running ? Theme.dotActive : Theme.textSecondary,
+                size: 13
+            )
+            .help(healthHelp)
+            .padding(.top, 1)
             VStack(alignment: .leading, spacing: 1) {
-                Text(server.project ?? server.command)
+                Text(name)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.text)
+                    .foregroundStyle(running ? Theme.text : Theme.textSecondary)
                     .lineLimit(1)
                 // String(...) not "\(port)" — interpolating an Int applies
                 // locale digit grouping and renders "localhost:3,000".
-                Text("localhost:" + String(server.port))
+                Text("localhost:" + String(port))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
@@ -3495,11 +3972,12 @@ struct ServerRow: View {
     }
 
     private var healthHelp: String {
+        guard running else { return "Not running — click for start options" }
         switch health {
-        case .healthy: "Responding"
-        case .degraded: "Slow or responding with server errors"
-        case .down: "Not responding"
-        case nil: "Checking…"
+        case .healthy: return "Responding"
+        case .degraded: return "Slow or responding with server errors"
+        case .down: return "Not responding"
+        case nil: return "Checking…"
         }
     }
 }
