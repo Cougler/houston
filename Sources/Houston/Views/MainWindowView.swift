@@ -31,12 +31,19 @@ enum SidebarSelection: Hashable {
     }
 }
 
-/// What the right sheet can show — Git, Skills, Tracked, the notification
-/// feed, or a dev server (by `DevServer.id`). One sheet, so the panels are
-/// exclusive by construction.
+/// What the right sheet can show — Git, Skills, the notification feed,
+/// Tasks (which carries Reminders as its second tab), or a dev server (by
+/// `DevServer.id`). One sheet, so the panels are exclusive by construction.
 enum RightPanel: Equatable {
-    case git, skills, tracked, feed, tasks
+    case git, skills, feed, tasks
     case server(String)
+}
+
+/// The tasks sheet's two tabs: the cross-project task lists and the
+/// Tracked reminders (formerly their own panel).
+enum TaskSheetTab: String, CaseIterable {
+    case tasks = "Tasks"
+    case reminders = "Reminders"
 }
 
 /// Houston's desktop window, laid out to the Figma design: a white sidebar
@@ -73,6 +80,8 @@ struct MainWindowView: View {
     /// The tasks sheet's navigation: nil shows All Tasks (the root), a path
     /// shows that project's page nested under it (Back pops to nil).
     @State private var taskSheetProject: String? = nil
+    /// Which tab the tasks sheet shows — Tasks or Reminders.
+    @State private var taskSheetTab: TaskSheetTab = .tasks
     /// Last panel shown — what the sheet renders while sliding closed.
     @State private var lastRightPanel: RightPanel?
     /// Agent the header's split button launches; the chevron menu changes it.
@@ -502,8 +511,8 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.buttonActiveStroke)
                 }
             }
-            // Too narrow for the expanded footer's rows — bare icons stacked
-            // in the same order: bell, calendar, gear, collapse.
+            // Too narrow for the expanded footer's labeled rows — bare icons
+            // stacked in the same order: bell, tasks, gear, collapse.
             FooterLabeledButton(
                 systemName: "bell",
                 badgeCount: feed.unreadCount,
@@ -512,16 +521,10 @@ struct MainWindowView: View {
                 action: { toggleRightPanel(.feed) }
             )
             FooterLabeledButton(
-                systemName: "calendar",
-                dot: tracked.attentionCount > 0,
-                active: rightPanel == .tracked,
-                help: "Reminders",
-                action: { toggleRightPanel(.tracked) }
-            )
-            FooterLabeledButton(
                 systemName: "checklist",
+                dot: tracked.attentionCount > 0,
                 active: rightPanel == .tasks,
-                help: "Tasks across all projects",
+                help: "Tasks and reminders across all projects",
                 action: { openAllTasks() }
             )
             settingsMenu()
@@ -671,7 +674,7 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
-        case .git, .tracked, .server, .tasks:
+        case .git, .server, .tasks:
             break
         }
     }
@@ -699,7 +702,46 @@ struct MainWindowView: View {
             return
         }
         taskSheetProject = path
+        taskSheetTab = .tasks
         if rightPanel != .tasks { toggleRightPanel(.tasks) }
+    }
+
+    /// The tasks sheet's tab strip: Tasks | Reminders, a quiet segmented
+    /// pair under the sheet's controls bar. The Reminders segment carries
+    /// the tracked attention dot so due items stay visible from either tab.
+    private var taskSheetTabs: some View {
+        HStack(spacing: 4) {
+            ForEach(TaskSheetTab.allCases, id: \.self) { tab in
+                taskSheetTabButton(tab)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func taskSheetTabButton(_ tab: TaskSheetTab) -> some View {
+        Button {
+            taskSheetTab = tab
+        } label: {
+            HStack(spacing: 5) {
+                Text(tab.rawValue)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(taskSheetTab == tab ? Theme.text : Theme.heading)
+                if tab == .reminders && tracked.attentionCount > 0 {
+                    Circle()
+                        .fill(Theme.dotDegraded)
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(taskSheetTab == tab ? Theme.rowSelected : .clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 
     /// The sheet always lives here, flush with the right edge, sliding in
@@ -807,10 +849,12 @@ struct MainWindowView: View {
         switch effectiveRightPanel {
         case .git: "GIT"
         case .skills: "SKILLS"
-        case .tracked: "REMINDERS"
         case .feed: "NOTIFICATIONS"
         case .server: "SERVER"
-        case .tasks: taskSheetProject == nil ? "ALL TASKS" : "TASKS"
+        case .tasks:
+            taskSheetTab == .reminders
+                ? "REMINDERS"
+                : (taskSheetProject == nil ? "ALL TASKS" : "TASKS")
         case nil: ""
         }
     }
@@ -843,14 +887,20 @@ struct MainWindowView: View {
                     + "project with one."
                 )
             }
-        case .tracked:
-            TrackedPanel(store: tracked)
         case .tasks:
-            TasksNavigator(
-                projectPath: taskSheetProject,
-                onOpenProject: { taskSheetProject = $0 },
-                onBack: { taskSheetProject = nil }
-            )
+            VStack(spacing: 10) {
+                taskSheetTabs
+                switch taskSheetTab {
+                case .tasks:
+                    TasksNavigator(
+                        projectPath: taskSheetProject,
+                        onOpenProject: { taskSheetProject = $0 },
+                        onBack: { taskSheetProject = nil }
+                    )
+                case .reminders:
+                    TrackedPanel(store: tracked)
+                }
+            }
         case let .server(sid):
             // Resolve by live id first, then through the recent entry the id
             // maps to — so the sheet morphs live↔off in place as the server
@@ -1398,43 +1448,42 @@ struct MainWindowView: View {
 
 
     private var sidebarFooter: some View {
-        // One row of bare icons: collapse first, then Settings, Reminders,
-        // Notifications — the same order the rail stacks upward from its
-        // collapse button.
-        HStack(spacing: 2) {
-            FooterIconButton(
-                systemName: "sidebar.left",
-                help: "Collapse sidebar",
-                action: toggleSidebarCollapse
-            )
-            settingsMenu()
+        // Labeled rows stacked vertically — Settings, Tasks, Notifications —
+        // with the collapse icon on its own row underneath. Reminders lives
+        // inside the Tasks sheet now (its second tab), so the Tasks row
+        // carries the tracked attention dot.
+        VStack(alignment: .leading, spacing: 2) {
+            settingsMenu(labeled: true)
             FooterLabeledButton(
                 systemName: "checklist",
+                label: "Tasks",
+                dot: tracked.attentionCount > 0,
                 active: rightPanel == .tasks,
-                help: "Tasks across all projects",
+                help: "Tasks and reminders across all projects",
                 action: { openAllTasks() }
             )
             FooterLabeledButton(
-                systemName: "calendar",
-                dot: tracked.attentionCount > 0,
-                active: rightPanel == .tracked,
-                help: "Reminders",
-                action: { toggleRightPanel(.tracked) }
-            )
-            FooterLabeledButton(
                 systemName: "bell",
+                label: "Notifications",
                 badgeCount: feed.unreadCount,
                 active: rightPanel == .feed,
                 help: "Notifications",
                 action: { toggleRightPanel(.feed) }
             )
-            if let update = updates.available {
-                UpdatePill(version: update.version, busy: installer.isBusy) {
-                    installer.requestInstall(update)
+            HStack(spacing: 4) {
+                FooterIconButton(
+                    systemName: "sidebar.left",
+                    help: "Collapse sidebar",
+                    action: toggleSidebarCollapse
+                )
+                if let update = updates.available {
+                    UpdatePill(version: update.version, busy: installer.isBusy) {
+                        installer.requestInstall(update)
+                    }
                 }
-                .padding(.leading, 4)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(.top, 2)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -1443,8 +1492,9 @@ struct MainWindowView: View {
     // MARK: - Settings
 
     /// Footer gear: appearance (System/Light/Dark) and the terminal's theme,
-    /// straight from ghostty's catalog. A bare glyph in both footer states.
-    private func settingsMenu() -> some View {
+    /// straight from ghostty's catalog. A bare glyph on the rail; an
+    /// icon+label row in the expanded footer's stack.
+    private func settingsMenu(labeled: Bool = false) -> some View {
         Menu {
             Picker("Appearance", selection: appearanceBinding) {
                 Text("System").tag("system")
@@ -1510,7 +1560,7 @@ struct MainWindowView: View {
                 UpdateChecker.shared.checkInteractively()
             }
         } label: {
-            GearLabel()
+            GearLabel(labeled: labeled)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -3239,7 +3289,7 @@ struct ServerPanel: View {
     /// "Edit and track": the web editor and the project's change list,
     /// as matching cards.
     private var editAndTrack: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             sectionTitle("Edit and track")
             ActionCard(
                 icon: "cursorarrow.rays",
@@ -3258,6 +3308,7 @@ struct ServerPanel: View {
     private var access: some View {
         VStack(alignment: .leading, spacing: 18) {
             sectionTitle("View & Share")
+                .padding(.bottom, -4)
 
             VStack(alignment: .leading, spacing: 8) {
                 rowLabel("Open in the browser")
@@ -4011,19 +4062,28 @@ private struct HeaderPlusButton: View {
 /// The footer gear: quiet glyph that gets the row-hover fill under the
 /// pointer.
 private struct GearLabel: View {
+    var labeled: Bool = false
     @State private var hovered = false
 
     var body: some View {
-        Image(systemName: "gearshape")
-            .font(.system(size: 12))
-            .foregroundStyle(hovered ? Theme.text : Theme.heading)
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(hovered ? Theme.rowHovered : .clear)
-            )
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
+        HStack(spacing: 5) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 12))
+                .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            if labeled {
+                Text("Settings")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(hovered ? Theme.text : Theme.heading)
+            }
+        }
+        .padding(.horizontal, labeled ? 6 : 0)
+        .frame(width: labeled ? nil : 22, height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(hovered ? Theme.rowHovered : .clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
     }
 }
 

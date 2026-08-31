@@ -2,6 +2,33 @@
 
 ---
 
+## 2026-08-31 — Tier-3 live share links shipped end-to-end, 1.0.13 released
+
+Tier-3 public share links are live and verified: the Go relay on the Hetzner VPS serves `*.gohouston.live` with wildcard TLS, token auth, a splash page with optional 4-digit viewer code, and per-request proxying that rewrites Host to localhost so Vite/Next need zero config; Houston's tunnel client and the redesigned server drawer (Edit and track cards, View & Share fields, QR codes, native share sheet) shipped in 1.0.13. Pro access is token-gated — mint tokens manually with `relay-admin` on the VPS; the payment processor (leaning Creem) is not wired up yet. Next: the checkout + pairing flow (webhook on the VPS mints tokens, `houston://` deep link activates the app) and the abuse@ email forward.
+
+**Done this session:**
+- Bought gohouston.live, moved its DNS to Cloudflare (DNS-only), wildcard A records to 5.161.67.151
+- Built `~/Apps/houston-relay` (private Go repo, local only): certmagic DNS-01 wildcard TLS, `houston-tunnel` upgrade endpoint with Bearer tokens (SQLite store + `relay-admin` CLI), space-themed stable subdomains, splash/PIN gate with lockout, secret-path blocklist, offline/unknown pages
+- Debugged the tunnel to production quality: Host→localhost rewrite (fixes Vite allowedHosts), per-request proxying with pool-wait and replay-on-dead-conn, race-free parked-conn death watch (a 1-byte steal race truncated JS modules and black-paged Vite apps), truncation now logged and hard-aborted
+- Houston client: `RelayTunnel.swift` (pooled outbound TLS conns, self-healing every 2s tick, backoff, token-rejection stop), settings keys `relayToken`/`relayEnabled`/`relayPins`
+- Server drawer redesigned to the new mockup: caps section titles, bigger cards, borderless code-style URL fields with inline controls (redirect icon, View QR popover via new `QRCodePopover`, copy + native ShareLink), "+ Add access code" control, ellipsis More menu, full-width outlined Stop Server, port-conflict `AlertBanner` (tunnels refuse contested ports)
+- Released 1.0.13 (notarized DMG on GitHub Releases + tryhoustonapp.com); added Cloudflare MCP (needs OAuth); tracked domain renewal; tasks added for abuse@ email and manual token docs
+
+**Up next:**
+- Creem (or Paddle) checkout: webhook + pairing endpoint on the VPS, Upgrade button, `houston://` URL scheme, poll fallback
+- abuse@gohouston.live via Cloudflare Email Routing (needs dashboard or broader API token — DNS-only token can't)
+- Link expiry, visitor log, kill switch (the always-on drawbacks discussed)
+
+**Handoff:**
+- Relay source lives in `~/Apps/houston-relay` (committed locally, NO remote — deliberately private; the public houston repo only carries the client). Deploy with `deploy/deploy.sh` (rsync → build on VPS → restart systemd unit `houston-relay`). VPS is root@5.161.67.151, Ubuntu 26.04; env in `/etc/houston-relay/env` (holds the Cloudflare DNS token), state in `/var/lib/houston-relay` (SQLite relay.db, cookie secret, certmagic cache).
+- Mint Pro tokens: `ssh root@5.161.67.151 "relay-admin token create --email x@y"` — manual tokens are identical to future paid ones and never expire until revoked.
+- Aaron's own token is in Houston's settings.json (`relayToken`). Tokens for testproj/houston-fos/hierarch/hierarch-fos/nondis exist in the relay DB; hierarch's PIN was cleared during debugging.
+- Two dev servers on one port cross-serve (hierarch localhost:3000 vs nondis *:3000 was measured) — client refuses contested ports and shows the banner, but sequential port swaps are still ungated.
+- The Chrome-extension screenshot tool wedges on pages with long-lived pending requests (Vite HMR blob) — console/network reads still work.
+- A parallel session's recent-servers/dev-command work (DevServer, DevServerStore, DevCommandDetect, `recentServers` settings key) was committed and shipped inside the same 1.0.13 commit — not this session's code, don't assume its details.
+
+---
+
 ## 2026-08-26 — Full-window onboarding polish, terminal focus fix, 1.0.9 released
 
 Houston 1.0.9 is live: the onboarding is now a full-window takeover (welcome sky with the solar system, a seven-page tour with parallax space decor, and a dismissal that slides the sidebar in around a perfectly aligned solar system), and terminals no longer refuse keystrokes until their row is clicked again. Everything is committed on main (bd7a755), tagged v1.0.9, notarized, and serving from both GitHub Releases and tryhoustonapp.com. Next: phone-test hierarch.local, provision the Hetzner relay for tier-3 links, and persist the right sheet's pin state.
