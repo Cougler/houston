@@ -35,7 +35,9 @@ download), and the tag (what `UpdateChecker` compares against).
    gh release create v<VERSION> dist/Houston.dmg --title "Houston <VERSION>" --notes "<summary>"
    ```
 
-4. **Update the site download** so first-time downloads get the same build:
+4. **Update the site download** so first-time downloads get the same build.
+   Also set `version` in `~/Apps/houston-fos/lib/site.ts` to `<VERSION>` —
+   it's the number shown under the download button:
 
    ```bash
    cp dist/Houston.dmg ~/Apps/houston-fos/public/Houston.dmg

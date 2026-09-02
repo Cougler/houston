@@ -264,6 +264,15 @@ struct MainWindowView: View {
             )
         ) { _ in
             notify.markSeen(projectPath: selection?.projectPath)
+            // Coming back from another app lands you typing in the selected
+            // terminal, no click needed. A text field mid-edit (rename, task
+            // input) keeps focus — only "nowhere useful" is redirected;
+            // focusTerminal itself already stays put when a pane has it.
+            if let path = selection?.projectPath,
+               terminals.hasPane(for: path),
+               !(NSApp.keyWindow?.firstResponder is NSTextView) {
+                terminals.focusTerminal(path: path, tab: selection?.tabID)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .houstonOpenProject)) { note in
             if let path = note.userInfo?["path"] as? String {
