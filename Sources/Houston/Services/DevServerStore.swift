@@ -15,6 +15,10 @@ enum ServerHealth {
 /// session poll, plus a gentle HTTP health probe per server.
 @MainActor
 final class DevServerStore: ObservableObject {
+    /// One store for the whole app: the window and the menubar popover
+    /// observe the same scan (and the same recents list).
+    static let shared = DevServerStore()
+
     @Published private(set) var devServers: [DevServer] = []
     /// Probe verdicts by `DevServer.id`; absent until a first probe lands.
     @Published private(set) var health: [String: ServerHealth] = [:]

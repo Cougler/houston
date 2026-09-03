@@ -3,8 +3,7 @@ import Foundation
 
 /// One-stop prompt submission from anywhere in Houston: ensure the
 /// project's terminal pane exists, type the prompt (submitted), and surface
-/// the main window on that project. Used by the web preview's inspector and
-/// the native App Inspector.
+/// the main window on that project. Used by the web preview's inspector.
 @MainActor
 enum PromptDelivery {
     static func send(_ prompt: String, toProject path: String) {

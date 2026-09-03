@@ -123,8 +123,6 @@ struct AnnotationRowView: View {
                ) {
                 parts.append(resolved.relativePath)
             }
-        } else if let axElement = item.axElement {
-            parts.append(axElement.app.name)
         }
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
@@ -186,7 +184,7 @@ private struct ExpandableTaskText: View {
 }
 
 /// The Saved Changes list rendered in the main window's right sheet —
-/// element comments queued from the web preview and the App Inspector,
+/// element comments queued from the web preview,
 /// sendable to this project's terminal one at a time or batched.
 struct AnnotationsSheetPanel: View {
     @ObservedObject var store: AnnotationStore
@@ -199,7 +197,7 @@ struct AnnotationsSheetPanel: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if store.items.isEmpty {
-                        Text("Inspect an element in a web preview or via the menubar's Inspect an App, then “Add to Tasks” — or type a task below.")
+                        Text("Inspect an element in a web preview, then “Add to Tasks” — or type a task below.")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 12)
@@ -367,7 +365,7 @@ struct AllTasksPanel: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if stores.isEmpty {
-                        Text("No tasks yet. Queue changes from a web preview, the App Inspector, or type one below.")
+                        Text("No tasks yet. Queue changes from a web preview, or type one below.")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 12)

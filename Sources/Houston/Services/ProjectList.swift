@@ -72,7 +72,7 @@ enum ProjectList {
 
     /// Every project Houston knows about: pinned projects plus scans of
     /// every parent folder, deduped by path (pinned wins), sorted by name.
-    /// For pickers living outside the sidebar (e.g. the App Inspector).
+    /// For pickers living outside the sidebar (e.g. the tasks sheet).
     static func allProjects(settings: HoustonSettings) -> [Project] {
         let fm = FileManager.default
         var seen = Set<String>()

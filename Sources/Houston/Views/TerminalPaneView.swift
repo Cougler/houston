@@ -165,6 +165,16 @@ final class TerminalPane: Identifiable, ObservableObject {
     /// closes this pane in response.
     var onShellExit: (() -> Void)?
 
+    /// Input sent before the surface exists, delivered on attach.
+    ///
+    /// A fresh pane has no surface until its view is mounted in a window
+    /// with a real size (`rebuildIfReady` bails while detached), and
+    /// `sendText` on a surfaceless view silently drops the bytes. Writing
+    /// a command into a just-created pane — the server page's Start — lost
+    /// the command and made the button need a second click.
+    private var pendingInput = ""
+    private var surfaceAttached = false
+
     init(projectPath: String, controller: TerminalController) {
         self.projectPath = projectPath
         let v = HoustonTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -190,6 +200,14 @@ final class TerminalPane: Identifiable, ObservableObject {
     /// the `text:\r` binding action, which writes the CR raw to the pty, the
     /// same byte a Return keypress produces.
     func send(_ text: String) {
+        guard surfaceAttached else {
+            pendingInput += text
+            return
+        }
+        deliver(text)
+    }
+
+    private func deliver(_ text: String) {
         guard text.hasSuffix("\n") else {
             view.sendText(text)
             return
@@ -224,6 +242,23 @@ extension TerminalPane: TerminalSurfaceCloseDelegate {
     /// Ghostty's close-surface callback — the shell exited on its own.
     func terminalDidClose(processAlive: Bool) {
         onShellExit?()
+    }
+}
+
+extension TerminalPane: TerminalSurfaceLifecycleDelegate {
+    /// The surface (and its shell) exists now — release anything queued.
+    /// The pty buffers the bytes until the shell reads them, so flushing
+    /// right at attach is safe.
+    func terminalDidAttachSurface(_ surface: TerminalSurface) {
+        surfaceAttached = true
+        guard !pendingInput.isEmpty else { return }
+        let queued = pendingInput
+        pendingInput = ""
+        deliver(queued)
+    }
+
+    func terminalDidDetachSurface() {
+        surfaceAttached = false
     }
 }
 

@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-/// Houston is a normal windowed app with a menubar item that toggles the
-/// window. The old menubar popover (a port of the Electron build's tabbed UI)
-/// was removed — the desktop window covers the same ground and having both
-/// meant two UIs over the same data.
+/// Houston is a normal windowed app with a menubar item. Left click shows
+/// the servers popover (`MenuBarPopover` — the same `ServerPanel` pages the
+/// window's sheet uses, not a second UI); right click gives the menu, which
+/// still opens the window. The old Electron-era tabbed popover stays gone.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate,
     UNUserNotificationCenterDelegate {
@@ -99,7 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         if isRightClick {
             showStatusMenu()
         } else {
-            MainWindowController.present()
+            // Left click shows the servers popover (the old menubar-app
+            // behaviour); the window is its header button, the right-click
+            // menu, or the Dock.
+            MenuBarPopover.shared.toggle(relativeTo: sender)
         }
     }
 
@@ -110,12 +113,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
             action: #selector(openWindow),
             keyEquivalent: ""
         ).target = self
-        menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem("Inspect an App…") {
-            // The status menu runs a modal tracking loop via performClick —
-            // defer window creation until it unwinds.
-            DispatchQueue.main.async { AXInspector.shared.begin() }
-        })
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem("Check for Updates…") {
             UpdateChecker.shared.checkInteractively()

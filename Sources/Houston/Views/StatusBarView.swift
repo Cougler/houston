@@ -24,7 +24,7 @@ struct StatusBarView: View {
     let onAuthenticateMCP: (String) -> Void
     let onLogoutMCP: (String) -> Void
     /// Item keys the settings menu has switched off ("model", "context",
-    /// "mcp", "peak", "limits").
+    /// "cost", "mcp", "peak", "limits").
     var hiddenItems: Set<String> = []
     /// Without a session the bar keeps its place but shows nothing — the
     /// layout never jumps when a session starts.
@@ -67,6 +67,9 @@ struct StatusBarView: View {
                                let fraction = snapshot.usedFraction {
                                 contextDropdown(fraction, compact: compact, meters: snapshot.meters)
                             }
+                            if shows("cost"), let cost = snapshot?.costUSD {
+                                costReadout(cost)
+                            }
                         }
                     }
                     if shows("mcp") {
@@ -89,8 +92,27 @@ struct StatusBarView: View {
         .padding(.bottom, 4)
     }
 
+    /// The live model's own account meters — the per-model weekly caps
+    /// (e.g. Fable's) whose label appears in the reported model name.
+    /// Session and all-models stay in the context dropdown; this is the
+    /// "how much of THIS model do I have left" readout, next to the
+    /// control that switches away from it.
+    private var currentModelMeters: [StatusLineSnapshot.Meter] {
+        guard let snapshot else { return [] }
+        return snapshot.meters.filter { meter in
+            !["five_hour", "seven_day"].contains(meter.key)
+                && snapshot.modelName.localizedCaseInsensitiveContains(meter.label)
+        }
+    }
+
     private var modelMenu: some View {
         Menu {
+            // Plain Text renders as a disabled item — exactly right for a
+            // readout row above the switch targets.
+            ForEach(currentModelMeters, id: \.key) { meter in
+                Text("\(meter.label) limit · \(Int(meter.pct))% used")
+            }
+            if !currentModelMeters.isEmpty { Divider() }
             ForEach(models, id: \.arg) { model in
                 Button(model.label) { onSelectModel(model.arg) }
             }
@@ -112,6 +134,15 @@ struct StatusBarView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Switch this session's model")
+    }
+
+    /// What this session's tokens would have cost at API prices — Claude's
+    /// own running total from the feed payload.
+    private func costReadout(_ cost: Double) -> some View {
+        Text(cost < 0.01 ? "<$0.01" : String(format: "$%.2f", cost))
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.textSecondary)
+            .help("Session cost so far (API-equivalent)")
     }
 
     /// The context meter, doubling as the dropdown for the account limit
@@ -217,6 +248,9 @@ struct StatusBarView: View {
                     .frame(width: 7, height: 7)
                 Text("MCP")
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(Theme.textSecondary)
             }
             .contentShape(Rectangle())

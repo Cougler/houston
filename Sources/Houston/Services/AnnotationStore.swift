@@ -2,9 +2,10 @@ import CryptoKit
 import Foundation
 
 /// One saved comment on an inspected element — a change the user wants
-/// eventually, without prompting the agent right now. The element is
-/// either a web-preview DOM capture or an App Inspector AX capture;
-/// exactly one of the two is set.
+/// eventually, without prompting the agent right now. The element is a
+/// web-preview DOM capture; nil means a manual entry. (The menubar App
+/// Inspector's AX captures were removed 2026-09-03 — entries saved by it
+/// keep their comment and parse as manual entries.)
 struct Annotation: Identifiable, Equatable {
     let id: String
     /// ISO-8601 creation timestamp.
@@ -17,13 +18,11 @@ struct Annotation: Identifiable, Equatable {
     /// The captured payload, verbatim — "send later" composes the same
     /// prompt the live flow would have, re-resolving files at send time.
     let element: InspectedElement?
-    let axElement: InspectedAXElement?
     let pageURL: String
 
-    /// "<button.cta>" or "button “Get Started”" — the row headline.
+    /// "<button.cta>" — the row headline.
     var summaryText: String {
         if let element { return "<\(element.summary)>" }
-        if let axElement { return axElement.summary }
         return ""
     }
 }
@@ -89,11 +88,6 @@ final class AnnotationStore: ObservableObject {
     func add(comment: String, element: InspectedElement) {
         guard let elementDict = Self.encode(element) else { return }
         add(comment: comment, payloadKey: "element", payload: elementDict, pageURL: element.pageURL)
-    }
-
-    func add(comment: String, axElement: InspectedAXElement) {
-        guard let elementDict = Self.encode(axElement) else { return }
-        add(comment: comment, payloadKey: "axElement", payload: elementDict, pageURL: "")
     }
 
     /// A manual entry typed straight into the changes page — no captured
@@ -178,11 +172,10 @@ final class AnnotationStore: ObservableObject {
         return raw.compactMap { dict in
             guard let id = dict["id"] as? String,
                   let comment = dict["comment"] as? String else { return nil }
-            // Both nil is legal: a manual entry typed into the changes page.
+            // Nil element is legal: a manual entry typed into the changes
+            // page (or an old App Inspector capture, kept as its comment).
             let element: InspectedElement? =
                 (dict["element"] as? [String: Any]).flatMap(decode)
-            let axElement: InspectedAXElement? =
-                (dict["axElement"] as? [String: Any]).flatMap(decode)
             return Annotation(
                 id: id,
                 created: dict["created"] as? String ?? "",
@@ -190,7 +183,6 @@ final class AnnotationStore: ObservableObject {
                 done: dict["done"] as? Bool ?? false,
                 sent: dict["sent"] as? Bool ?? false,
                 element: element,
-                axElement: axElement,
                 pageURL: dict["pageURL"] as? String ?? element?.pageURL ?? ""
             )
         }
@@ -208,7 +200,7 @@ final class AnnotationStore: ObservableObject {
 }
 
 /// One store instance per project, shared by every consumer (web preview
-/// windows, the App Inspector, the main window's header + sheet) — a save
+/// windows, the main window's header + sheet) — a save
 /// anywhere updates every badge immediately instead of waiting out the
 /// file poll.
 @MainActor

@@ -57,9 +57,12 @@ enum TaskSheetTab: String, CaseIterable {
 /// by us, while keyboard navigation and accessibility stay native.
 struct MainWindowView: View {
     @StateObject private var store = ActiveSessionStore()
-    @StateObject private var servers = DevServerStore()
-    @StateObject private var share = ShareProxyStore()
-    @StateObject private var relay = RelayTunnelStore()
+    // Shared, not @StateObject-owned: the menubar popover renders the same
+    // servers / share / relay state, and the proxy and relay tunnels must
+    // exist exactly once.
+    @ObservedObject private var servers = DevServerStore.shared
+    @ObservedObject private var share = ShareProxyStore.shared
+    @ObservedObject private var relay = RelayTunnelStore.shared
     @StateObject private var git = GitStatusStore()
     @StateObject private var statusFeed = StatusLineStore()
     @StateObject private var mcp = MCPStatusStore()
@@ -1527,6 +1530,7 @@ struct MainWindowView: View {
                 Menu("Items") {
                     Toggle("Model", isOn: statusBarItemBinding("model"))
                     Toggle("Context", isOn: statusBarItemBinding("context"))
+                    Toggle("Cost", isOn: statusBarItemBinding("cost"))
                     Toggle("MCP", isOn: statusBarItemBinding("mcp"))
                     Toggle("Peak Hours", isOn: statusBarItemBinding("peak"))
                     Toggle("Rate Limits", isOn: statusBarItemBinding("limits"))
@@ -1810,8 +1814,8 @@ struct MainWindowView: View {
         .modifier(HeaderButtonChrome(active: rightPanel == .git))
         .help("Git status")
 
-        // The project's tasks — the queue built from the web preview's and
-        // the App Inspector's "Add to Tasks", plus manual entries. Opens
+        // The project's tasks — the queue built from the web preview's
+        // "Add to Tasks", plus manual entries. Opens
         // nested under All Tasks, so Back in the sheet goes up.
         NotesHeaderButton(
             store: AnnotationStores.store(for: path),
@@ -2837,7 +2841,7 @@ private struct NotesHeaderButton: View {
         }
         .buttonStyle(.plain)
         .modifier(HeaderButtonChrome(active: active))
-        .help("Tasks saved from the web preview and App Inspector")
+        .help("Tasks saved from the web preview")
     }
 }
 
@@ -3101,6 +3105,10 @@ struct ServerPanel: View {
     var docked: Bool = false
     var onTogglePin: () -> Void = {}
     var onClose: () -> Void = {}
+    /// Set when the panel is a pushed page (the menubar popover) instead of
+    /// the right sheet: a back chevron leads the title and the sheet's
+    /// pin/close controls come off.
+    var onBack: (() -> Void)? = nil
 
     /// In-sheet drill-down: the project's change list replaces the server
     /// page until its back button pops it.
@@ -3139,7 +3147,7 @@ struct ServerPanel: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                pinCloseControls
+                if onBack == nil { pinCloseControls }
             }
             AnnotationsSheetPanel(
                 store: AnnotationStores.store(for: cwd),
@@ -3159,6 +3167,15 @@ struct ServerPanel: View {
             // Title lockup: health dot + name. The URL moved into the
             // "On this Mac" access row — one home per link.
             HStack(spacing: 8) {
+                if let onBack {
+                    ControlIconButton(
+                        systemName: "chevron.left",
+                        help: "Back to servers",
+                        bare: true,
+                        circleSize: 32,
+                        action: onBack
+                    )
+                }
                 HStack(spacing: 7) {
                     Circle()
                         .fill(healthColor)
@@ -3171,7 +3188,7 @@ struct ServerPanel: View {
                 .help(details)
                 Spacer(minLength: 8)
                 moreMenu
-                pinCloseControls
+                if onBack == nil { pinCloseControls }
             }
 
             // Sections separate by air alone.
@@ -3610,6 +3627,9 @@ struct OffServerPanel: View {
     var docked: Bool = false
     var onTogglePin: () -> Void = {}
     var onClose: () -> Void = {}
+    /// Pushed-page mode (the menubar popover): back chevron in, sheet
+    /// pin/close controls out. Mirrors `ServerPanel.onBack`.
+    var onBack: (() -> Void)? = nil
     /// Runs the finished command line in the project's terminal.
     var onStart: (String) -> Void = { _ in }
 
@@ -3621,6 +3641,15 @@ struct OffServerPanel: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
+                    if let onBack {
+                        ControlIconButton(
+                            systemName: "chevron.left",
+                            help: "Back to servers",
+                            bare: true,
+                            circleSize: 32,
+                            action: onBack
+                        )
+                    }
                     HStack(spacing: 7) {
                         Circle()
                             .fill(Theme.textSecondary)
@@ -3632,20 +3661,22 @@ struct OffServerPanel: View {
                     }
                     .help("Not running\n\(recent.projectPath)")
                     Spacer(minLength: 8)
-                    HStack(spacing: 4) {
-                        ControlIconButton(
-                            systemName: docked ? "pin.slash" : "pin",
-                            help: docked ? "Float over the content" : "Dock beside the content",
-                            bare: true,
-                            circleSize: 32,
-                            action: onTogglePin
-                        )
-                        ControlIconButton(
-                            systemName: "xmark",
-                            help: "Close",
-                            circleSize: 32,
-                            action: onClose
-                        )
+                    if onBack == nil {
+                        HStack(spacing: 4) {
+                            ControlIconButton(
+                                systemName: docked ? "pin.slash" : "pin",
+                                help: docked ? "Float over the content" : "Dock beside the content",
+                                bare: true,
+                                circleSize: 32,
+                                action: onTogglePin
+                            )
+                            ControlIconButton(
+                                systemName: "xmark",
+                                help: "Close",
+                                circleSize: 32,
+                                action: onClose
+                            )
+                        }
                     }
                 }
                 Text("Not running · was localhost:" + String(recent.port))
@@ -3925,7 +3956,7 @@ private struct ChangeListCard: View {
             trailing: .chevron,
             action: action
         )
-        .help("Tasks saved from the web preview and App Inspector")
+        .help("Tasks saved from the web preview")
     }
 
     private var subtitle: String {

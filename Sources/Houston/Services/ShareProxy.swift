@@ -16,6 +16,10 @@ import Network
 /// share UI reserves its slot.
 @MainActor
 final class ShareProxyStore: ObservableObject {
+    /// One proxy for the whole app — a second instance would race for the
+    /// listen port. The window and the menubar popover share this one.
+    static let shared = ShareProxyStore()
+
     /// The listener is up and accepting.
     @Published private(set) var running = false
     /// The port actually bound — 80, or the fallback when 80 was busy.

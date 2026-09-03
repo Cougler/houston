@@ -19,6 +19,10 @@ import Network
 /// re-keys the relay's cookie and locks old viewers out).
 @MainActor
 final class RelayTunnelStore: ObservableObject {
+    /// One tunnel manager for the whole app — a second instance would park
+    /// its own duplicate relay connections. Shared by the window and the
+    /// menubar popover.
+    static let shared = RelayTunnelStore()
 
     enum ProjectState: Equatable {
         case connecting

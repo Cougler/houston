@@ -1,8 +1,8 @@
 import Foundation
 
-/// Prompt composition for saved annotations, handling both kinds: web
-/// captures re-resolve their files at send time (they may have moved since
-/// the save); AX captures compose the locate-by-strings prompt.
+/// Prompt composition for saved annotations: web captures re-resolve their
+/// files at send time (they may have moved since the save); manual entries
+/// send their comment as-is.
 enum AnnotationPrompts {
 
     /// No trailing newline — `PromptDelivery` appends it.
@@ -18,9 +18,6 @@ enum AnnotationPrompts {
                 scriptFile: script,
                 instruction: annotation.comment
             )
-        }
-        if let axElement = annotation.axElement {
-            return AXPromptComposer.compose(element: axElement, instruction: annotation.comment)
         }
         return annotation.comment
     }
