@@ -39,6 +39,12 @@ enum RightPanel: Equatable {
     case server(String)
 }
 
+/// Which terminal row the rename card is editing.
+struct RenameTarget: Equatable {
+    let path: String
+    let tabID: UUID
+}
+
 /// The tasks sheet's two tabs: the cross-project task lists and the
 /// Tracked reminders (formerly their own panel).
 enum TaskSheetTab: String, CaseIterable {
@@ -103,6 +109,8 @@ struct MainWindowView: View {
     @State private var showStatusPrompt = false
     /// The searchable terminal-theme popover, opened from the footer gear.
     @State private var showThemePicker = false
+    /// The terminal row being renamed inline in the sidebar; nil = none.
+    @State private var renameTarget: RenameTarget?
     /// Whether Houston's hooks feed notifications (mirrors settings.json).
     @State private var notifyInstalled = NotifyFeed.isInstalled
     /// Consent dialog for installing the notification hooks.
@@ -184,22 +192,9 @@ struct MainWindowView: View {
         .overlay(alignment: .topLeading) { railFlyoutLayer }
         .overlay(alignment: .bottomLeading) { themePickerLayer }
         .overlay(alignment: .topTrailing) { rightSheetLayer }
-        .overlay {
-            if showOnboarding {
-                OnboardingView {
-                    withAnimation(.easeOut(duration: 0.25)) { showOnboarding = false }
-                    updateSettings { $0.onboardingSeen = true }
-                    // Once the overlay has faded onto the aligned empty-state
-                    // system, slide the sidebar in around it.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                        withAnimation(.spring(duration: 0.6, bounce: 0.12)) {
-                            sidebarRevealed = true
-                        }
-                    }
-                }
-                .transition(.opacity)
-            }
-        }
+        // One overlay link, contents extracted — inline closures here push
+        // the root body past the type-checker's limit.
+        .overlay { modalLayer }
         // The titlebar region is a safe area, so without this the whole
         // layout starts ~30pt down: the split divider stopped short of the
         // top and every sidebar section sat lower than designed. Ignoring it
@@ -282,6 +277,11 @@ struct MainWindowView: View {
                 select(.project(path))
             }
         }
+        // Keyboard shortcuts, routed from MainMenu — the menu owns no state,
+        // so anything needing the selection lands here. Hung off a background
+        // view: seven more onReceive links on the root chain pushed the
+        // type-checker past its time limit.
+        .background(shortcutListeners)
         // Clicking into a terminal pane dismisses a floating sheet — ghostty
         // eats the click, so it arrives as a notification instead.
         .onReceive(NotificationCenter.default.publisher(for: .houstonTerminalClicked)) { _ in
@@ -479,7 +479,28 @@ struct MainWindowView: View {
                     if let target = entry.selection { select(target) }
                 },
                 // Sidebar dead space is "outside" too.
-                onEmptyClick: { closeFloatingSheet() }
+                onEmptyClick: { closeFloatingSheet() },
+                // Double-clicking a terminal row renames it inline. Deferred
+                // past the click cycle: the second click's select() has just
+                // focused the terminal, and starting the edit mid-event let
+                // that focus land AFTER the field's claim and kill the edit.
+                onRowDoubleClick: { entry in
+                    guard case let .row(id, _) = entry, renameTarget == nil
+                    else { return }
+                    let target: RenameTarget? = switch id {
+                    case let .project(path):
+                        (terminals.tabs[path]?.first?.id)
+                            .map { RenameTarget(path: path, tabID: $0) }
+                    case let .shell(path, tabID):
+                        RenameTarget(path: path, tabID: tabID)
+                    case .server:
+                        nil
+                    }
+                    guard let target else { return }
+                    DispatchQueue.main.async {
+                        renameTerminal(path: target.path, tabID: target.tabID)
+                    }
+                }
             )
             // NSViewRepresentable has no intrinsic content size, so without
             // this SwiftUI hands it ~zero height and the whole column collapses
@@ -1342,18 +1363,60 @@ struct MainWindowView: View {
         store.settingsChanged()
     }
 
-    /// Prompts for a terminal row's new name; empty input restores the
-    /// directory-based default.
+    /// Begins renaming a terminal row inline in the sidebar — the row's
+    /// name becomes an editable field prefilled with the current name.
     private func renameTerminal(path: String, tabID: UUID) {
-        let current = terminals.tabs[path]?
-            .first { $0.id == tabID }?.customName ?? ""
-        guard let name = promptForText(
-            title: "Rename Terminal",
-            message: "Shown in the sidebar. Leave empty to restore the default name.",
-            placeholder: current.isEmpty ? self.name(of: path) : current
-        ) else { return }
-        terminals.renameTab(path: path, tabID: tabID, to: name)
+        renameTarget = RenameTarget(path: path, tabID: tabID)
     }
+
+    /// The row's field finished: commit (result) or cancel (nil), then hand
+    /// the keyboard back to the selected terminal — the field stole it.
+    private func finishInlineRename(path: String, tabID: UUID, result: String?) {
+        guard renameTarget == RenameTarget(path: path, tabID: tabID) else { return }
+        renameTarget = nil
+        if let result {
+            terminals.renameTab(
+                path: path,
+                tabID: tabID,
+                to: result.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        if let selPath = selection?.projectPath {
+            terminals.focusTerminal(path: selPath, tab: selection?.tabID)
+        }
+    }
+
+    /// The name a row's rename field starts from: custom name if set, else
+    /// the default it displays.
+    private func currentRowName(path: String, tabID: UUID) -> String {
+        let custom = terminals.tabs[path]?
+            .first { $0.id == tabID }?.customName ?? ""
+        return custom.isEmpty ? name(of: path) : custom
+    }
+
+    /// The topmost overlay tier: the first-launch onboarding takeover.
+    private var modalLayer: some View {
+        onboardingLayer
+    }
+
+    @ViewBuilder
+    private var onboardingLayer: some View {
+        if showOnboarding {
+            OnboardingView {
+                withAnimation(.easeOut(duration: 0.25)) { showOnboarding = false }
+                updateSettings { $0.onboardingSeen = true }
+                // Once the overlay has faded onto the aligned empty-state
+                // system, slide the sidebar in around it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    withAnimation(.spring(duration: 0.6, bounce: 0.12)) {
+                        sidebarRevealed = true
+                    }
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
 
     /// Clones a repo into the projects folder — visibly, in the home shell,
     /// so credential prompts and progress land where the user can see them —
@@ -2312,8 +2375,12 @@ struct MainWindowView: View {
             switch id {
             case let .project(path):
                 let active = terminals.hasPane(for: path)
+                let mainTab = terminals.tabs[path]?.first?.id
+                let renaming = mainTab != nil
+                    && renameTarget == mainTab.map { RenameTarget(path: path, tabID: $0) }
                 SidebarRow(
-                    name: title,
+                    name: renaming
+                        ? currentRowName(path: path, tabID: mainTab!) : title,
                     agent: primaryAgent(path: path),
                     hasTerminal: active,
                     isProject: !active && ProjectKindCache.isProject(path),
@@ -2321,18 +2388,29 @@ struct MainWindowView: View {
                     needsAttention: notify.hasAttention(path: path),
                     hovered: hovered,
                     selected: selection == id,
-                    onClose: { closeTerminal(path) }
+                    onClose: { closeTerminal(path) },
+                    renaming: renaming,
+                    onRename: { result in
+                        if let mainTab {
+                            finishInlineRename(path: path, tabID: mainTab, result: result)
+                        }
+                    }
                 )
             case let .shell(path, tabID):
+                let renaming = renameTarget == RenameTarget(path: path, tabID: tabID)
                 SidebarRow(
-                    name: title,
+                    name: renaming ? currentRowName(path: path, tabID: tabID) : title,
                     agent: shellAgent(path: path, tab: tabID),
                     hasTerminal: true,
                     gitStatus: git.rowStatuses[path] ?? .none,
                     needsAttention: notify.hasAttention(path: path, tab: tabID),
                     hovered: hovered,
                     selected: selection == id,
-                    onClose: { terminals.closeTab(path: path, tabID: tabID) }
+                    onClose: { terminals.closeTab(path: path, tabID: tabID) },
+                    renaming: renaming,
+                    onRename: { result in
+                        finishInlineRename(path: path, tabID: tabID, result: result)
+                    }
                 )
             case let .server(sid):
                 if let server = servers.devServers.first(where: { $0.id == sid }) {
@@ -2382,6 +2460,8 @@ struct MainWindowView: View {
             let selected = selection == id
             switch id {
             case let .project(path):
+                let renaming = renameTarget?.path == path
+                    && renameTarget?.tabID == terminals.tabs[path]?.first?.id
                 return [
                     title,
                     terminals.hasPane(for: path) ? "t" : "-",
@@ -2391,12 +2471,14 @@ struct MainWindowView: View {
                     notify.hasAttention(path: path) ? "!" : "-",
                     selected ? "s" : "-",
                     hovered ? "h" : "-",
+                    renaming ? "r" : "-",
                 ].joined(separator: "|")
             case let .shell(path, tab):
                 let agent = shellAgent(path: path, tab: tab)?.label ?? "-"
                 let status = String(describing: git.rowStatuses[path] ?? .none)
                 let bang = notify.hasAttention(path: path, tab: tab) ? "!" : "-"
-                return "sh:\(title)|\(tab)|\(agent)|\(status)|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")"
+                let renaming = renameTarget == RenameTarget(path: path, tabID: tab)
+                return "sh:\(title)|\(tab)|\(agent)|\(status)|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")|\(renaming ? "r" : "-")"
             case let .server(sid):
                 let live = servers.devServers.first { $0.id == sid }
                 let port = live.map { String($0.port) }
@@ -2446,14 +2528,22 @@ struct MainWindowView: View {
         let menu = NSMenu()
         switch id {
         case let .shell(path, tabID):
-            menu.addItem(ClosureMenuItem("New Terminal Here") {
+            // Key equivalents here are labels: the main menu dispatches the
+            // actual shortcuts, the context menu just advertises them.
+            let newHere = ClosureMenuItem("New Terminal Here") {
                 if let tab = terminals.newTab(in: path) {
                     select(.shell(path: path, tab: tab.id))
                 }
-            })
-            menu.addItem(ClosureMenuItem("Rename…") {
+            }
+            newHere.keyEquivalent = "d"
+            newHere.keyEquivalentModifierMask = [.command]
+            menu.addItem(newHere)
+            let rename = ClosureMenuItem("Rename…") {
                 renameTerminal(path: path, tabID: tabID)
-            })
+            }
+            rename.keyEquivalent = "r"
+            rename.keyEquivalentModifierMask = [.command]
+            menu.addItem(rename)
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Close Terminal") {
                 terminals.closeTab(path: path, tabID: tabID)
@@ -2464,17 +2554,28 @@ struct MainWindowView: View {
             })
         case let .project(path):
             if terminals.hasPane(for: path) {
-                menu.addItem(ClosureMenuItem("Start Claude") { terminals.start(.claude, in: path) })
-                menu.addItem(ClosureMenuItem("New Terminal Here") {
+                let start = ClosureMenuItem("Start Claude") {
+                    terminals.start(.claude, in: path)
+                }
+                start.keyEquivalent = "\r"
+                start.keyEquivalentModifierMask = [.command]
+                menu.addItem(start)
+                let newHere = ClosureMenuItem("New Terminal Here") {
                     if let tab = terminals.newTab(in: path) {
                         select(.shell(path: path, tab: tab.id))
                     }
-                })
-                menu.addItem(ClosureMenuItem("Rename…") {
+                }
+                newHere.keyEquivalent = "d"
+                newHere.keyEquivalentModifierMask = [.command]
+                menu.addItem(newHere)
+                let rename = ClosureMenuItem("Rename…") {
                     if let tabID = terminals.tabs[path]?.first?.id {
                         renameTerminal(path: path, tabID: tabID)
                     }
-                })
+                }
+                rename.keyEquivalent = "r"
+                rename.keyEquivalentModifierMask = [.command]
+                menu.addItem(rename)
                 menu.addItem(.separator())
                 menu.addItem(ClosureMenuItem("Close Terminal") { closeTerminal(path) })
             } else {
@@ -2566,6 +2667,93 @@ struct MainWindowView: View {
     /// Rows that may hold the selection, in sidebar display order: something
     /// is running in them.
     private var selectablePaths: [String] { terminalPaths }
+
+    /// Invisible receiver for the menu's shortcut notifications.
+    private var shortcutListeners: some View {
+        Color.clear
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonNewTerminalTab)
+            ) { _ in newTerminalFromShortcut() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonCycleTerminal)
+            ) { note in cycleTerminal(by: note.userInfo?["delta"] as? Int ?? 1) }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonSelectTerminalIndex)
+            ) { note in
+                if let index = note.userInfo?["index"] as? Int {
+                    let rows = orderedTerminalRows
+                    if rows.indices.contains(index) { select(rows[index]) }
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonToggleSidebar)
+            ) { _ in toggleSidebarCollapse() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonToggleGitPanel)
+            ) { _ in toggleRightPanel(.git) }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonLaunchAgent)
+            ) { _ in
+                if let path = selection?.projectPath {
+                    terminals.start(launchAgent, in: path)
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonOpenFolder)
+            ) { _ in addFolder() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonRenameTerminal)
+            ) { _ in renameSelectedTerminal() }
+    }
+
+    /// ⌘R: rename whichever terminal row is selected — a nested shell
+    /// renames itself, a project row renames its main terminal.
+    private func renameSelectedTerminal() {
+        switch selection {
+        case let .shell(path, tabID):
+            renameTerminal(path: path, tabID: tabID)
+        case let .project(path):
+            if let tabID = terminals.tabs[path]?.first?.id {
+                renameTerminal(path: path, tabID: tabID)
+            }
+        default:
+            break
+        }
+    }
+
+    /// Every terminal row in sidebar display order — each project's main
+    /// terminal, then its nested shells. ⌘1–⌘9 and ⌘⌥↑/↓ walk this list.
+    private var orderedTerminalRows: [SidebarSelection] {
+        terminalPaths.flatMap { path -> [SidebarSelection] in
+            guard let tabs = terminals.tabs[path], !tabs.isEmpty else { return [] }
+            return [.project(path)]
+                + tabs.dropFirst().map { .shell(path: path, tab: $0.id) }
+        }
+    }
+
+    /// ⌘T: another shell in the selected project's directory (the sidebar's
+    /// nested "name · N" row), selected and focused. With no terminal open
+    /// yet the same key opens the project's first one.
+    private func newTerminalFromShortcut() {
+        guard let path = selection?.projectPath else { return }
+        if terminals.hasPane(for: path), let tab = terminals.newTab(in: path) {
+            select(.shell(path: path, tab: tab.id))
+        } else {
+            select(.project(path))
+        }
+    }
+
+    /// ⌘⌥↑/↓: step through `orderedTerminalRows`, wrapping at the ends.
+    private func cycleTerminal(by delta: Int) {
+        let rows = orderedTerminalRows
+        guard !rows.isEmpty else { return }
+        guard let selection, let current = rows.firstIndex(of: selection) else {
+            select(rows[0])
+            return
+        }
+        let next = ((current + delta) % rows.count + rows.count) % rows.count
+        select(rows[next])
+    }
 
     private func closeTerminal(_ path: String) {
         // Header X on a nested shell ends just that tab; the tab-prune
@@ -2981,6 +3169,17 @@ struct SidebarRow: View {
     /// Close action for a live terminal row — while hovered, an ✕ takes the
     /// terminal icon's place.
     var onClose: (() -> Void)? = nil
+    /// Inline rename: the name becomes an editable field prefilled with the
+    /// current name. Return/blur commits, Esc cancels; committing an empty
+    /// string restores the default name.
+    var renaming: Bool = false
+    /// Called once when editing ends — the new name, or nil for cancel.
+    var onRename: ((String?) -> Void)? = nil
+
+    @State private var renameDraft = ""
+    /// Guards the blur-commit: once Return or Esc has answered, the focus
+    /// change they cause must not answer again.
+    @State private var renameDone = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -3001,10 +3200,25 @@ struct SidebarRow: View {
                     .frame(width: 16, height: 16)
                     .help(live ? "Terminal open — see Terminals" : "")
             }
-            Text(name)
-                .font(.system(size: nested ? 12 : 13))
-                .foregroundStyle(nested ? Theme.textSecondary : Theme.text)
-                .lineLimit(1)
+            if renaming {
+                InlineRenameField(
+                    text: $renameDraft,
+                    fontSize: nested ? 12 : 13,
+                    onSubmit: { finishRename(renameDraft) },
+                    onCancel: { finishRename(nil) },
+                    onBlur: { finishRename(renameDraft) }
+                )
+                .frame(height: 18)
+                .onAppear {
+                    renameDraft = name
+                    renameDone = false
+                }
+            } else {
+                Text(name)
+                    .font(.system(size: nested ? 12 : 13))
+                    .foregroundStyle(nested ? Theme.textSecondary : Theme.text)
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
             if let diff, !diffTooltipOnly {
                 HStack(spacing: 3) {
@@ -3016,7 +3230,7 @@ struct SidebarRow: View {
                 .font(.system(size: 9, weight: .medium))
                 .help("Uncommitted line changes")
             }
-            if hasTerminal, hovered, let onClose {
+            if hasTerminal, hovered, !renaming, let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
@@ -3036,6 +3250,99 @@ struct SidebarRow: View {
         .help(diffHelp)
     }
 
+    private func finishRename(_ result: String?) {
+        guard !renameDone else { return }
+        renameDone = true
+        onRename?(result)
+    }
+}
+
+/// The sidebar's inline rename editor. AppKit-backed because SwiftUI's
+/// `.plain` text field still lets the field editor draw its focus ring and
+/// background box — this one is truly bare: no border, no background, no
+/// focus ring, just the row's text selected with a blinking caret.
+private struct InlineRenameField: NSViewRepresentable {
+    @Binding var text: String
+    let fontSize: CGFloat
+    var onSubmit: () -> Void
+    var onCancel: () -> Void
+    var onBlur: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: fontSize)
+        field.textColor = NSColor(Theme.text)
+        field.lineBreakMode = .byTruncatingTail
+        field.delegate = context.coordinator
+        // Claim focus once mounted; the row was just re-hosted so the
+        // window may not exist yet on the first pass. selectAll leaves the
+        // whole name highlighted with the live caret, Finder-style.
+        func grabFocus(attempts: Int) {
+            if let window = field.window, window.makeFirstResponder(field) {
+                field.currentEditor()?.selectAll(nil)
+                return
+            }
+            guard attempts > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                grabFocus(attempts: attempts - 1)
+            }
+        }
+        DispatchQueue.main.async { grabFocus(attempts: 10) }
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        // Don't fight the user's typing — only push the binding's value
+        // while the field isn't being edited.
+        if field.currentEditor() == nil, field.stringValue != text {
+            field.stringValue = text
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: InlineRenameField
+
+        init(_ parent: InlineRenameField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy selector: Selector
+        ) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertNewline(_:)):
+                parent.onSubmit()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                parent.onCancel()
+                return true
+            default:
+                return false
+            }
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            parent.onBlur()
+        }
+    }
+}
+
+extension SidebarRow {
     /// The leading status avatar: git state as a translucent wash inside a
     /// solid ring of the same color, the terminal glyph in the solid color
     /// centered on top, and — when an agent is running — its logo as a

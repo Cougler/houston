@@ -125,11 +125,28 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         // Font, cursor style and padding ride in the base configuration so
         // they hold across any theme; colors come from the theme, which the
         // surface resolves per light/dark appearance automatically.
-        let base = TerminalConfiguration()
+        var base = TerminalConfiguration()
             .fontSize(13)
             .cursorStyle(.bar)
             .windowPaddingX(24)
             .windowPaddingY(12)
+        // Ghostty ships default ⌘ keybinds (new tab, clear, goto-tab 1–9,
+        // fullscreen, split focus) and `performKeyEquivalent` feeds a bound
+        // key to the surface BEFORE the menu bar sees it — which silently
+        // ate Houston's shortcuts whenever a terminal had focus (always,
+        // since selection focuses the terminal). Unbind everything
+        // Houston's menu owns; the actions were no-ops in an embedded
+        // surface anyway.
+        let houstonOwned = [
+            "super+t", "super+d", "super+shift+d", "super+k", "super+enter",
+            "super+r", "super+alt+up", "super+alt+down",
+            "super+physical:one", "super+physical:two", "super+physical:three",
+            "super+physical:four", "super+physical:five", "super+physical:six",
+            "super+physical:seven", "super+physical:eight", "super+physical:nine",
+        ]
+        for trigger in houstonOwned {
+            base = base.custom("keybind", "\(trigger)=unbind")
+        }
         let c = TerminalController(
             configSource: .none,
             theme: Self.resolvedTheme(named: HoustonSettings.read().terminalTheme),
@@ -249,6 +266,12 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     /// Writes into the project's focused pane (used by the skills panel).
     func send(_ text: String, to projectPath: String) {
         actionPane(in: projectPath)?.send(text)
+    }
+
+    /// ⌘K — Ghostty's clear_screen on the displayed project's focused pane.
+    func clearFocused() {
+        guard let path = activeProjectPath else { return }
+        actionPane(in: path)?.view.performBindingAction("clear_screen")
     }
 
     // MARK: - Splits
@@ -443,7 +466,7 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             self?.split(path: path, vertical: true)
         }
         right.keyEquivalent = "d"
-        right.keyEquivalentModifierMask = [.command]
+        right.keyEquivalentModifierMask = [.command, .option]
         menu.addItem(right)
         let down = ClosureMenuItem("Split Down") { [weak self] in
             self?.split(path: path, vertical: false)

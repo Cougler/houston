@@ -17,6 +17,25 @@ extension Notification.Name {
     /// clicks before SwiftUI sees them, so dismissing the floating right
     /// sheet on terminal clicks needs this side channel.
     static let houstonTerminalClicked = Notification.Name("HoustonTerminalClicked")
+
+    // Keyboard shortcuts (MainMenu) → the window, which owns the selection
+    // these act on.
+    /// ⌘T — a new terminal tab in the selected project's directory.
+    static let houstonNewTerminalTab = Notification.Name("HoustonNewTerminalTab")
+    /// ⌘⌥↑ / ⌘⌥↓ — step through the open terminals (`userInfo["delta"]`).
+    static let houstonCycleTerminal = Notification.Name("HoustonCycleTerminal")
+    /// ⌘1–⌘9 — jump straight to the Nth terminal (`userInfo["index"]`, 0-based).
+    static let houstonSelectTerminalIndex = Notification.Name("HoustonSelectTerminalIndex")
+    /// ⌘B — collapse/expand the sidebar.
+    static let houstonToggleSidebar = Notification.Name("HoustonToggleSidebar")
+    /// ⌘G — the Git sheet.
+    static let houstonToggleGitPanel = Notification.Name("HoustonToggleGitPanel")
+    /// ⌘↩ — launch the header's selected agent in the current project.
+    static let houstonLaunchAgent = Notification.Name("HoustonLaunchAgent")
+    /// ⌘O — the sidebar footer's "Open Folder…" picker.
+    static let houstonOpenFolder = Notification.Name("HoustonOpenFolder")
+    /// ⌘R — rename the selected terminal's sidebar row.
+    static let houstonRenameTerminal = Notification.Name("HoustonRenameTerminal")
 }
 
 /// Houston's settings. Unknown keys in the JSON are preserved on write.

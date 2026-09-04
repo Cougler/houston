@@ -97,6 +97,8 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
     /// Fired when a left click lands below/between the rows — the sidebar's
     /// dead space. Used to dismiss the floating right sheet.
     var onEmptyClick: (() -> Void)? = nil
+    /// Fired on a double click on a selectable row — inline rename.
+    var onRowDoubleClick: ((SidebarEntry) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -130,6 +132,9 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
         }
         table.onRowClick = { [weak coordinator = context.coordinator] row in
             coordinator?.rowClicked(row)
+        }
+        table.onRowDoubleClick = { [weak coordinator = context.coordinator] row in
+            coordinator?.rowDoubleClicked(row)
         }
         table.onEmptyClick = { [weak coordinator = context.coordinator] in
             coordinator?.parent.onEmptyClick?()
@@ -387,6 +392,13 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
             guard entry.isSelectable else { return }
             parent.onRowClick?(entry)
         }
+
+        func rowDoubleClicked(_ row: Int) {
+            guard entries.indices.contains(row) else { return }
+            let entry = entries[row]
+            guard entry.isSelectable else { return }
+            parent.onRowDoubleClick?(entry)
+        }
     }
 }
 
@@ -403,6 +415,8 @@ private final class HoverTableView: NSTableView {
     var onRowClick: ((Int) -> Void)?
     /// A click that hits no row at all — the space below the last row.
     var onEmptyClick: (() -> Void)?
+    /// The second click of a double click on a row.
+    var onRowDoubleClick: ((Int) -> Void)?
     private var tracking: NSTrackingArea?
 
     override func mouseDown(with event: NSEvent) {
@@ -412,6 +426,7 @@ private final class HoverTableView: NSTableView {
         let point = convert(event.locationInWindow, from: nil)
         let row = self.row(at: point)
         if row >= 0 { onRowClick?(row) } else { onEmptyClick?() }
+        if event.clickCount == 2, row >= 0 { onRowDoubleClick?(row) }
     }
 
     override func updateTrackingAreas() {

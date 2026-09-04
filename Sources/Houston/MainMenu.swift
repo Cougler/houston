@@ -36,6 +36,18 @@ enum MainMenu {
         appItem.submenu = appMenu
         main.addItem(appItem)
 
+        // File menu — the sidebar footer's folder picker, from the keyboard.
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        let openFolder = ClosureMenuItem("Open Folder…") {
+            NotificationCenter.default.post(name: .houstonOpenFolder, object: nil)
+        }
+        openFolder.keyEquivalent = "o"
+        openFolder.keyEquivalentModifierMask = [.command]
+        fileMenu.addItem(openFolder)
+        fileItem.submenu = fileMenu
+        main.addItem(fileItem)
+
         // Edit menu — the reason this file exists.
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
@@ -60,14 +72,51 @@ enum MainMenu {
         main.addItem(editItem)
 
         // Shell menu — split commands target the focused pane of the visible
-        // project (Ghostty's shortcuts).
+        // project (Ghostty's shortcuts). Everything here goes through
+        // notifications or the shared manager: the menu owns no state.
         let shellItem = NSMenuItem()
         let shellMenu = NSMenu(title: "Shell")
+        let newTab = ClosureMenuItem("Duplicate Terminal") {
+            NotificationCenter.default.post(name: .houstonNewTerminalTab, object: nil)
+        }
+        newTab.keyEquivalent = "d"
+        newTab.keyEquivalentModifierMask = [.command]
+        shellMenu.addItem(newTab)
+        // ⌘T does the same — hidden alias so browser-tab muscle memory works.
+        let newTabAlias = ClosureMenuItem("New Terminal in Project") {
+            NotificationCenter.default.post(name: .houstonNewTerminalTab, object: nil)
+        }
+        newTabAlias.keyEquivalent = "t"
+        newTabAlias.keyEquivalentModifierMask = [.command]
+        newTabAlias.isHidden = true
+        newTabAlias.allowsKeyEquivalentWhenHidden = true
+        shellMenu.addItem(newTabAlias)
+        let launch = ClosureMenuItem("Launch Agent") {
+            NotificationCenter.default.post(name: .houstonLaunchAgent, object: nil)
+        }
+        launch.keyEquivalent = "\r"
+        launch.keyEquivalentModifierMask = [.command]
+        shellMenu.addItem(launch)
+        let clear = ClosureMenuItem("Clear Terminal") {
+            TerminalSessionManager.shared.clearFocused()
+        }
+        clear.keyEquivalent = "k"
+        clear.keyEquivalentModifierMask = [.command]
+        shellMenu.addItem(clear)
+        let rename = ClosureMenuItem("Rename Terminal…") {
+            NotificationCenter.default.post(name: .houstonRenameTerminal, object: nil)
+        }
+        rename.keyEquivalent = "r"
+        rename.keyEquivalentModifierMask = [.command]
+        shellMenu.addItem(rename)
+        shellMenu.addItem(.separator())
+        // ⌘D moved to Duplicate Terminal (2026-09-04) — splits keep the
+        // Ghostty-style D mnemonic behind ⌥.
         let splitRight = ClosureMenuItem("Split Right") {
             TerminalSessionManager.shared.split(vertical: true)
         }
         splitRight.keyEquivalent = "d"
-        splitRight.keyEquivalentModifierMask = [.command]
+        splitRight.keyEquivalentModifierMask = [.command, .option]
         shellMenu.addItem(splitRight)
         let splitDown = ClosureMenuItem("Split Down") {
             TerminalSessionManager.shared.split(vertical: false)
@@ -82,8 +131,63 @@ enum MainMenu {
         closeSplit.keyEquivalent = "w"
         closeSplit.keyEquivalentModifierMask = [.command, .shift]
         shellMenu.addItem(closeSplit)
+        shellMenu.addItem(.separator())
+        let nextTerminal = ClosureMenuItem("Next Terminal") {
+            NotificationCenter.default.post(
+                name: .houstonCycleTerminal, object: nil, userInfo: ["delta": 1]
+            )
+        }
+        nextTerminal.keyEquivalent = String(
+            Character(UnicodeScalar(NSDownArrowFunctionKey)!)
+        )
+        nextTerminal.keyEquivalentModifierMask = [.command, .option]
+        shellMenu.addItem(nextTerminal)
+        let prevTerminal = ClosureMenuItem("Previous Terminal") {
+            NotificationCenter.default.post(
+                name: .houstonCycleTerminal, object: nil, userInfo: ["delta": -1]
+            )
+        }
+        prevTerminal.keyEquivalent = String(
+            Character(UnicodeScalar(NSUpArrowFunctionKey)!)
+        )
+        prevTerminal.keyEquivalentModifierMask = [.command, .option]
+        shellMenu.addItem(prevTerminal)
+        // ⌘1–⌘9 jump straight to the Nth terminal row. Hidden — nine list
+        // items would drown the menu — but hidden items only fire their key
+        // equivalents with the explicit opt-in flag.
+        for n in 1...9 {
+            let jump = ClosureMenuItem("Terminal \(n)") {
+                NotificationCenter.default.post(
+                    name: .houstonSelectTerminalIndex, object: nil,
+                    userInfo: ["index": n - 1]
+                )
+            }
+            jump.keyEquivalent = String(n)
+            jump.keyEquivalentModifierMask = [.command]
+            jump.isHidden = true
+            jump.allowsKeyEquivalentWhenHidden = true
+            shellMenu.addItem(jump)
+        }
         shellItem.submenu = shellMenu
         main.addItem(shellItem)
+
+        // View menu — sidebar + the right sheet, from the keyboard.
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let toggleSidebar = ClosureMenuItem("Toggle Sidebar") {
+            NotificationCenter.default.post(name: .houstonToggleSidebar, object: nil)
+        }
+        toggleSidebar.keyEquivalent = "b"
+        toggleSidebar.keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(toggleSidebar)
+        let gitSheet = ClosureMenuItem("Git") {
+            NotificationCenter.default.post(name: .houstonToggleGitPanel, object: nil)
+        }
+        gitSheet.keyEquivalent = "g"
+        gitSheet.keyEquivalentModifierMask = [.command]
+        viewMenu.addItem(gitSheet)
+        viewItem.submenu = viewMenu
+        main.addItem(viewItem)
 
         // Settings menu — the footer gear's options, reachable from the menu
         // bar. Rebuilt on every open so it always reflects the settings file.
