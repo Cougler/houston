@@ -10,7 +10,14 @@ enum PromptDelivery {
         let manager = TerminalSessionManager.shared
         // send() is a silent no-op without a pane — create the shell first.
         if !manager.hasPane(for: path) { manager.pane(for: path) }
-        manager.send(prompt + "\n", to: path)
+        if manager.agents[path] == nil {
+            // No agent in the pane — the prompt would land at the shell
+            // prompt as plain text. Launch claude with it as the argument.
+            let quoted = "'" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            manager.send("claude " + quoted + "\n", to: path)
+        } else {
+            manager.send(prompt + "\n", to: path)
+        }
         // present() is idempotent and makes sure MainWindowView exists to
         // catch the selection notification.
         MainWindowController.present()
