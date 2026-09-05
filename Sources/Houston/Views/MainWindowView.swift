@@ -3178,8 +3178,13 @@ struct SidebarRow: View {
 
     @State private var renameDraft = ""
     /// Guards the blur-commit: once Return or Esc has answered, the focus
-    /// change they cause must not answer again.
-    @State private var renameDone = false
+    /// change they cause must not answer again. Starts `true` — only
+    /// `onAppear`'s seeding arms the field — because committing a rename
+    /// changes the row's title, which rebuilds the row mid-commit, and the
+    /// rebuilt copy's field can fire a blur before it is ever seeded. That
+    /// phantom blur used to commit this fresh copy's empty draft ("restore
+    /// default name"), silently undoing the rename Return had just saved.
+    @State private var renameDone = true
 
     var body: some View {
         HStack(spacing: 8) {
