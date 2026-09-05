@@ -2340,16 +2340,26 @@ struct MainWindowView: View {
             let collapsed = collapsedFolders.contains(path)
             HStack(spacing: 8) {
                 // The disclosure chevron takes the folder glyph's place under
-                // the pointer — Finder's sidebar move — instead of sitting
-                // permanently at the row's far edge.
-                Image(systemName: hovered
-                    ? (collapsed ? "chevron.right" : "chevron.down")
-                    : (collapsed ? "folder" : "folder.fill"))
-                    .font(hovered
-                        ? .system(size: 10, weight: .semibold)
-                        : .system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 16, height: 16)
+                // the pointer — Finder's sidebar move. It's its own click
+                // target (expand/collapse); the REST of the row opens a
+                // terminal in the folder, so a folder group behaves like any
+                // project row (2026-09-05 — clicking a group used to only
+                // toggle it, leaving no way to shell into the folder itself).
+                Button {
+                    toggleFolder(path)
+                } label: {
+                    Image(systemName: hovered
+                        ? (collapsed ? "chevron.right" : "chevron.down")
+                        : (collapsed ? "folder" : "folder.fill"))
+                        .font(hovered
+                            ? .system(size: 10, weight: .semibold)
+                            : .system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(collapsed ? "Expand" : "Collapse")
                 Text(folderName)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.text)
@@ -2357,7 +2367,7 @@ struct MainWindowView: View {
                 Spacer(minLength: 0)
             }
             .modifier(RowChrome(hovered: hovered, selected: false))
-            .onTapGesture { toggleFolder(path) }
+            .onTapGesture { select(.project(path)) }
 
         case let .library(path, title):
             // The library never carries the selection highlight — that lives
@@ -2498,6 +2508,12 @@ struct MainWindowView: View {
     private func menu(for entry: SidebarEntry) -> NSMenu? {
         if case let .folder(path, _) = entry {
             let menu = NSMenu()
+            // Any directory can host a shell — a folder-of-folders group
+            // included, not just its project children.
+            menu.addItem(ClosureMenuItem("Open Terminal Here") {
+                select(.project(path))
+            })
+            menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Reveal in Finder") {
                 Actions.revealInFinder(path: path)
             })
