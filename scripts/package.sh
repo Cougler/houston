@@ -32,19 +32,17 @@ cp -R "$PRODUCTS/Houston_Houston.bundle" "$APP/Contents/Resources/"
 echo "→ AppIcon.icns"
 ICONSET="dist/AppIcon.iconset"
 mkdir -p "$ICONSET"
-# Everything downscales from the 512 master — the _rounded variant,
-# because macOS does NOT mask Dock icons itself; the square export is the
-# raw artwork. The old source was 72px and every large slot was an
-# upscale — a blurry Dock and app-switcher icon. The 512@2x (1024) slot
-# is skipped rather than upscaled: macOS scales the real 512 itself,
-# same result without the fake pixels.
-SRC="Sources/Houston/Resources/icons/Appicon512_rounded.png"
+# Everything downscales from the 1024 master — the _rounded variant,
+# because macOS does NOT mask Dock icons itself; Appicon1024.png is the
+# raw square artwork (the rounded file is that art behind the old
+# master's measured corner radius, 152px at 1024). Filling the 512@2x
+# slot with real pixels is what keeps the macOS 26 app switcher sharp —
+# it renders larger than 512 and upscaling the 512 slot looked blurry.
+SRC="Sources/Houston/Resources/icons/Appicon1024_rounded.png"
 for size in 16 32 128 256 512; do
   sips -z $size $size "$SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   double=$((size * 2))
-  if [ $double -le 512 ]; then
-    sips -z $double $double "$SRC" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
-  fi
+  sips -z $double $double "$SRC" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET"
