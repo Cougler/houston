@@ -12,7 +12,12 @@ enum Theme {
     static let background = Color(light: 0xEBEBEB, dark: 0x1E1E1E)
     /// The empty state's sky — a step off the chrome in each direction:
     /// darker than the sidebar in light mode, lighter in dark mode.
-    static let emptyStateBackground = Color(light: 0xE2E2E2, dark: 0x252525)
+    static let emptyStateBackground = Color(light: 0x000000, dark: 0x000000)
+    /// The sky is black in both appearances, so text sitting directly on it
+    /// (empty state, onboarding chrome) can't use the appearance-tracking
+    /// text tokens — light mode's near-black text would vanish.
+    static let skyText = Color(light: 0xE8E8E8, dark: 0xE8E8E8)
+    static let skyTextSecondary = Color(light: 0x9A9A9A, dark: 0x9A9A9A)
     /// Floating cards (skills panel, rail flyouts). Light mode matches the
     /// sidebar chrome; dark mode steps lighter to separate from it.
     static let panelFill = Color(light: 0xEBEBEB, dark: 0x262626)

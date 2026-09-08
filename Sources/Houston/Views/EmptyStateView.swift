@@ -27,10 +27,10 @@ struct EmptyStateView: View {
             VStack(spacing: 6) {
                 Text("Houston is standing by")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+                    .foregroundStyle(Theme.skyText)
                 Text("Pick a project in the sidebar and start a mission or open a new terminal")
                     .font(.system(size: 12))
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.skyTextSecondary)
                     .multilineTextAlignment(.center)
             }
             .frame(maxWidth: 360)

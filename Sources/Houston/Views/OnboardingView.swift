@@ -82,10 +82,10 @@ struct OnboardingView: View {
             VStack(spacing: 12) {
                 Text("Welcome to Houston")
                     .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(Theme.text)
+                    .foregroundStyle(Theme.skyText)
                 Text("Mission control for your coding agents.")
                     .font(.system(size: 14))
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.skyTextSecondary)
             }
             .rise(appeared, delay: 0.35)
 
@@ -127,11 +127,11 @@ struct OnboardingView: View {
                 OnboardingStage(kind: shown.stage)
                 Text(shown.title)
                     .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(Theme.text)
+                    .foregroundStyle(Theme.skyText)
                     .padding(.top, 30)
                 Text(shown.copy)
                     .font(.system(size: 13.5))
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.skyTextSecondary)
                     .multilineTextAlignment(.center)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
@@ -157,13 +157,13 @@ struct OnboardingView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Active page: a wide capsule in the text color so it reads on the sky
-    /// in both appearances.
+    /// Active page: a wide capsule in the sky text color so it reads on the
+    /// black sky in both appearances.
     private var dots: some View {
         HStack(spacing: 7) {
             ForEach(pages.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index == page ? Theme.text : Theme.heading.opacity(0.35))
+                    .fill(index == page ? Theme.skyText : Theme.skyText.opacity(0.35))
                     .frame(width: index == page ? 16 : 6, height: 6)
                     .contentShape(Rectangle())
                     .onTapGesture { go(to: index) }
@@ -198,7 +198,7 @@ struct OnboardingView: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12))
-                .foregroundStyle(Theme.textSecondary)
+                .foregroundStyle(Theme.skyTextSecondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
                 .contentShape(Rectangle())
