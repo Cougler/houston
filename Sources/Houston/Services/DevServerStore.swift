@@ -29,6 +29,16 @@ final class DevServerStore: ObservableObject {
 
     private var projectsDirs: [String] = HoustonSettings.defaults.projectsDirs
     private var pinnedProjects: [String] = HoustonSettings.defaults.pinnedProjects
+    /// Paths that have ever hosted an attributed server (persisted). Passed
+    /// to the scan like pinned projects: a server started from an off row
+    /// must stay attributable even when its project isn't pinned or under a
+    /// `projectsDirs` folder anymore — otherwise it's filtered as
+    /// project-less and the sidebar keeps showing it as off.
+    private var knownServerPaths: Set<String> = []
+    /// Sheet ids (off id / last live id) of recents whose server came back,
+    /// mapped to the project path — a server sheet opened under an old id
+    /// resolves to the new live server instead of "no longer listening".
+    private var revivedPaths: [String: String] = [:]
     private var timer: Timer?
     private var refreshInFlight = false
     /// Probes re-run only after this long — a HEAD every scan tick would
@@ -54,7 +64,7 @@ final class DevServerStore: ObservableObject {
         guard !refreshInFlight else { return }
         refreshInFlight = true
         let dirs = projectsDirs
-        let pinned = pinnedProjects
+        let pinned = pinnedProjects + Array(knownServerPaths)
         Task.detached(priority: .utility) {
             let dev = DevServerDetect.snapshot(projectsDirs: dirs, pinnedProjects: pinned)
             await MainActor.run {
@@ -147,6 +157,12 @@ final class DevServerStore: ObservableObject {
         recents.first { $0.id == sid || $0.lastLiveID == sid }
     }
 
+    /// The project path a stale sheet id belongs to, once its recent entry
+    /// was dropped because the server is live again.
+    func revivedPath(matching sid: String) -> String? {
+        revivedPaths[sid]
+    }
+
     /// "Remove from Sidebar" — temporary by design: the next time a server
     /// runs (and stops) in that project, the row comes back.
     func removeRecent(_ id: String) {
@@ -167,6 +183,13 @@ final class DevServerStore: ObservableObject {
             next.append(RecentServer(
                 projectPath: cwd, name: project, port: gone.port, lastLiveID: gone.id
             ))
+            knownServerPaths.insert(cwd)
+        }
+        for revived in next where livePaths.contains(revived.projectPath) {
+            revivedPaths[revived.id] = revived.projectPath
+            if !revived.lastLiveID.isEmpty {
+                revivedPaths[revived.lastLiveID] = revived.projectPath
+            }
         }
         next.removeAll { livePaths.contains($0.projectPath) }
         if next != recents {
@@ -178,7 +201,8 @@ final class DevServerStore: ObservableObject {
     }
 
     private func loadRecents() {
-        recents = HoustonSettings.read().recentServers.compactMap { dict in
+        let s = HoustonSettings.read()
+        recents = s.recentServers.compactMap { dict in
             guard let path = dict["path"], let name = dict["name"],
                   let port = dict["port"].flatMap(Int.init) else { return nil }
             return RecentServer(
@@ -186,6 +210,7 @@ final class DevServerStore: ObservableObject {
                 lastLiveID: dict["lastLiveID"] ?? ""
             )
         }
+        knownServerPaths = Set(s.knownServerPaths).union(recents.map(\.projectPath))
     }
 
     private func saveRecents() {
@@ -198,6 +223,7 @@ final class DevServerStore: ObservableObject {
                 "lastLiveID": $0.lastLiveID,
             ]
         }
+        s.knownServerPaths = knownServerPaths.sorted()
         HoustonSettings.write(s)
     }
 }

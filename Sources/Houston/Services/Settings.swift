@@ -98,6 +98,12 @@ struct HoustonSettings {
     /// String-valued dicts ("path", "name", "port") so the JSON round-trips
     /// through the same reader/writer as everything else.
     var recentServers: [[String: String]]
+    /// Project paths that have ever hosted a dev server Houston attributed.
+    /// Detection treats these like pinned projects, so a server keeps its
+    /// sidebar row even when its project is no longer pinned or under a
+    /// `projectsDirs` folder — the recents list alone can't carry this,
+    /// because a recent is deleted the moment its server comes back up.
+    var knownServerPaths: [String]
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -120,7 +126,8 @@ struct HoustonSettings {
             sidebarWidth: Double(Theme.sidebarWidth),
             windowFrame: [],
             previewWindowFrame: [],
-            recentServers: []
+            recentServers: [],
+            knownServerPaths: []
         )
     }
 
@@ -218,6 +225,9 @@ struct HoustonSettings {
         if let recents = json["recentServers"] as? [[String: String]] {
             s.recentServers = recents
         }
+        if let known = json["knownServerPaths"] as? [String] {
+            s.knownServerPaths = known
+        }
         return s
     }
 
@@ -250,6 +260,7 @@ struct HoustonSettings {
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
         obj["recentServers"] = s.recentServers
+        obj["knownServerPaths"] = s.knownServerPaths
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

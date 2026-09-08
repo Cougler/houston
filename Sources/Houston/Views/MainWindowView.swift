@@ -864,13 +864,17 @@ struct MainWindowView: View {
     /// close animation runs.
     private var effectiveRightPanel: RightPanel? { rightPanel ?? lastRightPanel }
 
-    /// The running server a sheet id addresses — directly, or through the
-    /// recent entry's project path once the server restarts under a new pid.
+    /// The running server a sheet id addresses — directly, through the
+    /// recent entry's project path, or through the store's revived-id map
+    /// once the server restarts (the restart deletes the recent, so a sheet
+    /// opened under an off id or the old pid:port would otherwise resolve
+    /// to nothing and fall to the "no longer listening" placeholder).
     private func liveServer(for sid: String) -> DevServer? {
-        servers.devServers.first { $0.id == sid }
-            ?? servers.recent(matching: sid).flatMap { recent in
-                servers.devServers.first { $0.cwd == recent.projectPath }
-            }
+        if let live = servers.devServers.first(where: { $0.id == sid }) { return live }
+        let path = servers.recent(matching: sid)?.projectPath
+            ?? servers.revivedPath(matching: sid)
+        guard let path else { return nil }
+        return servers.devServers.first { $0.cwd == path }
     }
 
     private var serverChromeHidden: Bool {
