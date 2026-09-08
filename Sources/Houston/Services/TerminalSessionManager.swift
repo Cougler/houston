@@ -385,13 +385,38 @@ final class TerminalSessionManager: NSObject, ObservableObject {
     /// `paneContainer`); nil `tabID` means the project's first tab.
     /// Re-parenting an existing root is a no-op for the running PTYs.
     func mountRoot(for path: String?, tab tabID: UUID?, in container: NSView) {
-        guard let path, let tab = resolveTab(path: path, id: tabID) else {
-            container.subviews.forEach { $0.removeFromSuperview() }
-            return
+        let selected = path.flatMap { resolveTab(path: $0, id: tabID) }
+
+        // EVERY tab root stays attached to the window — hidden when not
+        // displayed — instead of only the selected one. Not cosmetic:
+        // ghostty has ONE app-level wakeup callback, and the wrapper points
+        // it at whichever surface was built LAST; that coordinator's gate
+        // refuses wakeups while its view is detached. With several
+        // terminals open the last-built pane was often a detached one, so
+        // the tick that pumps ghostty's IO was dropped for the WHOLE app
+        // and the visible pane froze — "type Enter, nothing happens until I
+        // switch tabs and back" (the switch forced a redraw of state that
+        // had long since advanced). Hidden-but-attached views keep every
+        // gate open (isAttached is just window != nil), the pump always
+        // runs, and each pane redraws itself off its own per-surface
+        // RENDER action.
+        let liveTabs = tabs.values.flatMap { $0 }
+        let liveRoots = Set(liveTabs.map { ObjectIdentifier($0.root) })
+        for sub in container.subviews
+        where !liveRoots.contains(ObjectIdentifier(sub)) {
+            sub.removeFromSuperview()
         }
-        if tab.root.superview === container { return }
-        container.subviews.forEach { $0.removeFromSuperview() }
-        fill(container, with: tab.root)
+        for tab in liveTabs {
+            if tab.root.superview !== container {
+                fill(container, with: tab.root)
+            }
+            // Guarded write: this runs on every SwiftUI render pass.
+            let hidden = tab !== selected
+            if tab.root.isHidden != hidden { tab.root.isHidden = hidden }
+        }
+        displayedTab = selected
+        applySurfaceVisibility()
+        guard let tab = selected else { return }
 
         // The terminal claims focus on a tab's first display only —
         // re-grabbing on every selection yanked focus out of the sidebar the
@@ -400,6 +425,35 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             first.hasAutoFocused = true
             DispatchQueue.main.async {
                 first.view.window?.makeFirstResponder(first.view)
+            }
+        }
+    }
+
+    /// The tab currently mounted visible, for occlusion bookkeeping.
+    private weak var displayedTab: TerminalTab?
+    /// The pane whose surface was built last — the wrapper points ghostty's
+    /// app-wide wakeup gate at ITS coordinator, so this one pane must never
+    /// be told it's occluded, or every pane in the app stops updating.
+    private var gateOwnerPaneID: UUID?
+
+    /// A pane's surface just (re)built — it now owns the wakeup gate.
+    func noteSurfaceAttached(_ pane: TerminalPane) {
+        gateOwnerPaneID = pane.id
+        applySurfaceVisibility()
+    }
+
+    /// The active tab's panes render; every other pane sleeps via ghostty's
+    /// occlusion flag (no offscreen draws while hidden agents stream) —
+    /// EXCEPT the gate owner, which must always report visible: its
+    /// coordinator answers for the whole app's wakeup pump, and occluding
+    /// it brings back the "type Enter, nothing happens" freeze. At most one
+    /// hidden pane therefore keeps rendering; usually it's the newest pane,
+    /// which is usually the displayed one anyway.
+    private func applySurfaceVisibility() {
+        for tab in tabs.values.flatMap({ $0 }) {
+            let shown = tab === displayedTab
+            for pane in tab.panes {
+                pane.view.setSurfaceVisible(shown || pane.id == gateOwnerPaneID)
             }
         }
     }

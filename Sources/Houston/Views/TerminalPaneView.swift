@@ -251,6 +251,10 @@ extension TerminalPane: TerminalSurfaceLifecycleDelegate {
     /// right at attach is safe.
     func terminalDidAttachSurface(_ surface: TerminalSurface) {
         surfaceAttached = true
+        // This pane's coordinator now answers the app-wide wakeup gate —
+        // the manager must exempt it from occlusion (see
+        // `applySurfaceVisibility`).
+        TerminalSessionManager.shared.noteSurfaceAttached(self)
         guard !pendingInput.isEmpty else { return }
         let queued = pendingInput
         pendingInput = ""
