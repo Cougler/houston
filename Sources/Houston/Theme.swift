@@ -8,8 +8,12 @@ enum Theme {
 
     // MARK: - Surfaces
 
-    /// Window / sidebar / detail background.
+    /// Window / detail background.
     static let background = Color(light: 0xEBEBEB, dark: 0x0A0B0E)
+    /// The sidebar panel (and the chat composer, which matches it) — a
+    /// step lighter than the window chrome so the column reads as its own
+    /// surface.
+    static let sidebarFill = Color(light: 0xF1F1F1, dark: 0x121419)
     /// The empty state's sky — a step off the chrome in each direction:
     /// darker than the sidebar in light mode, lighter in dark mode.
     static let emptyStateBackground = Color(light: 0x000000, dark: 0x000000)

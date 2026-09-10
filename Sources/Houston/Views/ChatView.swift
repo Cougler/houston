@@ -778,7 +778,7 @@ private struct ChatComposer: View {
         .padding(.bottom, 6)
         // Same surface as the sidebar so the bar sits on the chrome, the
         // stroke alone defining it.
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.background))
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.sidebarFill))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
         // Same column as the transcript: 800 cap including 32px gutters.
         .padding(.horizontal, 32)
@@ -1313,7 +1313,9 @@ private struct MarkdownBlockView: View {
             .foregroundStyle(color)
             .tint(accent ? color : Theme.link)
             .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // User bubbles (accent) hug their text; assistant prose fills
+            // the column.
+            .frame(maxWidth: accent ? nil : .infinity, alignment: .leading)
     }
 
     /// Inline markdown, with bare URLs promoted to tappable links and

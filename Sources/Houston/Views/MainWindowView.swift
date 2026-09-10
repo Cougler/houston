@@ -213,7 +213,7 @@ struct MainWindowView: View {
                     ? rightSheetWidth : 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background)
+        .background(Theme.sidebarFill)
         .overlay(alignment: .topLeading) { railFlyoutLayer }
         .overlay(alignment: .bottomLeading) { themePickerLayer }
         .overlay(alignment: .bottomLeading) { chatColorsLayer }
@@ -545,7 +545,7 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             sidebarFooter
         }
-        .background(Theme.background)
+        .background(Theme.sidebarFill)
     }
 
     // MARK: - Collapsed rail
@@ -610,7 +610,7 @@ struct MainWindowView: View {
             .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background)
+        .background(Theme.sidebarFill)
     }
 
     private func railButton(_ section: RailSection) -> some View {
@@ -1404,19 +1404,20 @@ struct MainWindowView: View {
 
     /// The Projects library as a popover: pinned rows, folders (always
     /// expanded — collapse state stays a full-sidebar concern), and "Add".
+    /// Mirrors the expanded sidebar's chat-centric Projects section: each
+    /// project row opens a new chat, with its recent chats nested beneath.
     private var projectsPopover: some View {
         let pinned = store.pinnedProjects
-        let groups = store.projectGroups
-        let libCount = groups.reduce(0) { $0 + libraryPaths(in: $1).count }
-        let empty = pinned.isEmpty && groups.isEmpty
+        let empty = pinned.isEmpty
+        let chatCount = pinned.reduce(0) {
+            $0 + min(chatIndex.chats[$1]?.count ?? 0, 3)
+        }
         let rowsHeight = empty
             ? railEmptyStateHeight
-            : CGFloat(pinned.count) * 28
-                + CGFloat(groups.count) * 28
-                + CGFloat(libCount) * 28
+            : CGFloat(pinned.count) * 28 + CGFloat(chatCount) * 26
         return railPopoverPanel(
             title: "Projects",
-            count: pinned.count + libCount,
+            count: pinned.count,
             rowsHeight: rowsHeight
         ) {
             if empty {
@@ -1431,26 +1432,11 @@ struct MainWindowView: View {
             }
             ForEach(pinned, id: \.self) { path in
                 projectPopoverRow(path)
-            }
-            ForEach(groups, id: \.path) { group in
-                // Folder names read as sub-headings here — the popover has
-                // no disclosure, so the quiet heading style keeps them from
-                // competing with the project rows.
-                HStack(spacing: 6) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Theme.heading)
-                    Text(group.name)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.heading)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 12 + Theme.rowInset)
-                .frame(height: 24)
-                .padding(.top, 4)
-                ForEach(libraryPaths(in: group), id: \.self) { path in
-                    projectPopoverRow(path)
+                ForEach(
+                    Array((chatIndex.chats[path] ?? []).prefix(3)),
+                    id: \.filePath
+                ) { ref in
+                    chatPopoverRow(project: path, ref: ref)
                 }
             }
         } footer: {
@@ -1461,15 +1447,43 @@ struct MainWindowView: View {
         }
     }
 
+    /// Clicking a project starts a chat there — same as the expanded
+    /// header's "+"; the terminal lives one hover-icon away.
     private func projectPopoverRow(_ path: String) -> some View {
-        PopoverRow(height: 28, action: { railSelect(.project(path)) }) { hovered in
-            SidebarRow(
-                name: name(of: path),
-                diff: libraryDiff(path),
-                isProject: ProjectKindCache.isProject(path),
-                live: terminals.hasPane(for: path),
-                hovered: hovered
-            )
+        PopoverRow(height: 28, action: {
+            setRailPopover(nil)
+            newChat(in: path)
+        }) { hovered in
+            HStack(spacing: 0) {
+                SidebarRow(
+                    name: name(of: path),
+                    diff: libraryDiff(path),
+                    isProject: ProjectKindCache.isProject(path),
+                    live: terminals.hasPane(for: path),
+                    hovered: hovered
+                )
+                if hovered {
+                    RowActionIcon(symbol: "terminal", help: "New terminal") {
+                        setRailPopover(nil)
+                        newTerminal(in: path)
+                    }
+                    .padding(.trailing, 8)
+                }
+            }
+        }
+    }
+
+    private func chatPopoverRow(project: String, ref: ChatSessionRef) -> some View {
+        PopoverRow(height: 26, action: {
+            setRailPopover(nil)
+            openChat(project: project, file: ref.filePath)
+        }) { _ in
+            Text(chatTitler.displayTitle(ref))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.text.opacity(0.8))
+                .lineLimit(1)
+                .padding(.leading, 24 + Theme.rowInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -1902,7 +1916,9 @@ struct MainWindowView: View {
                 .onAppear { mcp.refreshIfStale(path: path) }
             }
         }
-        .background(Theme.background)
+        // The chrome band around the content card shares the sidebar's
+        // lighter surface — one continuous frame, no hairlines.
+        .background(Theme.sidebarFill)
     }
 
     /// The feed snapshot the status bar shows: the freshest one among the
