@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// `ProjectList.isProject` stats up to a handful of marker files, and the
@@ -11,6 +12,85 @@ enum ProjectKindCache {
         let result = ProjectList.isProject(path)
         cache[path] = result
         return result
+    }
+}
+
+/// A project's own logo for its sidebar row, found at the well-known spots
+/// (app icons, web favicons). The verdict — image or "none" — is cached per
+/// path for the app's lifetime; rows render it synchronously.
+@MainActor
+enum ProjectLogoCache {
+    private static var cache: [String: NSImage?] = [:]
+
+    /// Checked in order; the first that loads wins. Favicons first — a
+    /// square mark reads at 14pt where a wordmark logo doesn't — with app
+    /// icons as the fallback for native projects that have no favicon.
+    private static let candidates = [
+        "public/favicon.png", "public/favicon.ico", "public/favicon.svg",
+        "app/favicon.ico", "src/app/favicon.ico",
+        "static/favicon.png", "favicon.png", "favicon.ico", "favicon.svg",
+        "public/apple-touch-icon.png",
+        "AppIcon.png", "app-icon.png", "icon.png",
+        "app/icon.png", "src/app/icon.png",
+        "assets/icon.png", "public/icon.png",
+        // Last resort for projects that ship only a logo (no favicon).
+        "public/logo.svg", "public/logo.png", "assets/logo.png",
+        "static/logo.png", "logo.svg", "logo.png",
+    ]
+
+    static func logo(for path: String) -> NSImage? {
+        if let hit = cache[path] { return hit }
+        // Swift-package apps keep their icon in the resource bundle
+        // (Houston: Sources/Houston/Resources/icons/AppIcon.png).
+        let name = (path as NSString).lastPathComponent.capitalized
+        let all = candidates + [
+            "Sources/\(name)/Resources/icons/AppIcon.png",
+            "Sources/\(name)/Resources/AppIcon.png",
+        ]
+        var found: NSImage?
+        for candidate in all {
+            let full = (path as NSString).appendingPathComponent(candidate)
+            guard FileManager.default.fileExists(atPath: full),
+                  let image = NSImage(contentsOfFile: full),
+                  image.isValid else { continue }
+            // A dark monochrome glyph vanishes on the dark sidebar — mark
+            // it template so it tints with the appearance (white in dark).
+            if isDarkMonochrome(image) { image.isTemplate = true }
+            found = image
+            break
+        }
+        cache[path] = found
+        return found
+    }
+
+    /// True when the icon is a dark glyph on transparency: mostly dark
+    /// opaque pixels with real transparent coverage (a solid dark square
+    /// would tint into a slab, so full-bleed images never qualify).
+    private static func isDarkMonochrome(_ image: NSImage) -> Bool {
+        let side = 16
+        var rect = CGRect(x: 0, y: 0, width: side, height: side)
+        guard let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil),
+              let ctx = CGContext(
+                  data: nil, width: side, height: side, bitsPerComponent: 8,
+                  bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return false }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let data = ctx.data else { return false }
+        let pixels = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+        var opaque = 0, dark = 0
+        for i in 0..<(side * side) {
+            let alpha = Int(pixels[i * 4 + 3])
+            guard alpha > 40 else { continue }
+            opaque += 1
+            let r = Int(pixels[i * 4]) * 255 / alpha
+            let g = Int(pixels[i * 4 + 1]) * 255 / alpha
+            let b = Int(pixels[i * 4 + 2]) * 255 / alpha
+            if max(r, g, b) < 90 { dark += 1 }
+        }
+        guard opaque > 0 else { return false }
+        let coverage = Double(opaque) / Double(side * side)
+        return coverage < 0.95 && Double(dark) / Double(opaque) > 0.9
     }
 }
 

@@ -15,6 +15,7 @@ final class ActiveSessionStore: ObservableObject {
     private var refreshInFlight = false
 
     func start() {
+        migrateFoldersToProjects()
         reloadSettings()
         refresh()
         sessionTimer?.invalidate()
@@ -54,6 +55,22 @@ final class ActiveSessionStore: ObservableObject {
                 self.projectGroups = groups
             }
         }
+    }
+
+    /// Folder groups are gone (2026-09-09): anything added to the projects
+    /// list IS a project — one row, never expanded into subdirectories.
+    /// One-time fold of the old `projectsDirs` entries into
+    /// `pinnedProjects`, order kept, deduped. Server attribution still
+    /// works: pinned matching is prefix-based, so a dev server inside a
+    /// former group attributes to the group's row.
+    private func migrateFoldersToProjects() {
+        var s = HoustonSettings.read()
+        guard !s.projectsDirs.isEmpty else { return }
+        for dir in s.projectsDirs where !s.pinnedProjects.contains(dir) {
+            s.pinnedProjects.append(dir)
+        }
+        s.projectsDirs = []
+        HoustonSettings.write(s)
     }
 
     private func reloadSettings() {

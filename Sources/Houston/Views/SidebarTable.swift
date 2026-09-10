@@ -9,22 +9,27 @@ import SwiftUI
 enum SidebarEntry: Identifiable, Hashable {
     case header(String)
     case folder(path: String, name: String)
+    /// A project row carries ONE identity whether it sits in the library
+    /// (no shell) or hoisted to the top of the Projects section (shell
+    /// open) — the differ animates the hoist and the return as `moveRow`s
+    /// instead of tearing the row down.
     case row(id: SidebarSelection, title: String)
-    /// A project's home row in the Projects library. Selecting it targets the
-    /// same `.project` selection as an Active row, but it has its own row
-    /// identity — so a running project stays put here (with a live dot) while
-    /// also being listed under Active, instead of jumping sections.
-    case library(path: String, title: String)
     /// A clickable affordance inside a section (e.g. "New Terminal" while no
     /// terminal is open) — like a folder, tappable but never *selected*.
     case action(key: String, title: String)
+    /// A quiet hairline — separates the active block from the idle library.
+    case divider
+    /// A past chat session nested under its project row. `file` is the
+    /// transcript path; empty = the "Show more" row.
+    case chat(project: String, file: String, title: String, harness: String)
 
     var id: String {
         switch self {
         case let .header(title): "header:\(title)"
         case let .folder(path, _): "folder:\(path)"
         case let .action(key, _): "action:\(key)"
-        case let .library(path, _): "library:\(path)"
+        case .divider: "divider"
+        case let .chat(project, file, _, _): "chat:\(project):\(file)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"
@@ -37,7 +42,6 @@ enum SidebarEntry: Identifiable, Hashable {
     var selection: SidebarSelection? {
         switch self {
         case let .row(id, _): return id
-        case let .library(path, _): return .project(path)
         default: return nil
         }
     }
@@ -56,7 +60,6 @@ enum SidebarEntry: Identifiable, Hashable {
         case let .row(id, _):
             if case .server = id { return false }
             return true
-        case .library: return true
         default: return false
         }
     }

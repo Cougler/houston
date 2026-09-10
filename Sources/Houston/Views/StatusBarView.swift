@@ -17,6 +17,9 @@ struct StatusBarView: View {
     let mcpAuthInFlight: Set<String>
     /// Called with the `/model` argument when the user picks a model.
     let onSelectModel: (String) -> Void
+    /// Called with the `/effort` argument when the user picks an effort
+    /// level (Claude sessions only — Codex has no in-session command).
+    let onSelectEffort: (String) -> Void
     /// Types `/mcp` into the session — manual reconnects live there.
     let onManageMCP: () -> Void
     let onRefreshMCP: () -> Void
@@ -115,6 +118,19 @@ struct StatusBarView: View {
             if !currentModelMeters.isEmpty { Divider() }
             ForEach(models, id: \.arg) { model in
                 Button(model.label) { onSelectModel(model.arg) }
+            }
+            // Claude's `/effort` switches the running session's reasoning
+            // effort; other harnesses have no equivalent command.
+            if agent == .claude {
+                Divider()
+                Menu("Effort") {
+                    ForEach([
+                        ("Auto", "auto"), ("Low", "low"), ("Medium", "medium"),
+                        ("High", "high"), ("XHigh", "xhigh"), ("Max", "max"),
+                    ], id: \.1) { level in
+                        Button(level.0) { onSelectEffort(level.1) }
+                    }
+                }
             }
         } label: {
             HStack(spacing: 4) {

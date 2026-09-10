@@ -102,17 +102,56 @@ struct NightSky: View {
         StarSpec(id: 33, fx: 0.67, fy: 0.35, size: 1.2, color: Theme.heading, duration: 3.3, delay: 2.2),
         StarSpec(id: 34, fx: 0.61, fy: 0.65, size: 1.2, color: Theme.heading, duration: 2.3, delay: 1.0),
         StarSpec(id: 35, fx: 0.38, fy: 0.68, size: 1.2, color: Theme.heading, duration: 3.8, delay: 0.3),
+        StarSpec(id: 36, fx: 0.03, fy: 0.45, size: 2.2, color: Theme.heading, duration: 2.8, delay: 0.6),
+        StarSpec(id: 37, fx: 0.09, fy: 0.16, size: 1.8, color: Theme.heading, duration: 3.1, delay: 1.9),
+        StarSpec(id: 38, fx: 0.17, fy: 0.30, size: 1.5, color: Theme.heading, duration: 2.4, delay: 0.2),
+        StarSpec(id: 39, fx: 0.22, fy: 0.44, size: 1.9, color: Color(hex: 0x8FD3D9), duration: 3.5, delay: 1.2),
+        StarSpec(id: 40, fx: 0.27, fy: 0.63, size: 1.6, color: Theme.heading, duration: 2.7, delay: 2.5),
+        StarSpec(id: 41, fx: 0.24, fy: 0.76, size: 2.1, color: Theme.heading, duration: 3.0, delay: 0.8),
+        StarSpec(id: 42, fx: 0.34, fy: 0.80, size: 1.7, color: Theme.heading, duration: 2.2, delay: 1.5),
+        StarSpec(id: 43, fx: 0.46, fy: 0.74, size: 1.5, color: Theme.heading, duration: 3.4, delay: 0.4),
+        StarSpec(id: 44, fx: 0.58, fy: 0.78, size: 2.0, color: Color(hex: 0xD97757), duration: 2.6, delay: 2.0),
+        StarSpec(id: 45, fx: 0.70, fy: 0.72, size: 1.6, color: Theme.heading, duration: 3.2, delay: 1.1),
+        StarSpec(id: 46, fx: 0.76, fy: 0.60, size: 1.9, color: Theme.heading, duration: 2.5, delay: 0.7),
+        StarSpec(id: 47, fx: 0.83, fy: 0.35, size: 1.6, color: Theme.heading, duration: 3.6, delay: 1.7),
+        StarSpec(id: 48, fx: 0.89, fy: 0.18, size: 2.2, color: Theme.heading, duration: 2.3, delay: 0.1),
+        StarSpec(id: 49, fx: 0.97, fy: 0.38, size: 1.7, color: Theme.heading, duration: 2.9, delay: 2.7),
+        StarSpec(id: 50, fx: 0.94, fy: 0.65, size: 1.8, color: Color(hex: 0xD9C27E), duration: 3.3, delay: 0.9),
+        StarSpec(id: 51, fx: 0.85, fy: 0.93, size: 1.9, color: Theme.heading, duration: 2.6, delay: 1.4),
+        StarSpec(id: 52, fx: 0.73, fy: 0.95, size: 1.5, color: Theme.heading, duration: 3.1, delay: 0.3),
+        StarSpec(id: 53, fx: 0.55, fy: 0.94, size: 2.0, color: Theme.heading, duration: 2.4, delay: 2.3),
+        StarSpec(id: 54, fx: 0.17, fy: 0.96, size: 1.7, color: Theme.heading, duration: 3.5, delay: 1.0),
+        StarSpec(id: 55, fx: 0.02, fy: 0.86, size: 2.1, color: Color(hex: 0x3B82F6), duration: 2.8, delay: 0.5),
     ]
+
+    /// A second, denser layer generated from a fixed-seed LCG — same sky
+    /// every launch, no hand-placing 40 more dots.
+    private static let extraStars: [StarSpec] = {
+        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next() -> CGFloat {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return CGFloat((seed >> 33) % 10_000) / 10_000
+        }
+        return (36..<80).map { id in
+            StarSpec(
+                id: id, fx: next(), fy: next(),
+                size: 1.3 + next() * 1.2, color: Theme.heading,
+                duration: 0, delay: 0
+            )
+        }
+    }()
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                ForEach(Self.stars) { star in
+                // Three batches on one shared cycle, phased a third apart:
+                // one batch is near peak while the next fades — the sky
+                // twinkles in waves instead of breathing as a whole.
+                ForEach(Self.stars + Self.extraStars) { star in
                     TwinkleStar(
                         size: star.size,
                         color: star.color,
-                        duration: star.duration,
-                        delay: star.delay
+                        batch: star.id % 3
                     )
                     .position(x: geo.size.width * star.fx, y: geo.size.height * star.fy)
                 }
@@ -228,8 +267,12 @@ private struct OrbitingPlanet: View {
 private struct TwinkleStar: View {
     let size: CGFloat
     let color: Color
-    let duration: Double
-    let delay: Double
+    /// 0–2; batches share an exact phase so each wave moves together.
+    let batch: Int
+
+    /// Half-cycle of the shared twinkle (bright→dim); full cycle 3.8s,
+    /// batches offset by a third of it.
+    private static let halfCycle = 1.9
 
     @State private var bright = false
 
@@ -237,14 +280,14 @@ private struct TwinkleStar: View {
         Circle()
             .fill(color)
             .frame(width: size, height: size)
-            .opacity(bright ? 0.75 : 0.12)
-            .scaleEffect(bright ? 1 : 0.7)
+            .opacity(bright ? 0.95 : 0.18)
+            .scaleEffect(bright ? 1 : 0.75)
             .onAppear {
                 DispatchQueue.main.async {
                     withAnimation(
-                        .easeInOut(duration: duration)
+                        .easeInOut(duration: Self.halfCycle)
                             .repeatForever(autoreverses: true)
-                            .delay(delay)
+                            .delay(Double(batch) * Self.halfCycle * 2 / 3)
                     ) {
                         bright = true
                     }

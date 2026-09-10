@@ -367,7 +367,6 @@ private struct AnnotationsPanel: View {
     private func row(_ item: Annotation, pin: Int?) -> some View {
         AnnotationRowView(
             item: item,
-            pin: pin,
             projectPath: model.server.cwd,
             onSend: { model.sendAnnotation(item.id) },
             onToggleDone: {

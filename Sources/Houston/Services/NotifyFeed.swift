@@ -31,8 +31,10 @@ enum NotifyFeed {
     /// Directory of per-event payload dumps.
     static var eventsDir: String { supportDir + "/notify" }
 
-    /// The hook events Houston listens to.
-    private static let hookEvents = ["Notification", "Stop"]
+    /// The hook events Houston listens to. `UserPromptSubmit` marks the
+    /// start of a turn — the sidebar's "working" pulse — and `Stop` /
+    /// `Notification` end it.
+    private static let hookEvents = ["Notification", "Stop", "UserPromptSubmit"]
 
     /// Event files are `<pane-uuid>.<pid>.<epoch>.json` — a UUID has no dots,
     /// so the pane id is everything before the first one.
@@ -62,6 +64,18 @@ enum NotifyFeed {
         return hookEvents.allSatisfy { event in
             groups(of: hooks, event: event).contains { groupHasOurCommand($0) }
         }
+    }
+
+    /// Installed for some events but not all — an older install predating a
+    /// newly-listened event. The user already consented to this exact
+    /// script, so completing the set silently is within that consent.
+    static var isPartiallyInstalled: Bool {
+        guard let settings = readClaudeSettings(),
+              let hooks = settings["hooks"] as? [String: Any] else { return false }
+        let installed = hookEvents.filter { event in
+            groups(of: hooks, event: event).contains { groupHasOurCommand($0) }
+        }
+        return !installed.isEmpty && installed.count < hookEvents.count
     }
 
     // MARK: - Install / restore
@@ -151,6 +165,8 @@ enum NotifyFeed {
             case needsInput
             /// The `Stop` hook: the response turn ended.
             case finished
+            /// The `UserPromptSubmit` hook: a turn just started.
+            case turnStarted
         }
         let paneID: String
         let kind: Kind
@@ -189,6 +205,8 @@ enum NotifyFeed {
                 ))
             case "Stop":
                 events.append(Event(paneID: paneID, kind: .finished, message: ""))
+            case "UserPromptSubmit":
+                events.append(Event(paneID: paneID, kind: .turnStarted, message: ""))
             default:
                 continue
             }
@@ -223,6 +241,23 @@ final class NotifyStore: ObservableObject {
         didSet { badgeChanged() }
     }
 
+    struct Working: Equatable {
+        let projectPath: String
+        let tabID: UUID
+    }
+
+    /// Panes with a turn in flight (`UserPromptSubmit` seen, no `Stop` /
+    /// `Notification` yet) — the sidebar's pulsing dot.
+    @Published private(set) var working: [String: Working] = [:]
+
+    func isWorking(path: String) -> Bool {
+        working.values.contains { $0.projectPath == path }
+    }
+
+    func isWorking(path: String, tab: UUID) -> Bool {
+        working.values.contains { $0.projectPath == path && $0.tabID == tab }
+    }
+
     /// Projects with any pending attention — the sidebar badge source.
     var attentionPaths: Set<String> { Set(attention.values.map(\.projectPath)) }
 
@@ -238,6 +273,11 @@ final class NotifyStore: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
+        // An older install that predates a newly-listened hook event gets
+        // the missing entries merged in silently — same script, same
+        // consent; without this, isInstalled goes false and the whole feed
+        // stops for existing users.
+        if NotifyFeed.isPartiallyInstalled { NotifyFeed.install() }
         NotifyFeed.clearAllEvents()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
             Task { @MainActor in NotifyStore.shared.poll() }
@@ -256,10 +296,24 @@ final class NotifyStore: ObservableObject {
         for event in NotifyFeed.drainEvents() {
             handle(event)
         }
+        // A pane that closed mid-turn never fires Stop — drop its pulse.
+        let stale = working.keys.filter { locate(paneID: $0) == nil }
+        for key in stale { working.removeValue(forKey: key) }
     }
 
     private func handle(_ event: NotifyFeed.Event) {
         guard let location = locate(paneID: event.paneID) else { return }
+        // Working state first, and regardless of visibility — the pulse is
+        // ambient status, not an announcement.
+        if event.kind == .turnStarted {
+            working[event.paneID] = Working(
+                projectPath: location.path, tabID: location.tabID
+            )
+            // A fresh turn consumes any stale attention on the pane.
+            attention.removeValue(forKey: event.paneID)
+            return
+        }
+        working.removeValue(forKey: event.paneID)
         // Visible and frontmost: the user is watching this pane — nothing to
         // announce.
         if isDisplayed(location) && NSApp.isActive {
@@ -316,6 +370,8 @@ final class NotifyStore: ObservableObject {
                     path: location.path
                 )
             }
+        case .turnStarted:
+            break // handled above
         }
     }
 

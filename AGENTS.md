@@ -1,4 +1,4 @@
-# Houston — Claude Handoff
+# Houston — Codex Handoff
 
 > Last updated: 2026-08-11
 
@@ -66,22 +66,7 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   makes the terminal context menu act on the pane under the cursor.
   Ghostty's view never consults `NSView.menu` — the context menu needs
   that subclass.
-- `ChatArchive` / `ChatSessionHub` / `ChatAgentSession` / `ChatBrowserView` —
-  the chat feature. `ChatArchive` parses both CLIs' session stores into
-  transcripts (and transplants chats across harnesses via handoff brief +
-  tail). Sends run through `ChatSessionHub`: ONE persistent agent process
-  per open chat — Claude Code via its `--input-format stream-json
-  --output-format stream-json` protocol (user messages on stdin; streaming
-  deltas, `control_request` permissions, and interrupts verified against
-  the live CLI), Codex via `codex app-server` JSON-RPC v2
-  (`thread/start|resume`, `turn/start`, `item/*` notifications, approval
-  server-requests; shapes from `codex app-server generate-json-schema`).
-  Never rebuild this on one-shot `claude -p`/`codex exec` per message +
-  transcript polling — that was tried and it pinwheeled: full CLI boot per
-  send, whole-file re-parse every 1.2s, no permissions, no cancel. The
-  transcript file is re-read exactly once per finished turn; the live turn
-  renders from the stream (`LiveTurnView`, approval cards, Stop).
-- `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
+- `NotifyFeed` / `NotifyStore` — "needs you" notifications off Codex's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to
   `Application Support/Houston/notify/<HOUSTON_PANE>.….json`; the store polls,
@@ -116,7 +101,7 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 - `StatusLineFeed` / `StatusBarView` — the native status bar under the
   terminal (model menu → `/model`, context bar, rate-limit meters), fed by
   the statusline hook (see Gotchas). `MCPStatusStore` adds MCP health via
-  `claude mcp list` plus one-click `login`/`logout`, all shelled off-main.
+  `Codex mcp list` plus one-click `login`/`logout`, all shelled off-main.
 - `EmptyStateView` — the no-selection artwork: a slow solar system, star
   field, and occasional comet, all plain SwiftUI animation.
 - `ProcessDetect` / `AgentDetect` / `DevServerDetect` — everything Houston knows
@@ -152,14 +137,14 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   serves its offline page instead of hanging the request.
 
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
-  anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
+  anywhere on disk — only the bare model id (`Codex-opus-5`). Detection is an
   allowlist of the *small*-window models (`smallWindowPatterns`: Haiku, Opus
   ≤4.5, Sonnet ≤4.5) with 1M as the fallback, so a new model reads correctly
   with no code change. The inverse — allowlisting 1M models — is what broke
   Opus 5 and pinned its bar at 100%.
 - **`Theme.Context.color(for:)` takes a fraction (0–1), not a percentage.**
 - **Spawned panes MUST get a scrubbed environment.** If Houston is launched from
-  a shell already inside a claude session, panes inherit
+  a shell already inside a Codex session, panes inherit
   `CLAUDE_CODE_CHILD_SESSION`, treat themselves as sub-sessions, and **silently
   disable transcript saving** — no session file, no JSONL, so Houston goes blind
   to its own pane. `env_vars` can only add, not unset, so `TerminalEnvironment`
@@ -192,11 +177,11 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   different geometry.
 - **Sidebar shows only sessions Houston hosts** (`ActiveSession.isHoustonOwned`,
   decided by walking the parent chain — the tree is `Houston → login → bash →
-  claude`, so the immediate parent isn't enough). Houston can *observe* any
+  Codex`, so the immediate parent isn't enough). Houston can *observe* any
   session but can only *display* ones whose pty it owns.
 - **"Active" means an agent process is running**, not that a session file
-  exists — instant, and works for agents that write no session file. Only Claude
-  Code publishes usage on disk, so context % is Claude-only by design.
+  exists — instant, and works for agents that write no session file. Only Codex
+  Code publishes usage on disk, so context % is Codex-only by design.
 - **Layout: three traps that all look like "the UI collapsed into a band".**
   (1) `HSplitView` is NSSplitView-backed and sizes to a *fitting* height instead
   of filling its parent — use a plain `HStack` with the hand-drawn
@@ -273,25 +258,25 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   the appearance itself — no manual color-scheme plumbing.
 - **`sendText` is a paste, not typing.** `ghostty_surface_text` delivers text
   as a bracketed paste, so zsh leaves a pasted trailing `\n` sitting
-  highlighted in the line editor instead of executing it — `claude\n` just sat
+  highlighted in the line editor instead of executing it — `Codex\n` just sat
   at the prompt. `TerminalPane.send` peels a trailing newline off and delivers
   it as the `text:\r` binding action, which writes the CR raw to the pty like
   a real Return keypress.
-- **The Claude statusline command must be single-quoted.** Claude Code hands
+- **The Codex statusline command must be single-quoted.** Codex hands
   `statusLine.command` to `sh -c`, and Houston's feed script lives under
   `Application Support` — unquoted, the shell executed
   `/Users/…/Library/Application`, the status line silently blanked, and the
   feed never ran. `StatusLineFeed.statusLineCommand` wraps the path in quotes;
   the state check accepts both forms.
-- **The status bar's data comes from Claude's own statusline hook, not
+- **The status bar's data comes from Codex's own statusline hook, not
   transcripts.** `StatusLineFeed` (with user consent — it rewrites
-  `~/.claude/settings.json`, backing the old value up for restore) installs a
+  `~/.Codex/settings.json`, backing the old value up for restore) installs a
   script that dumps the statusline JSON payload to
   `Application Support/Houston/statusline/<HOUSTON_PANE>.json` and prints
   nothing, which blanks the in-terminal status row *and* suppresses the hint
   badges. The payload carries the model's real context-window size (no
   `contextWindow(for:)` guessing), session cost, and account rate limits.
-  Claude re-runs the hook on events (assistant message, /compact, permission
+  Codex re-runs the hook on events (assistant message, /compact, permission
   mode change), **not** on a timer, and a *running* session keeps its cached
   command until its next real interaction — don't expect an installed feed to
   take over an idle session.
@@ -315,7 +300,7 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   server — a per-tick `GET /` keeps a Next.js dev server permanently
   recompiling.
 - **The mission skills ship in the app.** `Resources/skills/{start-mission,
-  handoff,log-mission,end-mission}` are copied into `~/.claude/skills` at
+  handoff,log-mission,end-mission}` are copied into `~/.Codex/skills` at
   launch when missing (`HoustonSkills.installMissing`), never overwriting the
   user's copies. The header's Handoff is `HandoffCoordinator`: /log-mission →
   watch `missionlog.md`'s mtime → /clear → /handoff — orchestrated by Houston
@@ -361,7 +346,7 @@ lines):
   permission that embedded terminals made unnecessary.
 - **AppleScript spawn path** (TerminalAdapter, AppleScript, Permissions,
   MissionLauncher) — drove Ghostty by *synthesising System Events keystrokes*
-  and polled `~/.claude/sessions/` for 30s hoping to find what it spawned.
+  and polled `~/.Codex/sessions/` for 30s hoping to find what it spawned.
   Owning the pty replaced all of it; `/start-mission` is now a pty write.
 - Settings shrank to `projectsDir`; the Electron-era keys have no consumer.
 
@@ -374,5 +359,5 @@ lines):
   `ContextBar` + `formatTokens` + `Theme.Context`. The transcript-based
   pipeline (`ProcessDetect` → `ActiveSessionStore`) still runs and is still
   used for selection pruning; the status bar does not use it.
-- The header's Skills button opens `~/.claude/skills` in Finder as a
+- The header's Skills button opens `~/.Codex/skills` in Finder as a
   placeholder — the design doesn't define its behaviour.

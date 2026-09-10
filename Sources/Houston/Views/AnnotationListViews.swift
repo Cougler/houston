@@ -5,11 +5,11 @@ import SwiftUI
 /// each host wires its own delivery.
 struct AnnotationRowView: View {
     let item: Annotation
-    /// Position in the open list — matches the preview's page pin. nil for
-    /// done rows.
-    let pin: Int?
     /// Project root for resolving a web capture's file for the detail line.
     let projectPath: String?
+    /// Card styling for the tasks sheet. The web preview's list keeps the
+    /// quiet hover-pill rows — it draws on `panelFill`, where cards vanish.
+    var carded = false
     let onSend: () -> Void
     let onToggleDone: () -> Void
     let onDelete: () -> Void
@@ -26,14 +26,8 @@ struct AnnotationRowView: View {
         // toggles): hovering must not change the row's height, or the text
         // sits high in the hover pill. The strip's 21pt (odd) height keeps
         // odd-height text centering on whole pixels.
-        HStack(alignment: .center, spacing: 8) {
-            // A quiet bullet for open items — the number only lives on the
-            // web preview's page pins.
-            if pin != nil {
-                Circle()
-                    .fill(Theme.buttonActiveStroke)
-                    .frame(width: 6, height: 6)
-            }
+        HStack(alignment: .center, spacing: 10) {
+            checkbox
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if editing {
@@ -78,26 +72,42 @@ struct AnnotationRowView: View {
                 if !item.done {
                     AnnotationIconButton(symbol: "paperplane", help: "Send to Claude now", action: onSend)
                 }
-                AnnotationIconButton(
-                    symbol: item.done ? "arrow.uturn.backward" : "checkmark.circle",
-                    help: item.done ? "Reopen" : "Mark done",
-                    action: onToggleDone
-                )
                 AnnotationIconButton(symbol: "trash", help: "Delete", action: onDelete)
             }
             .frame(height: 21)
             .opacity(hovered ? 1 : 0)
             .allowsHitTesting(hovered)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, carded ? 10 : 12)
+        .padding(.vertical, carded ? 8 : 6)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(hovered ? Theme.rowHovered : .clear)
-                .padding(.horizontal, 6)
+            RoundedRectangle(cornerRadius: carded ? 8 : 6)
+                .fill(hovered ? Theme.rowHovered : (carded ? Theme.panelFill : .clear))
+                .padding(.horizontal, carded ? 0 : 6)
         )
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
+    }
+
+    /// Always-visible toggle — done rows fill it, open rows are an empty
+    /// ring. Replaces both the old bullet and the hover-only checkmark.
+    private var checkbox: some View {
+        Button(action: onToggleDone) {
+            ZStack {
+                if item.done {
+                    Circle().fill(Theme.dotActive)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Circle().strokeBorder(Theme.buttonActiveStroke, lineWidth: 1.5)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(item.done ? "Reopen" : "Mark done")
     }
 
     private func beginEdit() {
@@ -195,27 +205,26 @@ struct AnnotationsSheetPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
+                LazyVStack(alignment: .leading, spacing: 6) {
                     if store.items.isEmpty {
                         Text("Inspect an element in a web preview, then “Add to Tasks” — or type a task below.")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textSecondary)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 2)
                             .padding(.top, 4)
                     }
-                    ForEach(Array(store.open.enumerated()), id: \.element.id) { index, item in
-                        row(item, pin: index + 1)
+                    ForEach(store.open) { item in
+                        row(item)
                     }
                     if !store.doneItems.isEmpty {
                         Text("DONE")
                             .font(.system(size: 9, weight: .semibold))
                             .kerning(0.5)
                             .foregroundStyle(Theme.heading)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 2)
                             .padding(.top, 10)
-                            .padding(.bottom, 2)
                         ForEach(store.doneItems) { item in
-                            row(item, pin: nil).opacity(0.55)
+                            row(item).opacity(0.55)
                         }
                     }
                 }
@@ -261,7 +270,6 @@ struct AnnotationsSheetPanel: View {
         .frame(height: 48)
         .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
-        .padding(.horizontal, 8)
         .padding(.top, 8)
     }
 
@@ -280,11 +288,11 @@ struct AnnotationsSheetPanel: View {
         newChange = ""
     }
 
-    private func row(_ item: Annotation, pin: Int?) -> some View {
+    private func row(_ item: Annotation) -> some View {
         AnnotationRowView(
             item: item,
-            pin: pin,
             projectPath: projectPath,
+            carded: true,
             onSend: {
                 PromptDelivery.send(
                     AnnotationPrompts.compose(item, projectRoot: projectPath),
@@ -312,39 +320,29 @@ struct AnnotationsSheetPanel: View {
 }
 
 /// The tasks sheet's navigation shell: All Tasks is the root; a project's
-/// page pushes on top of it, and Back pops up — no matter whether the
-/// sheet was opened from the footer (root) or a terminal header (nested).
+/// page pushes on top of it — no matter whether the sheet was opened from
+/// the footer (root) or a terminal header (nested). Back lives in the
+/// sheet's title bar, not here.
 struct TasksNavigator: View {
     /// nil = the All Tasks root.
     let projectPath: String?
+    /// Tracked items needing attention — the Reminders row's badge.
+    let trackedAttention: Int
     let onOpenProject: (String) -> Void
-    let onBack: () -> Void
+    let onOpenReminders: () -> Void
 
     var body: some View {
         if let projectPath {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 4) {
-                    ControlIconButton(
-                        systemName: "chevron.left",
-                        help: "Back to All Tasks",
-                        bare: true,
-                        circleSize: 24,
-                        action: onBack
-                    )
-                    Text((projectPath as NSString).lastPathComponent)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                AnnotationsSheetPanel(
-                    store: AnnotationStores.store(for: projectPath),
-                    projectPath: projectPath
-                )
-                .frame(maxHeight: .infinity)
-            }
+            AnnotationsSheetPanel(
+                store: AnnotationStores.store(for: projectPath),
+                projectPath: projectPath
+            )
         } else {
-            AllTasksPanel(onOpenProject: onOpenProject)
+            AllTasksPanel(
+                trackedAttention: trackedAttention,
+                onOpenProject: onOpenProject,
+                onOpenReminders: onOpenReminders
+            )
         }
     }
 }
@@ -353,7 +351,9 @@ struct TasksNavigator: View {
 /// the root of the tasks hierarchy. Project headers push into that
 /// project's page; sending routes each task to its own project's terminal.
 struct AllTasksPanel: View {
+    let trackedAttention: Int
     let onOpenProject: (String) -> Void
+    let onOpenReminders: () -> Void
 
     @State private var stores: [AnnotationStore] = []
     @State private var projects: [Project] = []
@@ -363,12 +363,13 @@ struct AllTasksPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    RemindersRow(attention: trackedAttention, action: onOpenReminders)
                     if stores.isEmpty {
                         Text("No tasks yet. Queue changes from a web preview, or type one below.")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textSecondary)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 2)
                             .padding(.top, 4)
                     }
                     ForEach(stores, id: \.projectPath) { store in
@@ -438,7 +439,6 @@ struct AllTasksPanel: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
         }
-        .padding(.horizontal, 8)
         .padding(.top, 8)
     }
 
@@ -481,6 +481,53 @@ struct AllTasksPanel: View {
     }
 }
 
+/// The All Tasks root's Reminders entry — a card row that pushes the
+/// Tracked reminders page, carrying the attention dot and count so due
+/// items stay visible without opening it.
+private struct RemindersRow: View {
+    let attention: Int
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "bell")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Text("Reminders")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                if attention > 0 {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Theme.dotDegraded)
+                            .frame(width: 5, height: 5)
+                        Text("\(attention)")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.heading)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(hovered ? Theme.rowHovered : Theme.panelFill)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help("Tracked reminders")
+    }
+}
+
 /// One project's slice of the All Tasks sheet — its own view so each
 /// store's changes re-render just its section.
 private struct ProjectTasksSection: View {
@@ -492,37 +539,46 @@ private struct ProjectTasksSection: View {
     var body: some View {
         if !store.items.isEmpty {
             Button(action: onOpen) {
-                HStack(spacing: 4) {
-                    Text((store.projectPath as NSString).lastPathComponent.uppercased())
-                        .font(.system(size: 9, weight: .semibold))
-                        .kerning(0.5)
+                HStack(spacing: 6) {
+                    Text((store.projectPath as NSString).lastPathComponent)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(headerHovered ? Theme.link : Theme.text)
+                        .lineLimit(1)
+                    if !store.open.isEmpty {
+                        Text("\(store.open.count)")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.panelFill))
+                    }
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 7, weight: .semibold))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(headerHovered ? Theme.link : Theme.heading)
                     Spacer(minLength: 0)
                 }
-                .foregroundStyle(headerHovered ? Theme.text : Theme.heading)
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
+                .padding(.horizontal, 2)
+                .padding(.top, 12)
                 .padding(.bottom, 2)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { headerHovered = $0 }
             .help("Open this project's tasks")
-            ForEach(Array(store.open.enumerated()), id: \.element.id) { index, item in
-                row(item, pin: index + 1)
+            ForEach(store.open) { item in
+                row(item)
             }
             ForEach(store.doneItems) { item in
-                row(item, pin: nil).opacity(0.55)
+                row(item).opacity(0.55)
             }
         }
     }
 
-    private func row(_ item: Annotation, pin: Int?) -> some View {
+    private func row(_ item: Annotation) -> some View {
         AnnotationRowView(
             item: item,
-            pin: pin,
             projectPath: store.projectPath,
+            carded: true,
             onSend: {
                 PromptDelivery.send(
                     AnnotationPrompts.compose(item, projectRoot: store.projectPath),

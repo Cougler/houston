@@ -2,6 +2,67 @@
 
 ---
 
+## 2026-09-10 — Chat engine rebuilt on vendor protocols; chats are terminal-free
+
+Chats now run the way the desktop apps do: one persistent agent process per open chat — Claude over its stream-json control protocol, Codex over the app-server JSON-RPC v2 — with streaming replies, Allow/Deny permission cards, a Stop button, and no terminal or file polling anywhere. Around that core the whole chat surface matured: markdown/list/code-card/link-card rendering, rename/pin/archive/duplicate/delete management, custom bubble colors, launch-time index caching, and a ChatGPT-style new-chat empty state on the solar system. Next: local models via codex --oss (design agreed, Path A), and /push — two days of major work are uncommitted.
+
+**Done this session:**
+- Replaced the one-shot `claude -p`/`codex exec` chat runner (pinwheeled + crashed) with `ChatAgentSession`/`ChatSessionHub`: persistent processes, protocol-verified streaming deltas, stdio permission prompts rendered as Allow/Deny cards, interrupts, draft chats that promote onto their transcript file; transcript re-read once per finished turn
+- Chat rendering: block-level markdown (headings/bullets/numbered/quotes, Codex-matched spacing), CodeCard snippets with language label + copy button (fenced, `$` shell runs, inline code tinted), clickable LinkCards for URLs, tool chips hidden in finished transcripts (live turn only)
+- Chat management everywhere: rename (persists in title overlay), pin (sorts first, pin glyph), archive (sidebar "Archived (n)" toggle is their home), duplicate (fork via native re-export), copy transcript, delete to Trash; all-chats list view deleted, transcript header deleted
+- Fixed "/clear" chat titles (image base64 ate the 512KB title-scan budget → 8MB + stop-at-first-substantive), blank-until-scroll transcripts (LazyVStack → bounded eager VStack + defaultScrollAnchor), empty-state flash on chat open (selection built synchronously from path), 5-8s chat load (codex-heads.json persists ~30k rollout head verdicts keyed by mtime+size)
+- Codex context blobs (`<INSTRUCTIONS>`/plugins/environment) stripped from transcripts with an "up to speed" one-liner; handoff briefs render collapsed
+- Model menus: composer lists Fable 5/Opus 5/Sonnet 5/Haiku 4.5 + GPT-6 Codex/Astra + GPT-5.6 Sol/Terra/Luna + GPT-5.5 (slug pattern confirmed via app-server default gpt-5.6-sol), checkmarks, per-harness Effort section (`--effort` / `-c model_reasoning_effort`), status-bar Effort submenu sending `/effort`, "Add local model…" placeholder
+- Sidebar: project favicons (favicon-first lookup, logo fallback, dark-monochrome glyphs auto-template to white in dark mode), 14px names, tighter padding, chat rows icon-less at 13px, Show more discloses chats (reset on collapse), stopped servers lost their fake localhost URL, Remove from Sidebar fixed (edited the emptied projectsDirs list — post-migration no-op)
+- Empty state: 80 stars in three phase-offset twinkle batches; new-chat empty state ("What's the mission for X?") replaces the chat list everywhere; Chat Colors card in gear menu (bubble + text, persisted)
+
+**Up next:**
+- Local models Path A: "Add local model…" → detect Ollama (localhost:11434/api/tags), list models, thread/start with modelProvider oss — agreed direction, unbuilt
+- Run /push — everything since 7fc9f46 is uncommitted, including new files ChatAgentSession.swift, ChatRunner deletion, chat-meta/codex-heads stores
+- Codex live turn unverified end-to-end (handshake + thread/start proven, no billed turn run); Claude path proven with haiku
+- Consider hiding tool chips in live turns too if Aaron dislikes them there
+
+**Handoff:**
+- MAJOR RULE from Aaron (saved to memory): if a requested change will break something, overwork the system, or hurt UX, say so BEFORE implementing.
+- The codex app-server protocol shapes came from `codex app-server generate-json-schema` (dumped in this session's scratchpad, gone after reboot — regenerate if needed). Claude stream-json was verified empirically with haiku: multi-turn on one stdin works, same session id/file appends, `--permission-prompt-tool stdio` + control_request/control_response envelope, interrupt via control_request subtype interrupt.
+- ChatAgentSession claude processes pin model/effort at spawn (respawn with --resume on change); codex passes model/effort per turn/start. Sessions die when the chat closes (releaseIdle) or app quits; mid-turn sessions survive sheet close to finish writing.
+- Headless chats use each CLI's non-interactive defaults — reads fine, edits go through the permission card. Aaron's settings auto-allow a lot, so permission cards will be rare on his machine (never actually rendered one live yet).
+- `collapsedFolders` reset on collapse also clears archivedShown/chatRowsShown (in-memory only).
+- exportToCodex now takes an `originator` param — "Houston" hides a file from listings (transplants), anything else lists (duplicates use "Houston-Fork").
+- CLAUDE.md gained the chat-engine architecture block including "never rebuild on one-shot + polling" — keep it.
+
+---
+
+## 2026-09-09 — Chats feature: both harnesses' sessions as rich chat UI; sidebar rebuilt around it
+
+Houston now reads Claude Code's and Codex's session stores and presents every past session as a clean chat — sidebar-listed under collapsible per-project headers, openable as a rich transcript with a composer that can resume the session in either harness (cross-harness via transpiled native session files with an on-device handoff brief for long chats). The sidebar was rebuilt around this: Terminals section on top with status dots (pulsing amber while Claude works a turn), Servers, then chat-centric project headers; folder groups are gone entirely. All of it is uncommitted on main — 1.0.24 shipped earlier from this session with only the server-attribution and black-sky fixes.
+
+**Done this session:**
+- Released 1.0.24 (GitHub + tryhoustonapp.com): dev servers started from off rows stay attributed (`knownServerPaths` in settings), server sheet morphs live on start instead of blanking, empty-state sky black in both appearances with fixed light `skyText` tokens
+- Right sheet cleanup: tasks nav lives in the title bar (breadcrumbs "All Tasks › page", larger current crumb), Reminders is a pushed page from a card row in the All Tasks root (tab strip deleted), task rows are cards with checkbox circles, docked sheet gets 24px trailing padding
+- Sidebar rebuilt (several iterations, final model): Terminals = instance rows w/ StatusDot (gray idle / green ready / amber pulse working, fed by a new UserPromptSubmit notify hook), Servers unchanged, Projects = collapsible no-dot headers with hover actions (+ = new chat, terminal = new instance) and recent chats nested beneath; `.library` and hoisting deleted; folder groups migrated one-time into `pinnedProjects` ("Add Project" always pins now)
+- Chats feature: `ChatArchive` (parses both harnesses' JSONL stores, titles skip commands/bash), `ChatIndexStore`, `ChatBrowserView` (16px text, 800px column, 32px gutters, orange `#C2410C` user bubbles at 500px, tool-call chips), composer with grouped Claude/OpenAI model menu, image attach, ghost-text autocomplete (Tab accepts)
+- On-device intelligence (`ChatTitler`, FoundationModels, macOS 26+): chat titles for weak names (cached in `chat-titles.json`, verified generating), ghost completions, and handoff briefs
+- Cross-harness continuation: transpiles a chat into a fresh NATIVE session file for the other CLI and resumes it (`claude --resume` of a synthetic file verified end-to-end); long chats condense to handoff brief + verbatim tail (~3-4k tokens worst case, tail-only fallback without the on-device model); ChatGPT Desktop's imported copies of Claude sessions filtered out of listings (`external_agent_tool_call` markers), Houston's own exports marked `originator: Houston` and hidden
+- Dark chrome now `#0A0B0E` (gitPanelFill/attachedWellFill retuned to keep their relationships)
+
+**Up next:**
+- Run /push — everything after commit 7fc9f46 is uncommitted (ChatArchive/ChatTitler/ChatView are new files)
+- Verify codex resume by hand (`codex resume <id>` + `--model` flag placement is unverified; claude side is proven)
+- Live-updating transcript for the running session; search across chats
+- Consider mirroring the merged sidebar structure in the collapsed rail (still shows old Terminals/Servers/Projects popovers)
+
+**Handoff:**
+- The notify feed now listens for `UserPromptSubmit` and auto-merges the missing hook event into ~/.claude/settings.json at launch (`isPartiallyInstalled` upgrade — same script, consent carries). Claude sessions already running keep their cached hook set, so the working-pulse only appears for sessions started after Houston's relaunch.
+- The Codex index reads the head of ~28k rollout files once per launch (in-memory cache); first Chats open per launch takes a couple of seconds. `chat-titles.json` in Application Support persists generated titles forever.
+- `collapsedFolders` settings key was repurposed: it now stores collapsed project *chat lists* (old folder paths in it just mean those projects start collapsed — harmless).
+- One-time migration ran on Aaron's machine: `projectsDirs` folded into `pinnedProjects` and emptied; dev servers inside former group folders attribute to the group's row by prefix match.
+- FoundationModels calls are guarded (`#available(macOS 26)` + availability check) and the framework auto-weak-links; pre-26 machines get heuristic titles, no ghost text, and truncation-notice transplants.
+- A synthetic test session (dragonfruit/42) was left under ~/.claude/projects for a scratchpad dir — harmless, invisible to Houston.
+- AGENTS.md and .agents/ appeared untracked in the repo — not this session's work; don't assume their contents.
+
+---
+
 ## 2026-08-31 — Tier-3 live share links shipped end-to-end, 1.0.13 released
 
 Tier-3 public share links are live and verified: the Go relay on the Hetzner VPS serves `*.gohouston.live` with wildcard TLS, token auth, a splash page with optional 4-digit viewer code, and per-request proxying that rewrites Host to localhost so Vite/Next need zero config; Houston's tunnel client and the redesigned server drawer (Edit and track cards, View & Share fields, QR codes, native share sheet) shipped in 1.0.13. Pro access is token-gated — mint tokens manually with `relay-admin` on the VPS; the payment processor (leaning Creem) is not wired up yet. Next: the checkout + pairing flow (webhook on the VPS mints tokens, `houston://` deep link activates the app) and the abuse@ email forward.

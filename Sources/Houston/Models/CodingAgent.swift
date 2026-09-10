@@ -130,12 +130,12 @@ enum CodingAgent: Equatable, Hashable {
             ("Haiku 4.5", "haiku"),
         ]
         case .codex: [
-            ("GPT-5.1 Codex Max", "gpt-5.1-codex-max"),
-            ("GPT-5.1 Codex", "gpt-5.1-codex"),
-            ("GPT-5.1 Codex Mini", "gpt-5.1-codex-mini"),
-            ("GPT-5.1", "gpt-5.1"),
-            ("GPT-5 Codex", "gpt-5-codex"),
-            ("GPT-5", "gpt-5"),
+            ("GPT-6 Codex", "gpt-6-codex"),
+            ("GPT-6 Astra", "gpt-6-astra"),
+            ("GPT-5.6 Sol", "gpt-5.6-sol"),
+            ("GPT-5.6 Terra", "gpt-5.6-terra"),
+            ("GPT-5.6 Luna", "gpt-5.6-luna"),
+            ("GPT-5.5", "gpt-5.5"),
         ]
         case .gemini: [
             ("Gemini 3 Pro", "gemini-3-pro-preview"),

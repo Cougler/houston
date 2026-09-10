@@ -98,6 +98,10 @@ struct HoustonSettings {
     /// String-valued dicts ("path", "name", "port") so the JSON round-trips
     /// through the same reader/writer as everything else.
     var recentServers: [[String: String]]
+    /// Chat bubble fill for the user's side, "RRGGBB"; "" = brand default.
+    var chatBubbleColor: String
+    /// Chat text color inside the user bubble, "RRGGBB"; "" = white.
+    var chatTextColor: String
     /// Project paths that have ever hosted a dev server Houston attributed.
     /// Detection treats these like pinned projects, so a server keeps its
     /// sidebar row even when its project is no longer pinned or under a
@@ -127,6 +131,8 @@ struct HoustonSettings {
             windowFrame: [],
             previewWindowFrame: [],
             recentServers: [],
+            chatBubbleColor: "",
+            chatTextColor: "",
             knownServerPaths: []
         )
     }
@@ -222,6 +228,12 @@ struct HoustonSettings {
            f[2] >= 500, f[3] >= 400 {
             s.previewWindowFrame = f
         }
+        if let bubble = json["chatBubbleColor"] as? String {
+            s.chatBubbleColor = bubble
+        }
+        if let text = json["chatTextColor"] as? String {
+            s.chatTextColor = text
+        }
         if let recents = json["recentServers"] as? [[String: String]] {
             s.recentServers = recents
         }
@@ -259,6 +271,8 @@ struct HoustonSettings {
         obj["sidebarWidth"] = s.sidebarWidth
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
+        obj["chatBubbleColor"] = s.chatBubbleColor
+        obj["chatTextColor"] = s.chatTextColor
         obj["recentServers"] = s.recentServers
         obj["knownServerPaths"] = s.knownServerPaths
 

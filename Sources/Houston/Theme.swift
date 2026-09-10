@@ -9,7 +9,7 @@ enum Theme {
     // MARK: - Surfaces
 
     /// Window / sidebar / detail background.
-    static let background = Color(light: 0xEBEBEB, dark: 0x1E1E1E)
+    static let background = Color(light: 0xEBEBEB, dark: 0x0A0B0E)
     /// The empty state's sky — a step off the chrome in each direction:
     /// darker than the sidebar in light mode, lighter in dark mode.
     static let emptyStateBackground = Color(light: 0x000000, dark: 0x000000)
@@ -23,11 +23,11 @@ enum Theme {
     static let panelFill = Color(light: 0xEBEBEB, dark: 0x262626)
     /// The git panel: chrome-colored in light mode like the other cards,
     /// darker than the UI in dark mode.
-    static let gitPanelFill = Color(light: 0xEBEBEB, dark: 0x181818)
+    static let gitPanelFill = Color(light: 0xEBEBEB, dark: 0x050608)
     /// The viewer-code row attached under the live-link field: barely off
-    /// the drawer background (0x1E1E1E dark / 0xEBEBEB light) so the row
+    /// the drawer background (0x0A0B0E dark / 0xEBEBEB light) so the row
     /// reads as recessed, not as a second field.
-    static let attachedWellFill = Color(light: 0xE7E7E7, dark: 0x1C1C1C)
+    static let attachedWellFill = Color(light: 0xE7E7E7, dark: 0x08090C)
     /// The faded helmet on the empty state.
     static let watermark = Color(light: 0xEBEBEB, dark: 0x323232)
 
@@ -98,6 +98,11 @@ enum Theme {
     /// invisible to low-vision users; #15803D clears 3:1 (WCAG for non-text
     /// UI) while the dark surface keeps the bright signal color.
     static let dotActive = Color(light: 0x15803D, dark: 0x00DD21)
+    /// The sidebar status dot's idle state — a quiet gray, non-signal.
+    static let dotIdle = Color(light: 0xB8B8B8, dark: 0x4E4E4E)
+    /// The chat view's user bubble. This orange holds 4.5:1 against white
+    /// text — don't lighten it without rechecking.
+    static let chatUserFill = Color(light: 0xC2410C, dark: 0xC2410C)
     /// Deepened in light mode: its only text use (diff hunk headers) sat at
     /// 3.1:1 with the fixed #3B82F6.
     static let dotServer = Color(light: 0x1D4ED8, dark: 0x3B82F6)
