@@ -127,6 +127,8 @@ struct ChatBrowserView: View {
     @State private var skyRevealed = false
     /// Messages rendered at the transcript's tail; "Show earlier" raises it.
     @State private var historyShown = 150
+    /// Bumped on every send so the transcript scrolls the new bubble into view.
+    @State private var sendScrollTick = 0
 
     /// The selection is derived synchronously from the file path — going
     /// through a directory listing first flashed the empty state over
@@ -244,9 +246,13 @@ struct ChatBrowserView: View {
                             // while the bottom anchor still follows growth
                             // once the content actually overflows.
                             .frame(minHeight: geo.size.height, alignment: .top)
+                            .thinScrollbar()
                         }
                         .defaultScrollAnchor(.bottom)
                         .onChange(of: messages.count) {
+                            proxy.scrollTo("chat-bottom", anchor: .bottom)
+                        }
+                        .onChange(of: sendScrollTick) {
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
                     }
@@ -337,6 +343,7 @@ struct ChatBrowserView: View {
                 .padding(.vertical, 18)
                 .frame(maxWidth: 800)
                 .frame(maxWidth: .infinity)
+                .thinScrollbar()
             }
             ChatComposer(
                 placeholder: "What's next?",
@@ -396,6 +403,7 @@ struct ChatBrowserView: View {
     /// Same harness resumes in place; the other harness transplants the
     /// transcript into a fresh native session first, then continues there.
     private func handleSend(_ ref: ChatSessionRef, text: String, model: ChatModelChoice) {
+        sendScrollTick += 1
         if model.harness == ref.harness {
             hub.session(for: ref, project: projectPath)
                 .send(text: text, model: model)
@@ -463,13 +471,15 @@ struct ChatBrowserView: View {
         loadToken += 1
         let token = loadToken
         let userText = session.pendingUserText
+        let finalText = Self.finalAssistantText(session)
         Task {
             var parsed: [ChatMessage] = []
-            for attempt in 0..<8 {
+            for attempt in 0..<15 {
                 parsed = await Task.detached(priority: .userInitiated) {
                     ChatArchive.transcript(ref)
                 }.value
-                if Self.containsTurn(parsed, for: userText) || attempt == 7 { break }
+                if Self.containsTurn(parsed, for: userText, finalText: finalText)
+                    || attempt == 14 { break }
                 try? await Task.sleep(nanoseconds: 400_000_000)
             }
             if token == loadToken { messages = parsed }
@@ -478,10 +488,23 @@ struct ChatBrowserView: View {
         }
     }
 
+    /// The last chunk of assistant text the live turn holds — the marker
+    /// that the transcript flush actually reached the end of the turn.
+    private static func finalAssistantText(_ session: ChatAgentSession) -> String? {
+        if !session.streamText.isEmpty { return session.streamText }
+        for block in session.liveBlocks.reversed() {
+            if case let .text(text) = block { return text }
+        }
+        return nil
+    }
+
     /// Does the parsed transcript already hold the turn that just ended —
-    /// the user's message with an assistant reply after it?
+    /// the user's message followed by the turn's FINAL assistant text?
+    /// Matching any assistant text is not enough: a turn's opening line
+    /// flushes to disk before its tool calls run, so an early match let
+    /// `clearTurn` wipe the still-unflushed tail of the response.
     private static func containsTurn(
-        _ messages: [ChatMessage], for userText: String?
+        _ messages: [ChatMessage], for userText: String?, finalText: String?
     ) -> Bool {
         guard let userText, !userText.isEmpty else { return !messages.isEmpty }
         let needle = String(userText.prefix(60))
@@ -491,9 +514,16 @@ struct ChatBrowserView: View {
                 return false
             }
         }) else { return false }
+        let tail = String(
+            (finalText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).suffix(60)
+        )
         return messages[index...].contains { message in
             message.role == .assistant && message.blocks.contains { block in
-                if case .text = block { return true }
+                if case let .text(text) = block {
+                    // A turn with no streamed text (tool-only, or one that
+                    // errored out) settles for any assistant text.
+                    return tail.isEmpty || text.contains(tail)
+                }
                 return false
             }
         }

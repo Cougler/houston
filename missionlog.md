@@ -2,6 +2,33 @@
 
 ---
 
+## 2026-09-10 — Local MLX models land; chat polish pass; 1.0.25 + 1.0.26 shipped
+
+Local models work end-to-end: MLX Core (mlx-serve) is detected, its chat models list in the composer, and Codex runs them through a custom provider against the local /v1 endpoint — a real local turn was verified from the UI. The chat surface got a full polish pass (composer control row with harness/model/permissions chips, Stop in the send slot, contextual on-device titles, hugging bubbles, unified lighter chrome) and everything is committed, pushed, and released as 1.0.25 then 1.0.26 with the site in sync. Next: Ollama/LM Studio engines, and exercising the Codex permission-mode mappings live.
+
+**Done this session:**
+- Local models: `LocalModelStore` detects MLX Core (app bundle or PATH), lists chat models via `mlx-serve list`, starts `serve` on demand and polls the port; composer's Local section lists them (Ollama/LM Studio "Coming soon"); codex spawns with `model_providers.mlx` overrides (base_url `http://localhost:11234/v1`, `wire_api=responses` — codex dropped `chat`) and threads start with `modelProvider: "mlx"`; provider switch respawns + re-resumes like claude's model pin
+- Composer redesigned: top control row (＋ attach, harness chip, model chip, permissions chip at 13px regular), permission modes (Ask first / Auto edits / Full access) mapped to claude `--permission-mode` (respawn) and codex per-turn `approvalPolicy`/`sandboxPolicy`, Stop button swaps into the 32px send slot while running, 44px top-anchored input well with whole-well click-to-focus, per-session `lastModel` memory so picks survive draft→transcript promotion
+- Fixed the stuck-first-response bug (turn-done event beats transcript flush; reload now retries until the finished turn is actually in the file before clearing the live stream) and the dead "+" (stale unpromoted draft hijacked the empty state; "+" now discards idle drafts)
+- Chat rendering: user bubbles hug text up to the 500 cap (styled() forced full width), no phantom trailing paragraph gap, short chats read from the top (content stretched to viewport, top-pinned) while overflow still bottom-follows, codex's AGENTS.md heading stripped from the first user bubble
+- Chat titles: on-device titler now names every listed chat (first 8 per project), prompt demands the concrete subject and bans generic labels
+- Chrome: `Theme.sidebarFill` (lighter than window bg) unifies sidebar, collapsed rail, composer, and the 24px band around the content card; terminal action/status bars stand in for the vertical bands; chat mode drops terminal chrome entirely; sidebar chat rows aligned to the project name and dimmed; rail's Projects popover is chat-centric (click = new chat, hover terminal icon, 3 recent chats nested)
+- Released 1.0.25 and 1.0.26 (signed, notarized, GitHub + tryhoustonapp.com in sync); all work committed and pushed (edb27da, 4b8a2c1)
+
+**Up next:**
+- Ollama and LM Studio as additional local engines (same provider mechanism, different ports)
+- Exercise codex Auto edits / Full access live (`approvalPolicy: never` + `workspaceWrite`/`dangerFullAccess` are schema-derived, never run)
+- Consider filtering local models by context length (needs the server up at scan time; /v1/models carries `context_length`)
+
+**Handoff:**
+- MLX verified: a real local turn ran from the UI (session meta showed `model_provider: mlx`, gemma-4-e2b) — but gemma-4-e2b's 12k max context can't hold codex's ~23k system prompt reliably; the 256k models (Qwen3.5-9B, gemma-4-12b) are the real targets. mlx-serve auto-caps context by free RAM, so a memory-tight machine serves tiny contexts and codex turns fail with "Prompt exceeds maximum context length" — that's environmental, not a bug. First local turn is slow (model load + 23k-token prefill).
+- Codex app-server schema: regenerate with `codex app-server generate-json-schema --out <dir>` (needs --out now). `wire_api = "chat"` is rejected by current codex — only `responses`; mlx-serve serves /v1/responses natively.
+- MainWindowView's root body is at the type-checker's limit — adding ONE more modifier to it fails the build ("unable to type-check in reasonable time"); ride new layers inside existing overlay slots (that's why the window-border experiment lived in modalLayer before being removed).
+- Chat titles are cached forever in chat-titles.json; pre-existing generated titles keep their old style unless the cache is purged.
+- The permission chip's mode rides ChatModelChoice per send; claude changes respawn (key includes permission), codex passes it per turn/start.
+
+---
+
 ## 2026-09-10 — Chat engine rebuilt on vendor protocols; chats are terminal-free
 
 Chats now run the way the desktop apps do: one persistent agent process per open chat — Claude over its stream-json control protocol, Codex over the app-server JSON-RPC v2 — with streaming replies, Allow/Deny permission cards, a Stop button, and no terminal or file polling anywhere. Around that core the whole chat surface matured: markdown/list/code-card/link-card rendering, rename/pin/archive/duplicate/delete management, custom bubble colors, launch-time index caching, and a ChatGPT-style new-chat empty state on the solar system. Next: local models via codex --oss (design agreed, Path A), and /push — two days of major work are uncommitted.
