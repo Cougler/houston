@@ -792,6 +792,19 @@ private struct LiveTurnView: View {
     }
 }
 
+/// I-beam over the composer's input well. `pointerStyle` needs macOS 15;
+/// on 14 the well keeps the arrow (the field itself still I-beams once
+/// focused) rather than fighting AppKit's cursor rects.
+private struct IBeamCursor: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.pointerStyle(.horizontalText)
+        } else {
+            content
+        }
+    }
+}
+
 /// How full the model's context window is, in the composer's corner — so
 /// a chat maxing out is visible before compaction hits. Claude only (the
 /// session publishes no usage for codex) and hidden until usage lands;
@@ -1232,12 +1245,11 @@ private struct ChatComposer: View {
         .frame(minHeight: 44, alignment: .leading)
         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         .onTapGesture { inputFocused = true }
-        // The whole well is a text target — cursor says so. set(), not
-        // push()/pop(), same as LinkButton: a view that vanishes
-        // mid-hover would leave a pushed cursor stranded.
-        .onHover { inside in
-            (inside ? NSCursor.iBeam : NSCursor.arrow).set()
-        }
+        // The whole well is a text target — cursor says so. NOT an
+        // onHover + NSCursor.set(): AppKit's cursor-rect pass resets the
+        // cursor on every mouse move until the field is first responder,
+        // so set() just flickered. pointerStyle is the system-managed way.
+        .modifier(IBeamCursor())
     }
 
     /// A menu row that carries the native checkmark on the current pick.
