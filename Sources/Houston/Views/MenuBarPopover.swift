@@ -163,9 +163,9 @@ struct MenuBarServersView: View {
         .frame(width: Self.size.width)
         .frame(height: clampedHeight, alignment: .top)
         .background(Theme.background)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous)
                 .stroke(Theme.buttonStroke, lineWidth: 1)
         )
         .onPreferenceChange(PopoverHeightKey.self) { height in
@@ -222,7 +222,7 @@ struct MenuBarServersView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Theme.text)
                     Text("Servers on ports 3000–9999 show up here.")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                 }
                 .frame(maxWidth: .infinity)
@@ -288,7 +288,7 @@ struct MenuBarServersView: View {
                         .foregroundStyle(Theme.textPositive)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Capsule().stroke(Theme.textPositive, lineWidth: 1))
+                        .background(Capsule().fill(Theme.textPositive.opacity(0.12)))
                         .padding(.trailing, 10)
                         .help("Shared live on the web")
                 }
@@ -368,7 +368,7 @@ struct MenuBarServersView: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 8)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
                     .fill(hoveredID == project.path ? Theme.rowHovered : .clear)
             )
             .contentShape(Rectangle())
@@ -401,12 +401,12 @@ struct MenuBarServersView: View {
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(Theme.dotActive)
                 Text("Start")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Fonts.secondaryMedium)
                     .foregroundStyle(Theme.textSecondary)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(Capsule().stroke(Theme.buttonStroke, lineWidth: 1))
+            .background(Capsule().fill(Theme.buttonFill))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -467,7 +467,7 @@ struct MenuBarServersView: View {
         } else {
             VStack(spacing: 8) {
                 Text("This server is no longer listening.")
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.textSecondary)
                 LinkButton(title: "Back to servers", size: 12) { selectedID = nil }
             }

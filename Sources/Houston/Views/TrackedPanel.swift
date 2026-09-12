@@ -101,14 +101,11 @@ struct TrackedPanel: View {
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(
-                    RoundedRectangle(cornerRadius: 4).fill(Theme.buttonFill)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.buttonFill)
                 )
             Text("say \u{201C}track \u{2026}\u{201D} in any Claude session to add one from there")
-                .font(.system(size: 10))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.heading)
         }
         .frame(maxWidth: .infinity)
@@ -201,7 +198,6 @@ struct TrackedPanel: View {
         .padding(.horizontal, 9)
         .frame(height: 22)
         .background(Capsule().fill(Theme.buttonFill))
-        .overlay(Capsule().strokeBorder(Theme.buttonStroke, lineWidth: 1))
         .contentShape(Capsule())
     }
 
@@ -220,8 +216,8 @@ struct TrackedPanel: View {
 
     private func sectionLabel(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 9, weight: .semibold))
-            .kerning(0.6)
+            .font(Theme.Fonts.label)
+            .kerning(0.5)
             .foregroundStyle(Theme.heading)
             .padding(.leading, 2)
             .padding(.top, 6)
@@ -230,11 +226,11 @@ struct TrackedPanel: View {
     private var emptyState: some View {
         VStack(spacing: 6) {
             Text("No reminders yet")
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             Text("Tell Claude to \u{201C}track the client secret expiry in "
                 + "24 months\u{201D}, or add one here.")
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -248,7 +244,7 @@ struct TrackedPanel: View {
 
     private var addButton: some View {
         QuietCardButton {
-            withAnimation(.easeOut(duration: 0.15)) { adding = true }
+            withAnimation(Theme.quick) { adding = true }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "plus")
@@ -276,7 +272,7 @@ struct TrackedPanel: View {
                 Spacer(minLength: 0)
                 Button("Cancel") { dismissForm() }
                     .buttonStyle(.plain)
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                 Button(action: save) {
                     Text("Track")
@@ -300,11 +296,8 @@ struct TrackedPanel: View {
         }
         .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 10).fill(Theme.buttonFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.buttonFill)
         )
     }
 
@@ -322,10 +315,9 @@ struct TrackedPanel: View {
             .foregroundStyle(Theme.text)
             .padding(.horizontal, 8)
             .frame(height: height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.background))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(Theme.background)
             )
     }
 
@@ -342,7 +334,7 @@ struct TrackedPanel: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
                 Text("Remind \(leadLabel) before")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Fonts.secondaryMedium)
                     .foregroundStyle(Theme.text)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 7, weight: .semibold))
@@ -351,13 +343,10 @@ struct TrackedPanel: View {
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(
-                RoundedRectangle(cornerRadius: 6).fill(Theme.buttonFill)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(Theme.buttonFill)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Theme.buttonStroke, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -388,7 +377,7 @@ struct TrackedPanel: View {
     }
 
     private func dismissForm() {
-        withAnimation(.easeOut(duration: 0.15)) { adding = false }
+        withAnimation(Theme.quick) { adding = false }
         newTitle = ""
         newProject = ""
         newNotes = ""
@@ -428,11 +417,11 @@ private struct TrackedCard: View {
                 .foregroundStyle(Theme.text)
                 .lineLimit(2)
             Text(item.due)
-                .font(.system(size: 10))
+                .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.textPath)
             if let notes = item.notes, !notes.isEmpty {
                 Text(notes)
-                    .font(.system(size: 10.5))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -440,10 +429,9 @@ private struct TrackedCard: View {
         }
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.buttonFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.buttonFill)
         )
         .onHover { hovered = $0 }
     }
@@ -480,7 +468,7 @@ private struct TrackedCard: View {
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 20, height: 20)
                     .background(
-                        RoundedRectangle(cornerRadius: 5)
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
                             .fill(Theme.controlChip)
                     )
                     .contentShape(Rectangle())
@@ -526,7 +514,7 @@ private struct CalendarGrid: View {
             ) {
                 ForEach(weekdaySymbols.indices, id: \.self) { index in
                     Text(weekdaySymbols[index])
-                        .font(.system(size: 8.5, weight: .semibold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(Theme.heading)
                         .frame(height: 14)
                 }
@@ -628,7 +616,8 @@ private struct CalendarGrid: View {
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5).fill(Theme.controlChip)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.controlChip)
                 )
                 .contentShape(Rectangle())
         }
@@ -687,7 +676,10 @@ private struct ProjectTag: View {
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2.5)
-            .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.12)))
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(color.opacity(0.12))
+            )
             .lineLimit(1)
     }
 
@@ -716,13 +708,13 @@ private struct TrackedDoneCard: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.textSecondary)
                     .strikethrough(true, color: Theme.heading)
                     .lineLimit(1)
                 if let doneAt = item.doneAt {
                     Text("done \(doneAt)")
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.textPath)
                 }
             }
@@ -741,10 +733,9 @@ private struct TrackedDoneCard: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.buttonFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.buttonFill)
         )
         .onHover { hovered = $0 }
     }
@@ -760,14 +751,10 @@ struct QuietCardButton<Label: View>: View {
         Button(action: action) {
             label()
                 .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(hovered ? Theme.rowHovered : .clear)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                        .fill(hovered ? Theme.rowHovered : Theme.panelFill)
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Theme.buttonStroke, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
@@ -817,8 +804,14 @@ struct ControlIconButton: View {
             }
         } else {
             ZStack {
-                if !bare { RoundedRectangle(cornerRadius: 5).fill(Theme.controlChip) }
-                if hovered { RoundedRectangle(cornerRadius: 5).fill(Theme.rowHovered) }
+                if !bare {
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.controlChip)
+                }
+                if hovered {
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.rowHovered)
+                }
             }
         }
     }

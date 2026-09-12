@@ -148,16 +148,20 @@ enum ProcessDetect {
 
     // MARK: - usage parsing
 
-    private struct UsageSummary {
+    // Internal, not private: the chat pipeline seeds its context meter
+    // from the same transcript tail (ChatSessionHub).
+    struct UsageSummary {
         var input: Int = 0
         var cacheRead: Int = 0
         var cacheCreate: Int = 0
         var output: Int = 0
         var model: String? = nil
         var timestampMs: Int64? = nil
+
+        var contextTokens: Int { input + cacheRead + cacheCreate + output }
     }
 
-    private static func readUsage(jsonlPath: String) -> UsageSummary {
+    static func readUsage(jsonlPath: String) -> UsageSummary {
         guard let tail = tail(ofFile: jsonlPath, maxBytes: usageTailBytes) else {
             return UsageSummary()
         }
@@ -251,7 +255,7 @@ enum ProcessDetect {
         "claude-2",
     ]
 
-    private static func contextWindow(for model: String?) -> Int {
+    static func contextWindow(for model: String?) -> Int {
         guard let model else { return defaultContextWindow }
         for p in smallWindowPatterns {
             if model.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil {

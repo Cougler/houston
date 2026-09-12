@@ -69,6 +69,9 @@ struct HoustonSettings {
     /// footer gear). A fresh key on purpose — existing installs see the
     /// paginated onboarding once, even if they saw the old welcome card.
     var onboardingSeen: Bool
+    /// The capsule-view explainer was suppressed via its "don't show
+    /// this again" checkbox.
+    var capsuleHintDismissed: Bool
     /// The share proxy (`<project>.localhost` / `<project>.local`) is
     /// switched off. Stored inverted so the default JSON absence means on.
     var sharingDisabled: Bool
@@ -85,6 +88,8 @@ struct HoustonSettings {
     var sidebarCollapsed: Bool
     /// Expanded sidebar width in points (user-dragged).
     var sidebarWidth: Double
+    /// Right sheet (Git/Capsules/etc.) width in points (user-dragged).
+    var rightSheetWidth: Double
     /// Last window frame as [x, y, w, h]; empty until first saved. Lives
     /// here (not just NSWindow frame autosave) because settings.json is the
     /// store that survives updates AND is shared by debug and packaged
@@ -122,12 +127,14 @@ struct HoustonSettings {
             statusBarCollapsed: false,
             statusBarHiddenItems: [],
             onboardingSeen: false,
+            capsuleHintDismissed: false,
             sharingDisabled: false,
             relayToken: "",
             relayEnabled: [],
             relayPins: [:],
             sidebarCollapsed: false,
             sidebarWidth: Double(Theme.sidebarWidth),
+            rightSheetWidth: 364,
             windowFrame: [],
             previewWindowFrame: [],
             recentServers: [],
@@ -200,6 +207,9 @@ struct HoustonSettings {
         if let seen = json["onboardingSeen"] as? Bool {
             s.onboardingSeen = seen
         }
+        if let dismissed = json["capsuleHintDismissed"] as? Bool {
+            s.capsuleHintDismissed = dismissed
+        }
         if let off = json["sharingDisabled"] as? Bool {
             s.sharingDisabled = off
         }
@@ -219,6 +229,10 @@ struct HoustonSettings {
         // not restore an unusable sidebar.
         if let w = json["sidebarWidth"] as? Double, (180...420).contains(w) {
             s.sidebarWidth = w
+        }
+        // Bounds mirror MainWindowView.rightSheetRange.
+        if let w = json["rightSheetWidth"] as? Double, (300...600).contains(w) {
+            s.rightSheetWidth = w
         }
         if let f = json["windowFrame"] as? [Double], f.count == 4,
            f[2] >= 400, f[3] >= 300 {
@@ -263,12 +277,14 @@ struct HoustonSettings {
         obj["statusBarCollapsed"] = s.statusBarCollapsed
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
         obj["onboardingSeen"] = s.onboardingSeen
+        obj["capsuleHintDismissed"] = s.capsuleHintDismissed
         obj["sharingDisabled"] = s.sharingDisabled
         obj["relayToken"] = s.relayToken
         obj["relayEnabled"] = s.relayEnabled
         obj["relayPins"] = s.relayPins
         obj["sidebarCollapsed"] = s.sidebarCollapsed
         obj["sidebarWidth"] = s.sidebarWidth
+        obj["rightSheetWidth"] = s.rightSheetWidth
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
         obj["chatBubbleColor"] = s.chatBubbleColor

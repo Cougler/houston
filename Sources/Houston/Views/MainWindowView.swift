@@ -37,6 +37,9 @@ enum SidebarSelection: Hashable {
 enum RightPanel: Equatable {
     case git, skills, feed, tasks
     case server(String)
+    /// A project's capsule shelf — its sealed chats. `focus` (a capsule
+    /// id) lands straight in that capsule's transcript view.
+    case capsules(project: String, focus: String?)
 }
 
 /// Which terminal row the rename card is editing.
@@ -99,6 +102,14 @@ struct MainWindowView: View {
     /// Chat rows disclosed per project beyond the base few ("Show more") —
     /// cleared when the project collapses, so reopening shows the short list.
     @State private var chatRowsShown: [String: Int] = [:]
+    /// The Servers item's flyout is open — stopped (recent) servers in a
+    /// second-layer card beside the sidebar, same chrome as the rail's
+    /// flyouts. Session-only, like hover state.
+    @State private var serversFlyout = false
+    /// Capsule rows shown per project — starts at 5, "Show more" steps by
+    /// 5 (mirroring the chats' disclosure). Resets when the project
+    /// header folds.
+    @State private var capsuleRowsShown: [String: Int] = [:]
     /// Projects whose archived chats are expanded in the sidebar — the
     /// only surface archived chats appear on (the transcript view has no
     /// list anymore).
@@ -114,6 +125,7 @@ struct MainWindowView: View {
     @StateObject private var chatIndex = ChatIndexStore.shared
     @StateObject private var chatTitler = ChatTitler.shared
     @StateObject private var chatMeta = ChatMetaStore.shared
+    @StateObject private var capsuleStore = CapsuleStore.shared
     /// Last panel shown — what the sheet renders while sliding closed.
     @State private var lastRightPanel: RightPanel?
     /// Agent the header's split button launches; the chevron menu changes it.
@@ -181,6 +193,13 @@ struct MainWindowView: View {
     /// Pointer over the divider's grip — lights the faint stroke that tells
     /// the user there's something to grab.
     @State private var dividerHovered = false
+    /// Right sheet width, dragged by its leading edge; bounds mirror
+    /// `rightSheetRange` (unavailable in a property initializer).
+    @State private var rightSheetWidth: CGFloat =
+        min(max(CGFloat(HoustonSettings.read().rightSheetWidth), 300), 600)
+    private let rightSheetRange: ClosedRange<CGFloat> = 300...600
+    @State private var rightSheetDragStart: CGFloat?
+    @State private var rightSheetDividerHovered = false
 
     var body: some View {
         // Plain HStack, not `HSplitView`: NSSplitView-backed `HSplitView`
@@ -215,6 +234,7 @@ struct MainWindowView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.sidebarFill)
         .overlay(alignment: .topLeading) { railFlyoutLayer }
+        .overlay(alignment: .topLeading) { serversFlyoutLayer }
         .overlay(alignment: .bottomLeading) { themePickerLayer }
         .overlay(alignment: .bottomLeading) { chatColorsLayer }
         .overlay(alignment: .topTrailing) { rightSheetLayer }
@@ -305,7 +325,15 @@ struct MainWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .houstonOpenProject)) { note in
             if let path = note.userInfo?["path"] as? String {
-                select(.project(path))
+                // An optional "tab" targets a specific nested shell (the
+                // chat login flow opens a fresh tab when the main pane is
+                // busy); without it the project's main terminal is fine.
+                if let raw = note.userInfo?["tab"] as? String,
+                   let tab = UUID(uuidString: raw) {
+                    select(.shell(path: path, tab: tab))
+                } else {
+                    select(.project(path))
+                }
             }
         }
         // Keyboard shortcuts, routed from MainMenu — the menu owns no state,
@@ -496,12 +524,24 @@ struct MainWindowView: View {
 
     private var sidebarColumn: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: trafficLightInset)
+            // The collapse control rides the titlebar strip, just right of
+            // the traffic lights (which end at x≈69).
+            HStack {
+                FooterIconButton(
+                    systemName: "sidebar.left",
+                    help: "Collapse sidebar",
+                    action: toggleSidebarCollapse
+                )
+                .padding(.leading, 74)
+                Spacer(minLength: 0)
+            }
+            .frame(height: trafficLightInset)
                 // Off the root body — one more root modifier tips the
                 // type-checker over its expression limit.
                 .onChange(of: store.pinnedProjects) { _, paths in
                     chatIndex.refreshAll(paths)
                 }
+            sidebarTopCluster
             SidebarTable(
                 entries: entries,
                 selection: selectionBinding,
@@ -561,6 +601,35 @@ struct MainWindowView: View {
     private var railColumn: some View {
         VStack(spacing: 6) {
             Color.clear.frame(height: trafficLightInset)
+            // Expand sits below the traffic lights — the same control that
+            // lives beside them when the sidebar is out.
+            FooterIconButton(
+                systemName: "sidebar.left",
+                help: "Expand sidebar",
+                action: toggleSidebarCollapse
+            )
+            // The top cluster, bare icons in the expanded order:
+            // gear, tasks, bell.
+            settingsMenu()
+            FooterLabeledButton(
+                systemName: "checklist",
+                dot: tracked.attentionCount > 0,
+                active: rightPanel == .tasks,
+                help: "Tasks and reminders across all projects",
+                action: { openAllTasks() }
+            )
+            FooterLabeledButton(
+                systemName: "bell",
+                badgeCount: feed.unreadCount,
+                active: rightPanel == .feed,
+                help: "Notifications",
+                action: { toggleRightPanel(.feed) }
+            )
+            // Same short rule as the expanded footer, centered on the rail.
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(width: 24, height: 1)
+                .padding(.vertical, 2)
             railButton(.terminals)
             railButton(.servers)
             railButton(.projects)
@@ -579,35 +648,8 @@ struct MainWindowView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.buttonActiveStroke)
                 }
+                .padding(.bottom, 12)
             }
-            // Too narrow for the expanded footer's labeled rows — bare icons
-            // stacked in the same order: bell, tasks, gear, collapse.
-            FooterLabeledButton(
-                systemName: "bell",
-                badgeCount: feed.unreadCount,
-                active: rightPanel == .feed,
-                help: "Notifications",
-                action: { toggleRightPanel(.feed) }
-            )
-            FooterLabeledButton(
-                systemName: "checklist",
-                dot: tracked.attentionCount > 0,
-                active: rightPanel == .tasks,
-                help: "Tasks and reminders across all projects",
-                action: { openAllTasks() }
-            )
-            settingsMenu()
-            // Same short rule as the expanded footer, centered on the rail.
-            Rectangle()
-                .fill(Theme.borderSidebar)
-                .frame(width: 24, height: 1)
-                .padding(.vertical, 2)
-            FooterIconButton(
-                systemName: "sidebar.left",
-                help: "Expand sidebar",
-                action: toggleSidebarCollapse
-            )
-            .padding(.bottom, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.sidebarFill)
@@ -648,12 +690,12 @@ struct MainWindowView: View {
                 }
                 railPopoverContent(section)
                     .background(
-                        RoundedRectangle(cornerRadius: 12)
+                        RoundedRectangle(cornerRadius: Theme.radiusFloat)
                             .fill(Theme.panelFill)
-                            .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                            .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12)
+                        RoundedRectangle(cornerRadius: Theme.radiusFloat)
                             .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                     )
                     .offset(x: railWidth + 6, y: flyoutTop(for: section))
@@ -687,14 +729,14 @@ struct MainWindowView: View {
                         setThemePicker(false)
                     }
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusFloat))
                 .background(
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: Theme.radiusFloat)
                         .fill(Theme.panelFill)
-                        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                        .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: Theme.radiusFloat)
                         .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                 )
                 .onExitCommand { setThemePicker(false) }
@@ -726,19 +768,19 @@ struct MainWindowView: View {
                     .onTapGesture { showChatColors = false }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Chat Colors")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(Theme.Fonts.title)
                         .foregroundStyle(Theme.text)
                     ColorPicker("Your bubble", selection: Binding(
                         get: { chatStyle.bubble },
                         set: { chatStyle.setBubble($0) }
                     ), supportsOpacity: false)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.text)
                     ColorPicker("Your text", selection: Binding(
                         get: { chatStyle.text },
                         set: { chatStyle.setText($0) }
                     ), supportsOpacity: false)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.text)
                     HStack {
                         Spacer(minLength: 0)
@@ -748,32 +790,32 @@ struct MainWindowView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .background(
-                                RoundedRectangle(cornerRadius: 10).fill(chatStyle.bubble)
+                                RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(chatStyle.bubble)
                             )
                     }
                     HStack {
                         Button("Reset") { chatStyle.reset() }
                             .buttonStyle(.plain)
-                            .font(.system(size: 12))
+                            .font(Theme.Fonts.body)
                             .foregroundStyle(Theme.link)
                             .opacity(chatStyle.isDefault ? 0.4 : 1)
                             .disabled(chatStyle.isDefault)
                         Spacer(minLength: 0)
                         Button("Done") { showChatColors = false }
                             .buttonStyle(.plain)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(Theme.Fonts.bodyMedium)
                             .foregroundStyle(Theme.link)
                     }
                 }
                 .padding(16)
                 .frame(width: 250)
                 .background(
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: Theme.radiusFloat)
                         .fill(Theme.panelFill)
-                        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                        .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: Theme.radiusFloat)
                         .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                 )
                 .onExitCommand { showChatColors = false }
@@ -788,9 +830,6 @@ struct MainWindowView: View {
     }
 
     // MARK: - Right sheet
-
-    /// The uniform card width inside the sheet; the strip adds its gutters.
-    private var rightSheetWidth: CGFloat { 364 }
 
     /// The sheet's one animation — springy enough to feel alive, damped
     /// enough not to bounce off the edge.
@@ -815,7 +854,7 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
-        case .git, .server, .tasks:
+        case .git, .server, .tasks, .capsules:
             break
         }
     }
@@ -930,6 +969,58 @@ struct MainWindowView: View {
                 .frame(width: 1)
                 .opacity(rightPanelDocked ? 0 : 1)
         }
+        .overlay(alignment: .leading) { rightSheetGrip }
+    }
+
+    /// The sheet's resize grip, mirroring the sidebar divider: invisible
+    /// until hovered, dragging left widens. Same global-space rationale —
+    /// the edge moves with the width it controls.
+    private var rightSheetGrip: some View {
+        Rectangle()
+            .fill(rightSheetDividerHovered || rightSheetDragStart != nil
+                ? Theme.borderSidebar : Color.clear)
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .animation(.easeOut(duration: 0.12), value: rightSheetDividerHovered)
+            .overlay(
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: 6)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        rightSheetDividerHovered = inside
+                        if inside {
+                            NSCursor.resizeLeftRight.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
+                    .gesture(
+                        DragGesture(coordinateSpace: .global)
+                            .onChanged { value in
+                                let start = rightSheetDragStart ?? rightSheetWidth
+                                rightSheetDragStart = start
+                                // Leading edge: dragging left grows the sheet.
+                                let proposed = start - value.translation.width
+                                let clamped = min(
+                                    max(proposed, rightSheetRange.lowerBound),
+                                    rightSheetRange.upperBound
+                                ).rounded()
+                                guard clamped != rightSheetWidth else { return }
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    rightSheetWidth = clamped
+                                }
+                            }
+                            .onEnded { _ in
+                                rightSheetDragStart = nil
+                                updateSettings {
+                                    $0.rightSheetWidth = Double(rightSheetWidth)
+                                }
+                            }
+                    )
+            )
     }
 
     /// What the sheet renders: the open panel, or the last one while the
@@ -961,6 +1052,7 @@ struct MainWindowView: View {
         case .feed: "NOTIFICATIONS"
         case .server: "SERVER"
         case .tasks: "ALL TASKS"
+        case .capsules: "CAPSULES"
         case nil: ""
         }
     }
@@ -990,7 +1082,7 @@ struct MainWindowView: View {
 
     private func capsSheetTitle(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 10))
+            .font(Theme.Fonts.meta)
             .kerning(0.5)
             .foregroundStyle(Theme.heading)
     }
@@ -1003,15 +1095,15 @@ struct MainWindowView: View {
         HStack(spacing: 5) {
             Button(action: onRoot) {
                 Text("All Tasks")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Fonts.secondaryMedium)
                     .foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 8)
                     .frame(height: 24)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
                             .fill(crumbHovered ? Theme.rowHovered : .clear)
                     )
-                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
             }
             .buttonStyle(.plain)
             .onHover { crumbHovered = $0 }
@@ -1020,7 +1112,7 @@ struct MainWindowView: View {
                 .font(.system(size: 8, weight: .semibold))
                 .foregroundStyle(Theme.heading)
             Text(current)
-                .font(.system(size: 13, weight: .semibold))
+                .font(Theme.Fonts.title)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
         }
@@ -1108,6 +1200,22 @@ struct MainWindowView: View {
             } else {
                 rightSheetPlaceholder("This server is no longer listening.")
             }
+        case let .capsules(path, focus):
+            CapsulePanel(
+                projectPath: path,
+                focus: focus,
+                onAttach: { capsule in
+                    attachCapsuleToNewChat(project: path, capsule: capsule)
+                },
+                onOpenChat: { file in
+                    chatTarget = ChatTarget(path: path, sessionFile: file)
+                    chatIndex.refresh(path, force: true)
+                    if !rightPanelDocked { closeRightPanel() }
+                },
+                onInsert: { text in
+                    insertIntoComposer(project: path, text: text)
+                }
+            )
         case .feed:
             FeedSheet(feed: feed) { event in
                 if let path = event.projectPath {
@@ -1118,6 +1226,36 @@ struct MainWindowView: View {
         case nil:
             EmptyView()
         }
+    }
+
+    /// A capsule-view section insert: make sure a chat surface for the
+    /// project is up (a new chat if none is), then hand the composer the
+    /// text — after a beat, so a freshly mounted composer is listening.
+    private func insertIntoComposer(project: String, text: String) {
+        if chatTarget?.path != project {
+            chatTarget = ChatTarget(path: project, sessionFile: nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(
+                name: .houstonComposerInsert, object: text
+            )
+        }
+    }
+
+    /// Clicking a capsule: a fresh chat with the capsule staged as a chip
+    /// in the composer. Always a new chat — that's the whole model: fresh
+    /// context, the capsule carrying the history.
+    private func attachCapsuleToNewChat(project: String, capsule: ChatCapsule) {
+        if let draft = ChatSessionHub.shared.drafts[project], !draft.running {
+            ChatSessionHub.shared.discardDraft(in: project)
+        }
+        chatTarget = ChatTarget(path: project, sessionFile: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(
+                name: .houstonComposerAttachCapsule, object: capsule
+            )
+        }
+        if !rightPanelDocked { closeRightPanel() }
     }
 
     private func gitPanel(for path: String) -> some View {
@@ -1160,7 +1298,7 @@ struct MainWindowView: View {
 
     private func rightSheetPlaceholder(_ message: String) -> some View {
         Text(message)
-            .font(.system(size: 11))
+            .font(Theme.Fonts.secondary)
             .foregroundStyle(Theme.textSecondary)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 24)
@@ -1168,14 +1306,16 @@ struct MainWindowView: View {
     }
 
     /// Aligns the flyout's top edge with the rail button that opened it —
-    /// the buttons stack at `trafficLightInset` in 30pt + 6pt-spacing steps.
+    /// the buttons stack at `trafficLightInset` in 30pt + 6pt-spacing
+    /// steps, below the expand + cluster icons (4 rows) and the rule.
     private func flyoutTop(for section: RailSection) -> CGFloat {
         let index: CGFloat = switch section {
         case .terminals: 0
         case .servers: 1
         case .projects: 2
         }
-        return trafficLightInset + index * 36
+        let clusterHeight: CGFloat = 4 * 36 + 11 // icons + the short rule
+        return trafficLightInset + clusterHeight + index * 36
     }
 
     @ViewBuilder
@@ -1238,7 +1378,7 @@ struct MainWindowView: View {
                 // Same quiet treatment as the expanded sidebar's section
                 // headers — the popover is the same section, restyled.
                 Text(title.uppercased())
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .kerning(0.5)
                     .foregroundStyle(Theme.heading)
                 Spacer(minLength: 8)
@@ -1290,11 +1430,11 @@ struct MainWindowView: View {
         VStack(spacing: 8) {
             icon()
             Text(headline)
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             if let subtext {
                 Text(subtext)
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1479,7 +1619,7 @@ struct MainWindowView: View {
             openChat(project: project, file: ref.filePath)
         }) { _ in
             Text(chatTitler.displayTitle(ref))
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.text.opacity(0.8))
                 .lineLimit(1)
                 .padding(.leading, 24 + Theme.rowInset)
@@ -1653,19 +1793,27 @@ struct MainWindowView: View {
                 } else {
                     archivedShown.insert(path)
                 }
+            } else if key.hasPrefix("capsules-more:") {
+                let path = String(key.dropFirst("capsules-more:".count))
+                capsuleRowsShown[path] = (capsuleRowsShown[path] ?? 5) + 5
+            } else if key.hasPrefix("capsules:") {
+                let path = String(key.dropFirst("capsules:".count))
+                toggleRightPanel(.capsules(project: path, focus: nil))
             }
         }
     }
 
     /// Shared chrome for the "+ New" / "+ Add" rows.
-    private func actionRowLabel(title: String, hovered: Bool) -> some View {
+    private func actionRowLabel(
+        title: String, hovered: Bool, icon: String = "plus"
+    ) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "plus")
+            Image(systemName: icon)
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 16, height: 16)
             Text(title)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -1675,13 +1823,12 @@ struct MainWindowView: View {
     }
 
 
-    private var sidebarFooter: some View {
-        // Labeled rows stacked vertically — Settings, Tasks, Notifications —
-        // with the collapse icon on its own row underneath. Reminders lives
-        // inside the Tasks sheet now (its second tab), so the Tasks row
-        // carries the tracked attention dot.
+    /// Tasks, Notifications, Settings, and Servers — labeled rows at the
+    /// TOP of the sidebar (2026-09-11 design), above the sections.
+    /// Reminders lives inside the Tasks sheet (its second tab), so the
+    /// Tasks row carries the tracked attention dot.
+    private var sidebarTopCluster: some View {
         VStack(alignment: .leading, spacing: 2) {
-            settingsMenu(labeled: true)
             FooterLabeledButton(
                 systemName: "checklist",
                 label: "Tasks",
@@ -1698,23 +1845,170 @@ struct MainWindowView: View {
                 help: "Notifications",
                 action: { toggleRightPanel(.feed) }
             )
-            HStack(spacing: 4) {
-                FooterIconButton(
-                    systemName: "sidebar.left",
-                    help: "Collapse sidebar",
-                    action: toggleSidebarCollapse
-                )
-                if let update = updates.available {
-                    UpdatePill(version: update.version, busy: installer.isBusy) {
-                        installer.requestInstall(update)
+            settingsMenu(labeled: true)
+            FooterLabeledButton(
+                systemName: "server.rack",
+                label: "Servers",
+                active: serversFlyout,
+                iconTint: servers.devServers.isEmpty ? nil : Theme.dotActive,
+                count: servers.devServers.count,
+                help: "Dev servers",
+                action: { setServersFlyout(!serversFlyout) }
+            )
+        }
+        // The parent VStack centers fitting-width children — pin the
+        // cluster to the left edge like every other sidebar row.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        // One section gap's worth before the table — the same 20pt a
+        // header box puts between the table's own sections.
+        .padding(.bottom, 20)
+    }
+
+    /// Flyout open/close rides the rail flyouts' spring so the card
+    /// slides, not pops.
+    private func setServersFlyout(_ shown: Bool) {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+            serversFlyout = shown
+        }
+    }
+
+    /// Stopped servers in a second-layer card beside the Servers item —
+    /// the same scrim, chrome, and slide as the collapsed rail's flyouts.
+    @ViewBuilder
+    private var serversFlyoutLayer: some View {
+        if serversFlyout, !sidebarCollapsed {
+            ZStack(alignment: .topLeading) {
+                // Scrim: any click outside dismisses (and is consumed).
+                // The sidebar stays uncovered so its rows keep one-click.
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: sidebarWidth)
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { setServersFlyout(false) }
+                }
+                stoppedServersCard
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                            .fill(Theme.panelFill)
+                            .shadow(
+                                color: Theme.floatShadowColor,
+                                radius: Theme.floatShadowRadius,
+                                x: 0, y: Theme.floatShadowY
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                            .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                    )
+                    // Top-aligned with the Servers item: the traffic-light
+                    // inset plus the three 26pt rows (2pt spacing) above it.
+                    .offset(x: sidebarWidth + 6, y: trafficLightInset + 3 * 28)
+                    .transition(.opacity.combined(with: .offset(x: -8)))
+            }
+        }
+    }
+
+    private var stoppedServersCard: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if !servers.devServers.isEmpty {
+                flyoutSectionLabel("RUNNING")
+                ForEach(servers.devServers, id: \.id) { server in
+                    FlyoutServerRow(
+                        row: { ServerRow(
+                            server: server,
+                            health: servers.health[server.id],
+                            hovered: $0
+                        ) },
+                        height: 38,
+                        onTap: {
+                            setServersFlyout(false)
+                            toggleRightPanel(.server(server.id))
+                        }
+                    ) {
+                        Button("Open in Browser") {
+                            Actions.openExternal(server.url)
+                        }
+                        if let cwd = server.cwd {
+                            Button("Open Terminal Here") {
+                                _ = terminals.pane(for: cwd)
+                                selection = .project(cwd)
+                            }
+                            Button("Reveal in Finder") {
+                                Actions.revealInFinder(path: cwd)
+                            }
+                        }
+                        Divider()
+                        Button("Stop Server") { Actions.killPid(server.pid) }
                     }
+                }
+                .padding(.horizontal, 6)
+            }
+            flyoutSectionLabel("STOPPED")
+            if servers.recents.isEmpty {
+                Text("No stopped servers")
+                    .font(Theme.Fonts.secondary)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+            } else {
+                ForEach(servers.recents, id: \.id) { recent in
+                    FlyoutServerRow(
+                        row: { ServerRow(recent: recent, hovered: $0) },
+                        height: 28,
+                        onTap: {
+                            setServersFlyout(false)
+                            toggleRightPanel(.server(recent.id))
+                        }
+                    ) {
+                        Button("Open Terminal Here") {
+                            _ = terminals.pane(for: recent.projectPath)
+                            selection = .project(recent.projectPath)
+                        }
+                        Button("Reveal in Finder") {
+                            Actions.revealInFinder(path: recent.projectPath)
+                        }
+                        Divider()
+                        // Temporary by design: the row returns the next
+                        // time a server runs (and stops) in this project.
+                        Button("Remove") {
+                            if rightPanel == .server(recent.id) {
+                                closeRightPanel()
+                            }
+                            servers.removeRecent(recent.id)
+                        }
+                    }
+                }
+                .padding(.horizontal, 6)
+                Color.clear.frame(height: 6)
+            }
+        }
+        .frame(width: 240)
+    }
+
+    private func flyoutSectionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(Theme.Fonts.label)
+            .kerning(0.5)
+            .foregroundStyle(Theme.heading)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+    }
+
+    /// All that's left at the bottom: the update pill, when there is one.
+    @ViewBuilder
+    private var sidebarFooter: some View {
+        if let update = updates.available {
+            HStack {
+                UpdatePill(version: update.version, busy: installer.isBusy) {
+                    installer.requestInstall(update)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.top, 2)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
     }
 
     // MARK: - Settings
@@ -1946,7 +2240,7 @@ struct MainWindowView: View {
                     .lineLimit(1)
                 if let subtitle = headerSubtitle {
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textPath)
                         .lineLimit(1)
                 }
@@ -1977,7 +2271,7 @@ struct MainWindowView: View {
                         SVGIcon(name: "rocket", size: 13)
                             .foregroundStyle(Theme.text.opacity(0.75))
                         Text("Start Mission")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(Theme.Fonts.bodyMedium)
                             .foregroundStyle(Theme.text)
                     }
                     .padding(.horizontal, 12)
@@ -2007,7 +2301,7 @@ struct MainWindowView: View {
             } label: {
                 HStack(spacing: 6) {
                     Text(handingOff ? "Handing off…" : "Mission")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(Theme.Fonts.bodyMedium)
                         .foregroundStyle(Theme.text)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .semibold))
@@ -2029,7 +2323,7 @@ struct MainWindowView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Theme.text.opacity(0.75))
                 Text(gitButtonTitle)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 if let info = git.info, info.isRepo, !info.changes.isEmpty {
@@ -2053,7 +2347,7 @@ struct MainWindowView: View {
                 ? nil : ChatTarget(path: path, sessionFile: nil)
         } label: {
             Text("Chats")
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
                 .padding(.horizontal, 12)
                 .frame(height: 30)
@@ -2079,7 +2373,7 @@ struct MainWindowView: View {
                 toggleRightPanel(.skills)
             } label: {
                 Text("Skills")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                     .padding(.horizontal, 12)
                     .frame(height: 30)
@@ -2114,7 +2408,7 @@ struct MainWindowView: View {
             } label: {
                 HStack(spacing: 6) {
                     Text(launchAgent.shortLabel)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(Theme.Fonts.bodyMedium)
                         .foregroundStyle(Theme.text)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .semibold))
@@ -2399,17 +2693,9 @@ struct MainWindowView: View {
                 ))
             }
         }
-        if !servers.devServers.isEmpty || !servers.recents.isEmpty {
-            out.append(.header("Servers"))
-            out += servers.devServers.map {
-                .row(id: .server($0.id), title: $0.project ?? $0.command)
-            }
-            // Stopped servers stay listed as gray "off" rows below the live
-            // ones — click for the start page, right-click to remove.
-            out += servers.recents.map {
-                .row(id: .server($0.id), title: $0.name)
-            }
-        }
+        // Servers moved out of the table (2026-09-12): they live in the
+        // top cluster now, beside Settings/Tasks/Notifications — live ones
+        // always nested under the item, stopped ones on disclosure.
         // Each project is a collapsible header (no dot) with its chats
         // nested underneath; the hover buttons add a chat or a terminal.
         out.append(.header("Projects"))
@@ -2429,6 +2715,7 @@ struct MainWindowView: View {
             collapsedProjects.insert(path)
             chatRowsShown[path] = nil
             archivedShown.remove(path)
+            capsuleRowsShown[path] = nil
         }
         updateSettings { $0.collapsedFolders = Array(collapsedProjects) }
     }
@@ -2443,7 +2730,10 @@ struct MainWindowView: View {
     /// Recent chats nested under a project header. An empty `file` marks
     /// the "Show more" tail row, which discloses another step of rows.
     private func chatEntries(under path: String) -> [SidebarEntry] {
-        let all = chatIndex.chats[path] ?? []
+        // Sealed chats live on the capsule shelf, not here — the sidebar
+        // lists only chats that are still open.
+        let all = (chatIndex.chats[path] ?? [])
+            .filter { !capsuleStore.isSealed($0.filePath) }
         let refs = chatMeta.arrangeSidebar(all)
         let shown = chatRowsShown[path] ?? Self.chatRowsBase
         var rows: [SidebarEntry] = refs.prefix(shown).map {
@@ -2454,6 +2744,24 @@ struct MainWindowView: View {
         }
         if refs.count > shown {
             rows.append(.chat(project: path, file: "", title: "Show more", harness: ""))
+        }
+        // The project's history rides right under the current chat: five
+        // capsules as rows (click views, drag attaches), "Show more"
+        // stepping out five at a time, and — once everything's out — a
+        // "View all capsules" tail into the full shelf.
+        let capsules = capsuleStore.capsules(for: path)
+        let capsulesShown = capsuleRowsShown[path] ?? 5
+        rows += capsules.prefix(capsulesShown).map {
+            .capsuleChat(project: path, capsuleID: $0.id, title: $0.title)
+        }
+        if capsules.count > capsulesShown {
+            rows.append(.action(
+                key: "capsules-more:\(path)", title: "Show more"
+            ))
+        } else if !capsules.isEmpty {
+            rows.append(.action(
+                key: "capsules:\(path)", title: "View all capsules"
+            ))
         }
         // Archived chats fold under their own toggle — this is their only
         // home now that the transcript view has no list.
@@ -2487,12 +2795,33 @@ struct MainWindowView: View {
         chatTarget = ChatTarget(path: project, sessionFile: file.isEmpty ? nil : file)
     }
 
+    /// End a chat: seal it into a capsule. The transcript stays on disk
+    /// untouched; the row leaves the open list the same instant and the
+    /// capsule appears on the project's shelf. A chat mid-turn keeps
+    /// running — it can seal once the turn is done.
+    private func sealChat(project: String, file: String, title: String, harness: String) {
+        guard !file.isEmpty,
+              ChatSessionHub.shared.sessions[file]?.running != true else { return }
+        ChatSessionHub.shared.forget(file: file)
+        let ref = ChatSessionRef(
+            harness: ChatHarness(rawValue: harness) ?? .claude,
+            filePath: file, title: title, modified: Date()
+        )
+        capsuleStore.seal(
+            ref: ref, project: project, title: chatTitler.displayTitle(ref)
+        )
+        if chatTarget?.sessionFile == file {
+            chatTarget = ChatTarget(path: project, sessionFile: nil)
+        }
+    }
+
     /// Delete a chat: shut its live session down, trash the transcript
     /// (recoverable), and fall back to the project's chat list if it was
     /// open.
     private func deleteChat(project: String, file: String) {
         ChatSessionHub.shared.forget(file: file)
         ChatMetaStore.shared.forget(file)
+        CapsuleStore.shared.forget(file: file)
         try? FileManager.default.trashItem(
             at: URL(fileURLWithPath: file), resultingItemURL: nil
         )
@@ -2585,7 +2914,7 @@ struct MainWindowView: View {
             return key == "new-terminal" ? 28 : 24
         case .divider:
             return 11
-        case .chat:
+        case .chat, .capsuleChat:
             return 26
         case let .row(id, _):
             if case let .server(sid) = id {
@@ -2606,7 +2935,7 @@ struct MainWindowView: View {
         case let .header(title):
             HStack(alignment: .bottom, spacing: 0) {
                 Text(title.uppercased())
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .kerning(0.5)
                     .foregroundStyle(Theme.heading)
                     .padding(.bottom, 4)
@@ -2643,6 +2972,18 @@ struct MainWindowView: View {
                 .menuStyle(.button)
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
+            } else if key.hasPrefix("capsules") {
+                // The capsule list's tail rows ("Show more" / "View all
+                // capsules"): dimmed gray, title-only, lined up with the
+                // capsule titles above them.
+                Text(title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+                    .padding(.leading, 42)
+                    .modifier(RowChrome(hovered: hovered, selected: false))
+                    .contentShape(Rectangle())
+                    .onTapGesture { runAction(key) }
             } else {
                 actionRowLabel(title: title, hovered: hovered)
                     .onTapGesture { runAction(key) }
@@ -2659,7 +3000,17 @@ struct MainWindowView: View {
             let open = !file.isEmpty && chatTarget?.path == project
                 && chatTarget?.sessionFile == file
             let pinned = !file.isEmpty && chatMeta.pinned.contains(file)
+            let isBranch = !file.isEmpty && chatMeta.branches[file] != nil
             HStack(spacing: 6) {
+                if !file.isEmpty {
+                    // Chats carry a bubble; a chat forked off another
+                    // carries the branch glyph instead.
+                    Image(systemName: isBranch
+                        ? "arrow.triangle.branch" : "bubble.left")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 14)
+                }
                 Text(title)
                     .font(.system(size: 13))
                     // A step dimmer than the project header; the
@@ -2674,6 +3025,19 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
+                // End the chat: seal it into a capsule (the terminal
+                // rows' ✕ kills; this one archives — the transcript
+                // survives untouched under the capsule).
+                if hovered, !file.isEmpty {
+                    RowActionIcon(
+                        symbol: "xmark", help: "End chat — seal into a capsule"
+                    ) {
+                        sealChat(
+                            project: project, file: file,
+                            title: title, harness: harness
+                        )
+                    }
+                }
             }
             // Lines up with the project header's name (18pt icon + 9 gap).
             .padding(.leading, 27)
@@ -2686,6 +3050,38 @@ struct MainWindowView: View {
                     openChat(project: project, file: file)
                 }
             }
+
+        case let .capsuleChat(project, capsuleID, title):
+            // A sealed chat: the chat bubble wrapped in a capsule outline.
+            // Click shows its transcript in the right sheet; dragging the
+            // row into a composer attaches the whole capsule as a chip.
+            let viewing = rightPanel == .capsules(project: project, focus: capsuleID)
+            HStack(spacing: 6) {
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 6.5))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2.5)
+                    .overlay(Capsule().strokeBorder(lineWidth: 1))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 20)
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text.opacity(0.65))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 24)
+            .modifier(RowChrome(hovered: hovered, selected: viewing))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                toggleRightPanel(.capsules(project: project, focus: capsuleID))
+            }
+            .onDrag {
+                let reference = capsuleStore.capsules
+                    .first { $0.id == capsuleID }?.referenceText ?? ""
+                return NSItemProvider(object: reference as NSString)
+            }
+            .help("A sealed chat — click to view, drag into the chat to attach it")
 
         case let .folder(path, folderName):
             // A project header: no dot, chats fold underneath (click
@@ -2701,7 +3097,7 @@ struct MainWindowView: View {
                             .resizable()
                             .interpolation(.high)
                             .scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
                             // Tints template logos (dark monochrome glyphs)
                             // with the appearance; full-color ones ignore it.
                             .foregroundStyle(Theme.text)
@@ -2825,15 +3221,22 @@ struct MainWindowView: View {
         switch entry {
         case let .header(title):
             return "h:\(title)"
-        case let .action(key, _):
-            return "a:\(key)|\(hovered ? "h" : "-")"
+        case let .action(key, title):
+            // Title is in the key: "Capsules (2)" → "(3)" and
+            // "Archived (n)" must re-host, their keys don't change.
+            return "a:\(key)|\(title)|\(hovered ? "h" : "-")"
         case .divider:
             return "div"
         case let .chat(project, file, title, _):
             let open = !file.isEmpty && chatTarget?.path == project
                 && chatTarget?.sessionFile == file
             let pinned = chatMeta.pinned.contains(file)
-            return "ch:\(title)|\(open ? "o" : "-")|\(pinned ? "p" : "-")|\(hovered ? "h" : "-")"
+            let branch = chatMeta.branches[file] != nil
+            return "ch:\(title)|\(open ? "o" : "-")|\(pinned ? "p" : "-")"
+                + "|\(branch ? "b" : "-")|\(hovered ? "h" : "-")"
+        case let .capsuleChat(project, capsuleID, title):
+            let viewing = rightPanel == .capsules(project: project, focus: capsuleID)
+            return "cc:\(title)|\(viewing ? "v" : "-")|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
             let collapsed = collapsedProjects.contains(path)
             return "f:\(folderName)|\(collapsed ? "c" : "-")|\(hovered ? "h" : "-")"
@@ -2927,6 +3330,10 @@ struct MainWindowView: View {
             )
             let meta = ChatMetaStore.shared
             let menu = NSMenu()
+            menu.addItem(ClosureMenuItem("End Chat — Seal into Capsule") {
+                sealChat(project: project, file: file, title: title, harness: harness)
+            })
+            menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Rename…") {
                 ChatRowActions.promptRename(ref)
             })
@@ -2939,6 +3346,9 @@ struct MainWindowView: View {
                 meta.toggleArchive(file)
             })
             menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem("Branch Chat") {
+                ChatRowActions.duplicate(ref, project: project, asBranch: true)
+            })
             menu.addItem(ClosureMenuItem("Duplicate") {
                 ChatRowActions.duplicate(ref, project: project)
             })
@@ -2953,6 +3363,32 @@ struct MainWindowView: View {
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem("Delete Chat") {
                 deleteChat(project: project, file: file)
+            })
+            return menu
+        }
+        // A sealed chat's row: view, attach, reopen, delete — the same set
+        // the capsule shelf offers.
+        if case let .capsuleChat(project, capsuleID, _) = entry,
+           let capsule = capsuleStore.capsules.first(where: { $0.id == capsuleID }) {
+            let menu = NSMenu()
+            menu.addItem(ClosureMenuItem("Open Capsule View") {
+                toggleRightPanel(.capsules(project: project, focus: capsuleID))
+            })
+            menu.addItem(ClosureMenuItem("New Chat with Capsule") {
+                attachCapsuleToNewChat(project: project, capsule: capsule)
+            })
+            menu.addItem(ClosureMenuItem("Reopen Chat") {
+                capsuleStore.unseal(capsule)
+                openChat(project: project, file: capsule.sourceFile)
+            })
+            menu.addItem(ClosureMenuItem("Reveal Transcript in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [URL(fileURLWithPath: capsule.sourceFile)]
+                )
+            })
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem("Delete Chat and Capsule") {
+                deleteChat(project: project, file: capsule.sourceFile)
             })
             return menu
         }
@@ -3152,6 +3588,26 @@ struct MainWindowView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .houstonRenameTerminal)
             ) { _ in renameSelectedTerminal() }
+            // A capsule chip in a chat: open that capsule's transcript in
+            // the right sheet.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonOpenCapsule)
+            ) { note in
+                guard let file = note.object as? String else { return }
+                if let capsule = capsuleStore.capsule(forFile: file) {
+                    toggleRightPanel(
+                        .capsules(project: capsule.project, focus: capsule.id)
+                    )
+                } else if let project = chatTarget?.path {
+                    // The capsule was dissolved — land on the shelf.
+                    toggleRightPanel(.capsules(project: project, focus: nil))
+                }
+            }
+            // The auto-seal sweep lives in CapsuleStore; the view's only
+            // job is telling it which chat is on screen (protected).
+            .onChange(of: chatTarget) { _, target in
+                capsuleStore.activeChatFile = target?.sessionFile
+            }
     }
 
     /// ⌘R: rename whichever terminal row is selected — a nested shell
@@ -3281,7 +3737,7 @@ private struct RailButton<Icon: View>: View {
             icon()
                 .frame(width: 34, height: 30)
                 .background(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(active ? Theme.rowSelected : (hovered ? Theme.rowHovered : .clear))
                 )
                 .contentShape(Rectangle())
@@ -3353,38 +3809,77 @@ private struct UpdatePill: View {
 /// above Settings. With no label (the rail) it's the bare 22pt icon, badges
 /// riding the corner; with one, the unread count / attention dot sits inline
 /// after the text. Selected fill while its panel is open.
+/// A server inside the Servers flyout card — the table's old `ServerRow`
+/// (live or stopped variant) with its own hover, click-for-sheet, and
+/// context menu. `height` pins the box: ServerRow ends in RowChrome,
+/// which fills whatever it's given and would soak up the card otherwise.
+private struct FlyoutServerRow<MenuItems: View>: View {
+    let row: (Bool) -> ServerRow
+    let height: CGFloat
+    let onTap: () -> Void
+    @ViewBuilder let menuItems: () -> MenuItems
+
+    @State private var hovered = false
+
+    var body: some View {
+        row(hovered)
+            .frame(height: height)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .onHover { hovered = $0 }
+            .contextMenu { menuItems() }
+    }
+}
+
 private struct FooterLabeledButton: View {
     let systemName: String
     var label: String? = nil
     var badgeCount: Int = 0
     var dot: Bool = false
     var active: Bool = false
+    /// Overrides the glyph color (the Servers item goes signal-green
+    /// while servers run).
+    var iconTint: Color? = nil
+    /// Quiet count to the label's right (live server tally) — plain gray
+    /// text, not the amber attention badge.
+    var count: Int = 0
     let help: String
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: systemName)
-                    .font(.system(size: 12))
-                    .foregroundStyle(hovered || active ? Theme.text : Theme.heading)
+                    .font(.system(size: label == nil ? 12 : 13))
+                    .foregroundStyle(iconTint ?? (label == nil
+                        ? (hovered || active ? Theme.text : Theme.heading)
+                        : Theme.text))
                 if let label {
+                    // Top-level items read in the primary color a step
+                    // above the 13pt rows (2026-09-12).
                     Text(label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(hovered || active ? Theme.text : Theme.heading)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                    if count > 0 {
+                        Text(String(count))
+                            .font(.system(size: 12, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.leading, 2)
+                    }
                     badge
                 }
             }
             .padding(.horizontal, label == nil ? 0 : 6)
-            .frame(width: label == nil ? 22 : nil, height: 22)
+            .frame(width: label == nil ? 22 : nil, height: label == nil ? 22 : 26)
             // Badge INSIDE the button's frame, not overhanging the glyph —
             // an ancestor clips at the frame edge and was slicing the pill.
             .overlay(alignment: .topTrailing) {
                 if label == nil { badge }
             }
             .background(
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(active
                         ? Theme.rowSelected
                         : (hovered ? Theme.rowHovered : .clear))
@@ -3430,7 +3925,7 @@ struct FooterIconButton: View {
                 .foregroundStyle(hovered ? Theme.text : Theme.heading)
                 .frame(width: 22, height: 22)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
@@ -3443,8 +3938,9 @@ struct FooterIconButton: View {
 
 // MARK: - Header button chrome
 
-/// The design's header buttons: 30pt tall, #F3F3F3 fill, #E0E0E0 hairline,
-/// 6pt radius. Also used by the empty state's quick-open buttons.
+/// The design's header buttons: 30pt tall, #F3F3F3 fill, 6pt radius —
+/// borderless unless active. Also used by the empty state's quick-open
+/// buttons.
 /// The header's Saved Changes opener — its own view because the badge
 /// count comes from the project's AnnotationStore, a nested
 /// ObservableObject the header wouldn't otherwise re-render for.
@@ -3460,7 +3956,7 @@ private struct NotesHeaderButton: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Theme.text.opacity(0.75))
                 Text("Tasks")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 if !store.open.isEmpty {
                     Text(String(store.open.count))
@@ -3491,15 +3987,14 @@ struct HeaderButtonChrome: ViewModifier {
             .frame(height: 30)
             .background(
                 active ? Theme.buttonActiveFill : Theme.buttonFill,
-                in: RoundedRectangle(cornerRadius: 6)
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(
-                        active ? Theme.buttonActiveStroke : Theme.buttonStroke,
-                        lineWidth: active ? 2 : 1
-                    )
-            )
+            .overlay {
+                if active {
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.buttonActiveStroke, lineWidth: 2)
+                }
+            }
     }
 }
 
@@ -3575,7 +4070,7 @@ private struct RowChrome: ViewModifier {
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
                     .fill(fill)
             )
             .padding(.horizontal, Theme.rowInset)
@@ -3948,27 +4443,23 @@ struct ServerPanel: View {
 
             Spacer(minLength: 24)
 
-            // Stop lives alone at the drawer's foot — full width, outlined
-            // in red, away from everything a stray click could hit.
+            // Stop lives alone at the drawer's foot — full width, tinted
+            // red, away from everything a stray click could hit.
             Button(action: { Actions.killPid(server.pid) }) {
                 HStack(spacing: 7) {
                     Image(systemName: "stop.circle")
                         .font(.system(size: 14, weight: .medium))
                     Text("Stop Server")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(Theme.Fonts.title)
                 }
                 .foregroundStyle(Theme.textDanger)
                 .frame(maxWidth: .infinity)
                 .frame(height: 42)
                 .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(stopHovered ? Theme.closeRed.opacity(0.08) : .clear)
+                    RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                        .fill(Theme.closeRed.opacity(stopHovered ? 0.15 : 0.08))
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Theme.closeRed, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusFloat))
             }
             .buttonStyle(.plain)
             .onHover { stopHovered = $0 }
@@ -4117,7 +4608,7 @@ struct ServerPanel: View {
                                 Image(systemName: "qrcode")
                                     .font(.system(size: 13, weight: .medium))
                                 Text("View QR")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(Theme.Fonts.bodyMedium)
                             }
                             .foregroundStyle(Theme.textSecondary)
                             .contentShape(Rectangle())
@@ -4191,12 +4682,12 @@ struct ServerPanel: View {
         .padding(.trailing, 12)
         .frame(maxWidth: .infinity)
         .frame(height: 52)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.gitPanelFill))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.gitPanelFill))
     }
 
     private func caption(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(Theme.Fonts.secondary)
             .foregroundStyle(Theme.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -4216,21 +4707,21 @@ struct ServerPanel: View {
             HStack(spacing: 8) {
                 TextField("Paste token (hstn_…)", text: $tokenDraft)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Theme.Fonts.mono)
                     .padding(.horizontal, 10)
                     .frame(height: 32)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.gitPanelFill))
                     .onSubmit(saveToken)
                 PanelChromeButton(action: saveToken) { Text("Save") }
                     .disabled(tokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         } else if relay.tokenRejected {
             Text("The relay rejected this token — it may have been revoked.")
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textDanger)
         } else if let other = relay.portConflicts[projectLabel] {
-            AlertBanner(
+            InlineNotice(
+                kind: .error,
                 title: "Two servers on one port",
                 message: "This server and \(other) share port \(String(server.port)). Move one to its own port to share it live."
             )
@@ -4272,7 +4763,7 @@ struct ServerPanel: View {
             Spacer(minLength: 0)
             if pinEditing || !relay.pin(for: projectLabel).isEmpty {
                 Text("Access code")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.textSecondary)
                     .help("Visitors type this on the splash page before the app loads.")
                 TextField("----", text: $pinDraft)
@@ -4282,7 +4773,7 @@ struct ServerPanel: View {
                     .kerning(3)
                     .multilineTextAlignment(.center)
                     .frame(width: 72, height: 30)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.gitPanelFill))
                     .onChange(of: pinDraft) { _, new in
                         let clean = String(new.filter(\.isNumber).prefix(4))
                         if clean != new { pinDraft = clean }
@@ -4441,7 +4932,7 @@ struct OffServerPanel: View {
                     // What the project itself declares — the command runs
                     // this script.
                     Text("Default for this project: \(detected.script)")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(2)
                 }
@@ -4450,24 +4941,22 @@ struct OffServerPanel: View {
                     text: $commandDraft
                 )
                 .textFieldStyle(.plain)
-                .font(.system(size: 12, design: .monospaced))
+                .font(Theme.Fonts.mono)
                 .padding(.horizontal, 10)
                 .frame(height: 32)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.gitPanelFill))
                 .onSubmit(startNow)
                 HStack(spacing: 8) {
                     TextField(String(recent.port), text: $portDraft)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(Theme.Fonts.mono)
                         .padding(.horizontal, 10)
                         .frame(width: 76, height: 32)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gitPanelFill))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.buttonStroke, lineWidth: 1))
+                        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.gitPanelFill))
                         .onSubmit(startNow)
                         .help("Port to run on — leave empty to use the project's own")
                     Text("port")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                     Spacer(minLength: 0)
                     PanelChromeButton(action: startNow) {
@@ -4491,7 +4980,7 @@ struct OffServerPanel: View {
                     // each other, so Start stays off until the port is free.
                     HStack(spacing: 6) {
                         Text("Port \(String(effectivePort)) is already in use by \(conflictProject).")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textDanger)
                         LinkButton(title: "Use \(String(nextFreePort)) instead", size: 11) {
                             portDraft = String(nextFreePort)
@@ -4603,7 +5092,7 @@ private struct ActionCard: View {
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 40, height: 40)
                     .background(
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: Theme.radiusSurface)
                             .fill(Theme.buttonFill)
                     )
                 VStack(alignment: .leading, spacing: 3) {
@@ -4612,7 +5101,7 @@ private struct ActionCard: View {
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Text(subtitle)
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
@@ -4624,14 +5113,14 @@ private struct ActionCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 72)
             .background(
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: Theme.radiusFloat)
                     .fill(Theme.gitPanelFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14)
+                        RoundedRectangle(cornerRadius: Theme.radiusFloat)
                             .fill(hovered ? Theme.cardHovered : .clear)
                     )
             )
-            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusFloat))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
@@ -4670,15 +5159,15 @@ private struct CopyChipButton: View {
             }
         } label: {
             Text(copied ? "Copied" : "Copy")
-                .font(.system(size: 11, weight: .medium))
+                .font(Theme.Fonts.secondaryMedium)
                 .foregroundStyle(copied ? Theme.textPositive : Theme.link)
                 .padding(.horizontal, 10)
                 .frame(height: 28)
                 .background(
-                    RoundedRectangle(cornerRadius: 7)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(Theme.buttonFill)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 7)
+                            RoundedRectangle(cornerRadius: Theme.radiusControl)
                                 .fill(hovered ? Theme.cardHovered : .clear)
                         )
                 )
@@ -4718,7 +5207,8 @@ private struct ChangeListCard: View {
 }
 
 /// A rounded chrome button for the server page — the Figma design's pill
-/// buttons (fill + 1px border), used both standalone and nested in cards.
+/// buttons (tinted fill, borderless), used both standalone and nested in
+/// cards.
 struct PanelChromeButton<Label: View>: View {
     var height: CGFloat = 30
     let action: () -> Void
@@ -4729,7 +5219,7 @@ struct PanelChromeButton<Label: View>: View {
     var body: some View {
         Button(action: action) {
             label
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
                 .padding(.horizontal, 12)
@@ -4738,16 +5228,12 @@ struct PanelChromeButton<Label: View>: View {
         }
         .buttonStyle(.plain)
         .background(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
                 .fill(Theme.buttonFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Theme.buttonStroke, lineWidth: 1)
         )
         .onHover { hovered = $0 }
     }
@@ -4804,7 +5290,7 @@ struct ServerRow: View {
                 // renders "localhost:3,000".
                 if running {
                     Text("localhost:" + String(port))
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
@@ -4844,7 +5330,7 @@ private struct RowActionIcon: View {
                 .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
                 .frame(width: 18, height: 18)
                 .background(
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
@@ -4869,7 +5355,7 @@ private struct HeaderPlusButton: View {
                 .frame(width: 16, height: 16)
                 .frame(width: 20, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
@@ -4887,20 +5373,24 @@ private struct GearLabel: View {
     @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: "gearshape")
-                .font(.system(size: 12))
-                .foregroundStyle(hovered ? Theme.text : Theme.heading)
+                .font(.system(size: labeled ? 13 : 12))
+                .foregroundStyle(labeled
+                    ? Theme.text
+                    : (hovered ? Theme.text : Theme.heading))
             if labeled {
+                // Matches FooterLabeledButton's labeled style — the top
+                // cluster reads as one set.
                 Text("Settings")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(hovered ? Theme.text : Theme.heading)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Theme.text)
             }
         }
         .padding(.horizontal, labeled ? 6 : 0)
-        .frame(width: labeled ? nil : 22, height: 22)
+        .frame(width: labeled ? nil : 22, height: labeled ? 26 : 22)
         .background(
-            RoundedRectangle(cornerRadius: 5)
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .fill(hovered ? Theme.rowHovered : .clear)
         )
         .contentShape(Rectangle())
@@ -4972,9 +5462,9 @@ private struct TerminalThemePicker: View {
         ) { option in
             HStack(spacing: 8) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(option.background)
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                     Text("A")
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
@@ -4982,7 +5472,7 @@ private struct TerminalThemePicker: View {
                 }
                 .frame(width: 18, height: 18)
                 Text(option.title)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)

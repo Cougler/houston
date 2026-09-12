@@ -107,6 +107,10 @@ enum Theme {
     /// The chat view's user bubble. This orange holds 4.5:1 against white
     /// text — don't lighten it without rechecking.
     static let chatUserFill = Color(light: 0xC2410C, dark: 0xC2410C)
+    /// Assistant chat prose. Dark mode steps down from `text`'s #E8E8E8 —
+    /// full-brightness paragraphs glare at 16pt reading size; #C6C6C6
+    /// still clears 10:1 on the chat background.
+    static let chatProse = Color(light: 0x111111, dark: 0xC6C6C6)
     /// Deepened in light mode: its only text use (diff hunk headers) sat at
     /// 3.1:1 with the fixed #3B82F6.
     static let dotServer = Color(light: 0x1D4ED8, dark: 0x3B82F6)
@@ -156,6 +160,72 @@ enum Theme {
     /// 220pt-in-239pt pill (inset 9) read too padded in use; tightened to 5,
     /// then 3 in the 2026-08 density pass.
     static let rowInset: CGFloat = 3
+
+    // MARK: - Shape
+
+    /// The three corner radii, app-wide. Every rounded rect picks one of
+    /// these (or `Capsule`) — no ad-hoc radii, so nothing reads as coming
+    /// from a different app.
+    /// Small controls: chips, icon buttons, hover washes, menu rows.
+    static let radiusControl: CGFloat = 6
+    /// Content surfaces: fields, wells, grouped tints, bubbles.
+    static let radiusSurface: CGFloat = 10
+    /// Floating layers: flyouts, popovers, the composer, full sheets.
+    static let radiusFloat: CGFloat = 12
+
+    /// The one shadow, reserved for layers that genuinely float above the
+    /// canvas (flyouts, popovers). In-flow content never casts one — space
+    /// and tint do the separating.
+    static let floatShadowColor = SwiftUI.Color.black.opacity(0.18)
+    static let floatShadowRadius: CGFloat = 18
+    static let floatShadowY: CGFloat = 6
+
+    // MARK: - Spacing
+
+    /// The spacing scale. Related things sit `xs`/`s` apart, groups get
+    /// `l`/`xl`, and page margins use `xxl` — grouping by whitespace is
+    /// what lets the chrome drop its boxes.
+    enum Space {
+        static let xxs: CGFloat = 4
+        static let xs: CGFloat = 8
+        static let s: CGFloat = 12
+        static let m: CGFloat = 16
+        static let l: CGFloat = 24
+        static let xl: CGFloat = 32
+        static let xxl: CGFloat = 48
+    }
+
+    // MARK: - Type ramp
+
+    /// UI text sizes. Hierarchy comes from weight and spacing, not size
+    /// jumps; nothing readable dips below `metaSize`, and the only text
+    /// smaller than that is the uppercase kerned section label.
+    enum Fonts {
+        /// Panel / section titles.
+        static let title = Font.system(size: 13, weight: .semibold)
+        /// Reading text: descriptions, list titles, transcript prose.
+        static let body = Font.system(size: 12)
+        static let bodyMedium = Font.system(size: 12, weight: .medium)
+        /// Secondary lines: subtitles, timestamps, counts.
+        static let secondary = Font.system(size: 11)
+        static let secondaryMedium = Font.system(size: 11, weight: .medium)
+        /// Dense metadata — the floor for anything that must be read.
+        static let meta = Font.system(size: 10)
+        /// Uppercase section labels; pair with `.kerning(0.5)`.
+        static let label = Font.system(size: 9, weight: .semibold)
+        /// Paths, tokens, code fragments.
+        static let mono = Font.system(size: 12, design: .monospaced)
+        static let monoSmall = Font.system(size: 11, design: .monospaced)
+
+        static let metaSize: CGFloat = 10
+    }
+
+    // MARK: - Motion
+
+    /// The one UI transition: quick settle for hover washes, state flips,
+    /// and reveals. Longer choreography (onboarding, artwork) keeps its
+    /// own timing.
+    static let quick = Animation.easeOut(duration: 0.15)
 
     // MARK: - Context bar
 

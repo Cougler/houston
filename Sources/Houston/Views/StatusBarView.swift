@@ -137,7 +137,7 @@ struct StatusBarView: View {
                 // Claude's feed reports the live model; other harnesses
                 // publish nothing, so the menu is just "Model".
                 Text(snapshot?.modelName ?? "Model")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .semibold))
@@ -156,7 +156,7 @@ struct StatusBarView: View {
     /// own running total from the feed payload.
     private func costReadout(_ cost: Double) -> some View {
         Text(cost < 0.01 ? "<$0.01" : String(format: "$%.2f", cost))
-            .font(.system(size: 12))
+            .font(Theme.Fonts.body)
             .foregroundStyle(Theme.textSecondary)
             .help("Session cost so far (API-equivalent)")
     }
@@ -182,7 +182,7 @@ struct StatusBarView: View {
                 Text(compact
                     ? "\(Int((fraction * 100).rounded()))%"
                     : contextLabel(fraction))
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.textSecondary)
                 if shows("limits") {
                     Image(systemName: "chevron.down")
@@ -207,13 +207,13 @@ struct StatusBarView: View {
                     // them — a fresh session shows this until its next
                     // response.
                     Text("No limit data from this session yet.")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                 }
                 ForEach(meters, id: \.key) { meter in
                     HStack(spacing: 8) {
                         Text(meter.label)
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.text)
                             .frame(width: 80, alignment: .leading)
                         ContextBar(
@@ -223,7 +223,7 @@ struct StatusBarView: View {
                             trackHeight: 4
                         )
                         Text("\(Int(meter.pct))%")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
                             .frame(width: 32, alignment: .trailing)
                     }
@@ -263,7 +263,7 @@ struct StatusBarView: View {
                     .fill(mcpDotColor)
                     .frame(width: 7, height: 7)
                 Text("MCP")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.textSecondary)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .semibold))
@@ -368,13 +368,13 @@ private struct PeakHoursPill: View {
             let info = Self.info(at: timeline.date)
             HStack(spacing: 4) {
                 Text(info.icon)
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                 Text(info.label)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.textSecondary)
                 if !compact {
                     Text("· \(info.message)")
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.textPath)
                 }
             }

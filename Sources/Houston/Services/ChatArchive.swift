@@ -24,18 +24,36 @@ struct ChatMessage: Identifiable {
         case code(String, lang: String?)
         /// A tool invocation, compressed to a chip: name + one-line detail.
         case tool(name: String, detail: String)
+        /// A capsule attachment marker — rendered as a capsule chip
+        /// (short title; click opens the capsule view on `file`).
+        case capsule(title: String, file: String)
+        /// A quoted fragment from a sealed chat — the full quote rides
+        /// along for the model (and transplants), but only the short
+        /// title renders, as a chip.
+        case fragment(title: String, text: String)
 
         var id: String {
             switch self {
             case let .text(s): "t:\(s.hashValue)"
             case let .code(s, _): "c:\(s.hashValue)"
             case let .tool(name, detail): "x:\(name):\(detail.hashValue)"
+            case let .capsule(_, file): "cap:\(file.hashValue)"
+            case let .fragment(title, _): "frag:\(title.hashValue)"
             }
         }
     }
-    let id = UUID()
+    /// Stable across re-parses: the parser numbers messages in order, so
+    /// a transcript reload updates rows in place instead of tearing down
+    /// and rebuilding every message view (visible as a flicker).
+    let id: String
     let role: Role
     var blocks: [Block]
+
+    init(id: String = UUID().uuidString, role: Role, blocks: [Block]) {
+        self.id = id
+        self.role = role
+        self.blocks = blocks
+    }
 }
 
 /// Reads the session archives both harnesses keep on disk —
@@ -389,11 +407,64 @@ enum ChatArchive {
 
     // MARK: - Transcripts
 
+    /// Parsed transcripts keyed by (mtime, size), small LRU — reopening a
+    /// chat renders instantly instead of flashing a spinner, and the
+    /// once-per-turn re-read only pays for parsing when the file actually
+    /// changed.
+    private final class TranscriptCache: @unchecked Sendable {
+        private var values: [String: (mtime: Double, size: Int, messages: [ChatMessage])] = [:]
+        private var order: [String] = []
+        private let lock = NSLock()
+
+        func get(_ key: String, mtime: Double, size: Int) -> [ChatMessage]? {
+            lock.lock(); defer { lock.unlock() }
+            guard let hit = values[key], hit.mtime == mtime, hit.size == size else {
+                return nil
+            }
+            return hit.messages
+        }
+
+        func set(_ key: String, mtime: Double, size: Int, messages: [ChatMessage]) {
+            lock.lock(); defer { lock.unlock() }
+            values[key] = (mtime, size, messages)
+            order.removeAll { $0 == key }
+            order.append(key)
+            while order.count > 8 {
+                values.removeValue(forKey: order.removeFirst())
+            }
+        }
+    }
+    private static let transcriptCache = TranscriptCache()
+
+    private static func fileStat(_ path: String) -> (mtime: Double, size: Int) {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+        return (
+            (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
+            (attributes[.size] as? Int) ?? 0
+        )
+    }
+
     static func transcript(_ ref: ChatSessionRef) -> [ChatMessage] {
-        switch ref.harness {
+        let stat = fileStat(ref.filePath)
+        if let hit = transcriptCache.get(ref.filePath, mtime: stat.mtime, size: stat.size) {
+            return hit
+        }
+        let parsed = switch ref.harness {
         case .claude: claudeTranscript(path: ref.filePath)
         case .codex: codexTranscript(path: ref.filePath)
         }
+        transcriptCache.set(
+            ref.filePath, mtime: stat.mtime, size: stat.size, messages: parsed
+        )
+        return parsed
+    }
+
+    /// The cached parse if the file hasn't changed since — one stat plus a
+    /// dictionary hit, cheap enough for the main thread. nil means the
+    /// caller must do a real (off-main) `transcript` read.
+    static func cachedTranscript(_ ref: ChatSessionRef) -> [ChatMessage]? {
+        let stat = fileStat(ref.filePath)
+        return transcriptCache.get(ref.filePath, mtime: stat.mtime, size: stat.size)
     }
 
     private static func claudeTranscript(path: String) -> [ChatMessage] {
@@ -411,7 +482,7 @@ enum ChatArchive {
                     if text.hasPrefix(handoffPrefix) {
                         append(.user, blocks: [.text(handoffNote)], into: &messages)
                     } else {
-                        append(.user, blocks: splitMarkdown(text), into: &messages)
+                        append(.user, blocks: userBlocks(text), into: &messages)
                     }
                 }
             case "assistant":
@@ -455,7 +526,7 @@ enum ChatArchive {
                     if clean.hasPrefix(handoffPrefix) {
                         append(.user, blocks: [.text(handoffNote)], into: &messages)
                     } else {
-                        append(.user, blocks: splitMarkdown(clean), into: &messages)
+                        append(.user, blocks: userBlocks(clean), into: &messages)
                     }
                 } else if text.contains("<INSTRUCTIONS>") {
                     // Codex's injected project context — a giant blob
@@ -676,13 +747,21 @@ enum ChatArchive {
     }
 
     /// A message's blocks as one plain-text body for the target harness.
-    private static func flatten(_ message: ChatMessage) -> String {
+    /// Capsule chips round-trip as their marker line, so a transplanted
+    /// chat re-renders (and re-references) them intact.
+    static func flatten(_ message: ChatMessage) -> String {
         message.blocks.compactMap { block -> String? in
             switch block {
             case let .text(text): text
             case let .code(code, lang): "```" + (lang ?? "") + "\n" + code + "\n```"
             case let .tool(name, detail):
                 detail.isEmpty ? "[\(name)]" : "[\(name): \(detail)]"
+            case let .capsule(title, file):
+                "[Capsule \"\(title)\" @ \(file)] An earlier chat from this "
+                    + "project, attached as context — read or grep its "
+                    + "transcript for specifics when needed."
+            case let .fragment(title, text):
+                "[Fragment \"\(title)\"]\n" + text + "\n[/Fragment]"
             }
         }.joined(separator: "\n\n")
     }
@@ -761,11 +840,21 @@ enum ChatArchive {
         for tag in ["system-reminder", "environment_context", "user_instructions",
                     "local-command-stdout", "command-message", "command-args",
                     "local-command-caveat", "bash-stdout", "bash-stderr",
+                    // Background-task completions are injected as
+                    // user-role messages — harness plumbing, not the user.
+                    "task-notification",
                     // Codex injects its project context (AGENTS.md, plugin
                     // roster) into the first recorded user turn.
                     "INSTRUCTIONS", "recommended_plugins"] {
             text = stripTag(tag, from: text)
         }
+        // Interrupt bookkeeping ("[Request interrupted by user]" and
+        // variants) is likewise injected, never typed.
+        text = text.replacingOccurrences(
+            of: #"(?m)^\[Request interrupted[^\]]*\]$"#,
+            with: "",
+            options: .regularExpression
+        )
         // Codex titles its injected AGENTS.md blob with a heading OUTSIDE
         // the <INSTRUCTIONS> tags — stripping the tags orphans it.
         text = text.replacingOccurrences(
@@ -814,12 +903,78 @@ enum ChatArchive {
     }
 
     /// First line, whitespace-collapsed, capped for list rows and chips.
-    private static func condense(_ text: String) -> String {
+    static func condense(_ text: String) -> String {
         let line = text
             .split(separator: "\n", omittingEmptySubsequences: true)
             .first.map(String.init) ?? text
         let flat = line.trimmingCharacters(in: .whitespaces)
         return flat.count > 160 ? String(flat.prefix(160)) + "…" : flat
+    }
+
+    /// Matches a capsule attachment's marker line — see
+    /// `ChatCapsule.referenceText` for the writer.
+    private static let capsuleMarker = try? NSRegularExpression(
+        pattern: #"^\[Capsule "([^"]*)" @ ([^\]]+)\]"#
+    )
+
+    /// Matches a quoted fragment's opening marker — see
+    /// `CapsuleMessageRow.referenceText` for the writer. The body runs
+    /// until the `[/Fragment]` line; only the label renders.
+    private static let fragmentMarker = try? NSRegularExpression(
+        pattern: #"^\[Fragment "([^"]*)""#
+    )
+
+    /// A user message's blocks, with capsule attachment markers pulled
+    /// out as chips and quoted fragments collapsed to chips (the chip
+    /// leads; the marker's body is for the model, not the reader).
+    static func userBlocks(_ text: String) -> [ChatMessage.Block] {
+        let hasCapsule = text.contains("[Capsule \"")
+        let hasFragment = text.contains("[Fragment \"")
+        guard hasCapsule || hasFragment else {
+            return splitMarkdown(text)
+        }
+        var chips: [ChatMessage.Block] = []
+        var rest: [String] = []
+        var fragmentTitle: String?
+        var fragmentBody: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            if let title = fragmentTitle {
+                if line.trimmingCharacters(in: .whitespaces) == "[/Fragment]" {
+                    chips.append(.fragment(
+                        title: title,
+                        text: fragmentBody.joined(separator: "\n")
+                    ))
+                    fragmentTitle = nil
+                    fragmentBody = []
+                } else {
+                    fragmentBody.append(line)
+                }
+                continue
+            }
+            let range = NSRange(line.startIndex..., in: line)
+            if let capsuleMarker,
+               let match = capsuleMarker.firstMatch(in: line, range: range),
+               let titleRange = Range(match.range(at: 1), in: line),
+               let fileRange = Range(match.range(at: 2), in: line) {
+                chips.append(.capsule(
+                    title: String(line[titleRange]),
+                    file: String(line[fileRange])
+                ))
+            } else if let fragmentMarker,
+                      let match = fragmentMarker.firstMatch(in: line, range: range),
+                      let titleRange = Range(match.range(at: 1), in: line) {
+                fragmentTitle = String(line[titleRange])
+            } else {
+                rest.append(line)
+            }
+        }
+        // An unterminated fragment (shouldn't happen) still chips.
+        if let title = fragmentTitle {
+            chips.append(.fragment(
+                title: title, text: fragmentBody.joined(separator: "\n")
+            ))
+        }
+        return chips + splitMarkdown(rest.joined(separator: "\n"))
     }
 
     /// Splits fenced code out of markdown so the view can render it as a
@@ -864,7 +1019,11 @@ enum ChatArchive {
         if let last = messages.indices.last, messages[last].role == role {
             messages[last].blocks += blocks
         } else {
-            messages.append(ChatMessage(role: role, blocks: blocks))
+            // Ordinal ids: transcripts only ever grow at the tail, so an
+            // existing message keeps its id across reloads.
+            messages.append(ChatMessage(
+                id: "m\(messages.count)", role: role, blocks: blocks
+            ))
         }
     }
 }
@@ -878,10 +1037,14 @@ final class ChatMetaStore: ObservableObject {
 
     @Published private(set) var pinned: Set<String> = []
     @Published private(set) var archived: Set<String> = []
+    /// Chats forked off another chat: file → the file it branched from.
+    /// Drives the branch glyph in the sidebar.
+    @Published private(set) var branches: [String: String] = [:]
 
     private struct Blob: Codable {
         var pinned: [String] = []
         var archived: [String] = []
+        var branches: [String: String]?
     }
 
     private static var fileURL: URL {
@@ -894,11 +1057,15 @@ final class ChatMetaStore: ObservableObject {
            let blob = try? JSONDecoder().decode(Blob.self, from: data) {
             pinned = Set(blob.pinned)
             archived = Set(blob.archived)
+            branches = blob.branches ?? [:]
         }
     }
 
     private func save() {
-        let blob = Blob(pinned: Array(pinned), archived: Array(archived))
+        let blob = Blob(
+            pinned: Array(pinned), archived: Array(archived),
+            branches: branches
+        )
         guard let data = try? JSONEncoder().encode(blob) else { return }
         try? FileManager.default.createDirectory(
             at: Self.fileURL.deletingLastPathComponent(),
@@ -922,11 +1089,18 @@ final class ChatMetaStore: ObservableObject {
         save()
     }
 
+    func markBranch(_ file: String, of parent: String) {
+        branches[file] = parent
+        save()
+    }
+
     /// A deleted chat's flags go with it.
     func forget(_ file: String) {
-        guard pinned.contains(file) || archived.contains(file) else { return }
+        guard pinned.contains(file) || archived.contains(file)
+            || branches[file] != nil else { return }
         pinned.remove(file)
         archived.remove(file)
+        branches.removeValue(forKey: file)
         save()
     }
 

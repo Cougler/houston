@@ -197,7 +197,7 @@ struct OnboardingView: View {
     private func quietButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.skyTextSecondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
@@ -434,11 +434,7 @@ private struct OnboardingStage: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 250)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.panelFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
-        )
+        .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.panelFill))
     }
 }
 
@@ -474,12 +470,8 @@ private struct TerminalVignette: View {
         // typing animation, which visibly slid the traffic lights around.
         .frame(width: 340, height: 160, alignment: .topLeading)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
                 .fill(Color(light: 0xE0E0E0, dark: 0x181818))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
         )
         .task {
             while !Task.isCancelled {
@@ -514,10 +506,10 @@ private struct ServersVignette: View {
         HStack(spacing: 9) {
             Circle().fill(dot).frame(width: 6, height: 6)
             Text(name)
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             Text(url)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Theme.Fonts.monoSmall)
                 .foregroundStyle(Theme.textSecondary)
             Spacer(minLength: 0)
             Image(systemName: "arrow.up.forward")
@@ -530,7 +522,7 @@ private struct ServersVignette: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .frame(width: 340)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.rowHovered))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.rowHovered))
     }
 }
 
@@ -549,20 +541,19 @@ private struct ShareVignette: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
             .background(Capsule().fill(Theme.buttonFill))
-            .overlay(Capsule().strokeBorder(Theme.buttonStroke, lineWidth: 1))
             HStack(spacing: 6) {
                 Image(systemName: "wifi")
                     .font(.system(size: 10))
                 Image(systemName: "iphone")
                     .font(.system(size: 11))
                 Text("Any device on your Wi-Fi")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
             }
             .foregroundStyle(Theme.textSecondary)
             HStack(spacing: 8) {
                 ComingSoonBadge()
                 Text("Public live URLs")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
             }
         }
@@ -574,7 +565,7 @@ private struct ProjectsVignette: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("PROJECTS")
-                .font(.system(size: 8, weight: .semibold))
+                .font(Theme.Fonts.label)
                 .kerning(0.5)
                 .foregroundStyle(Theme.heading)
                 .padding(.leading, 4)
@@ -595,14 +586,14 @@ private struct ProjectsVignette: View {
                 .font(.system(size: 9))
                 .foregroundStyle(Theme.textSecondary)
             Text(name)
-                .font(.system(size: 11, weight: .medium))
+                .font(Theme.Fonts.secondaryMedium)
                 .foregroundStyle(quiet ? Theme.textSecondary : Theme.text)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .fill(selected ? Theme.rowSelected : quiet ? .clear : Theme.rowHovered)
         )
     }
@@ -614,7 +605,7 @@ private struct StatusBarVignette: View {
         HStack(spacing: 16) {
             HStack(spacing: 4) {
                 Text("Opus 5")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7, weight: .semibold))
@@ -624,20 +615,20 @@ private struct StatusBarVignette: View {
             HStack(spacing: 6) {
                 ContextBar(pct: 0.38, color: Theme.Context.color(for: 0.38))
                 Text("62% left")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
             }
             divider
             HStack(spacing: 4) {
                 Circle().fill(Theme.dotActive).frame(width: 5, height: 5)
                 Text("MCP")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
             }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Theme.rowHovered))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.rowHovered))
     }
 
     private var divider: some View {
@@ -656,7 +647,7 @@ private struct RemindersVignette: View {
                 .foregroundStyle(Theme.textSecondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Renew TLS certificate")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 Text("houston-relay · Nov 24")
                     .font(.system(size: 10.5))
@@ -672,7 +663,7 @@ private struct RemindersVignette: View {
         }
         .padding(14)
         .frame(width: 340)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.rowHovered))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.rowHovered))
     }
 }
 
@@ -691,9 +682,9 @@ private struct ThemesVignette: View {
             ForEach(swatches.indices, id: \.self) { index in
                 let swatch = swatches[index]
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .fill(Color(hex: swatch.bg))
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                     Text("A")
                         .font(.system(size: 16, weight: .medium, design: .monospaced))
@@ -702,7 +693,7 @@ private struct ThemesVignette: View {
                 .frame(width: 46, height: 46)
                 .overlay {
                     if swatch.picked {
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: Theme.radiusSurface)
                             .strokeBorder(Theme.link, lineWidth: 2)
                             .padding(-3.5)
                     }

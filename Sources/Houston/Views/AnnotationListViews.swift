@@ -35,7 +35,7 @@ struct AnnotationRowView: View {
                         // instead of scrolling inside a one-line field.
                         TextField("", text: $draft, axis: .vertical)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 12))
+                            .font(Theme.Fonts.body)
                             .foregroundStyle(Theme.text)
                             .lineLimit(1...8)
                             .focused($editFocused)
@@ -46,14 +46,14 @@ struct AnnotationRowView: View {
                     }
                     if item.sent && !item.done && !editing {
                         Text("SENT")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(Theme.Fonts.label)
                             .kerning(0.5)
                             .foregroundStyle(Theme.textPositive)
                     }
                 }
                 if !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -81,7 +81,7 @@ struct AnnotationRowView: View {
         .padding(.horizontal, carded ? 10 : 12)
         .padding(.vertical, carded ? 8 : 6)
         .background(
-            RoundedRectangle(cornerRadius: carded ? 8 : 6)
+            RoundedRectangle(cornerRadius: carded ? Theme.radiusSurface : Theme.radiusControl)
                 .fill(hovered ? Theme.rowHovered : (carded ? Theme.panelFill : .clear))
                 .padding(.horizontal, carded ? 0 : 6)
         )
@@ -151,7 +151,7 @@ private struct ExpandableTaskText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(text)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.text)
                 .strikethrough(done)
                 .lineLimit(expanded ? nil : 3)
@@ -174,7 +174,7 @@ private struct ExpandableTaskText: View {
     private var truncationProbe: some View {
         GeometryReader { clamped in
             Text(text)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: clamped.size.width, alignment: .leading)
                 .hidden()
@@ -208,7 +208,7 @@ struct AnnotationsSheetPanel: View {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     if store.items.isEmpty {
                         Text("Inspect an element in a web preview, then “Add to Tasks” — or type a task below.")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 2)
                             .padding(.top, 4)
@@ -218,7 +218,7 @@ struct AnnotationsSheetPanel: View {
                     }
                     if !store.doneItems.isEmpty {
                         Text("DONE")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(Theme.Fonts.label)
                             .kerning(0.5)
                             .foregroundStyle(Theme.heading)
                             .padding(.horizontal, 2)
@@ -236,7 +236,7 @@ struct AnnotationsSheetPanel: View {
                     .fill(Theme.borderFooter)
                     .frame(height: 1)
                 Button("Send all open (\(unsentOpen.count))") { sendAll() }
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .controlSize(.small)
                     .padding(.vertical, 10)
             }
@@ -250,15 +250,15 @@ struct AnnotationsSheetPanel: View {
         HStack(spacing: 8) {
             TextField("Add a task…", text: $newChange)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .onSubmit { addManual() }
             Button(action: addManual) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.switchTrackOn))
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.switchTrackOn))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
             }
             .buttonStyle(.plain)
             .disabled(newChangeEmpty)
@@ -268,8 +268,7 @@ struct AnnotationsSheetPanel: View {
         .padding(.leading, 14)
         .padding(.trailing, 8)
         .frame(height: 48)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.attachedWellFill))
         .padding(.top, 8)
     }
 
@@ -367,7 +366,7 @@ struct AllTasksPanel: View {
                     RemindersRow(attention: trackedAttention, action: onOpenReminders)
                     if stores.isEmpty {
                         Text("No tasks yet. Queue changes from a web preview, or type one below.")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 2)
                             .padding(.top, 4)
@@ -400,7 +399,7 @@ struct AllTasksPanel: View {
             } label: {
                 HStack(spacing: 3) {
                     Text(targetProjectName ?? "Project")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Theme.Fonts.secondaryMedium)
                         .lineLimit(1)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 8, weight: .semibold))
@@ -408,8 +407,8 @@ struct AllTasksPanel: View {
                 .foregroundStyle(targetProject == nil ? Theme.textSecondary : Theme.text)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.rowHovered))
-                .contentShape(RoundedRectangle(cornerRadius: 8))
+                .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.rowHovered))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
@@ -418,15 +417,15 @@ struct AllTasksPanel: View {
             HStack(spacing: 8) {
                 TextField("Add a task…", text: $newTask)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.body)
                     .onSubmit { addTask() }
                 Button(action: addTask) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 32, height: 32)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.switchTrackOn))
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.switchTrackOn))
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
                 }
                 .buttonStyle(.plain)
                 .disabled(!canAdd)
@@ -436,8 +435,7 @@ struct AllTasksPanel: View {
             .padding(.leading, 14)
             .padding(.trailing, 8)
             .frame(height: 48)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.panelFill))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.attachedWellFill))
         }
         .padding(.top, 8)
     }
@@ -497,7 +495,7 @@ private struct RemindersRow: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
                 Text("Reminders")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 if attention > 0 {
                     HStack(spacing: 4) {
@@ -517,10 +515,10 @@ private struct RemindersRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
                     .fill(hovered ? Theme.rowHovered : Theme.panelFill)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
@@ -609,7 +607,7 @@ private struct AnnotationIconButton: View {
                 .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())

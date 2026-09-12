@@ -22,6 +22,9 @@ enum SidebarEntry: Identifiable, Hashable {
     /// A past chat session nested under its project row. `file` is the
     /// transcript path; empty = the "Show more" row.
     case chat(project: String, file: String, title: String, harness: String)
+    /// A sealed chat (capsule) nested under its project row — click opens
+    /// its transcript in the right sheet, drag carries it into a composer.
+    case capsuleChat(project: String, capsuleID: String, title: String)
 
     var id: String {
         switch self {
@@ -30,6 +33,7 @@ enum SidebarEntry: Identifiable, Hashable {
         case let .action(key, _): "action:\(key)"
         case .divider: "divider"
         case let .chat(project, file, _, _): "chat:\(project):\(file)"
+        case let .capsuleChat(_, capsuleID, _): "capchat:\(capsuleID)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"

@@ -64,7 +64,7 @@ struct WebPreviewView: View {
                 model.reload()
             }
             Text(model.currentURL.replacingOccurrences(of: "http://", with: ""))
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -74,7 +74,7 @@ struct WebPreviewView: View {
                         .fill(Theme.dotDegraded)
                         .frame(width: 6, height: 6)
                     Text("Not loading")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textDanger)
                 }
                 .help(error)
@@ -108,19 +108,19 @@ struct WebPreviewView: View {
                 Image(systemName: "cursorarrow.rays")
                     .font(.system(size: 11, weight: .medium))
                 Text("Inspect")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(Theme.Fonts.bodyMedium)
             }
             .foregroundStyle(model.inspectMode ? Theme.buttonActiveStroke : Theme.text)
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(model.inspectMode ? Theme.buttonActiveFill : Theme.buttonFill)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .stroke(
-                        model.inspectMode ? Theme.buttonActiveStroke : Theme.buttonStroke,
+                        model.inspectMode ? Theme.buttonActiveStroke : Color.clear,
                         lineWidth: 1
                     )
             )
@@ -199,7 +199,7 @@ private struct InspectorPopover: View {
                     .lineLimit(1)
                 if let text = element.text, !text.isEmpty {
                     Text("“\(text.prefix(60))\(text.count > 60 ? "…" : "")”")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                 }
@@ -216,31 +216,31 @@ private struct InspectorPopover: View {
     ) -> some View {
         HStack(spacing: 8) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
+                .font(Theme.Fonts.label)
                 .kerning(0.5)
                 .foregroundStyle(Theme.heading)
                 .frame(width: 72, alignment: .leading)
             if let resolved {
                 Text(resolved.display)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Theme.Fonts.mono)
                     .foregroundStyle(Theme.link)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if extra > 0 {
                     Text("+\(extra) more")
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                 }
                 CopyIconButton(text: resolved.absolutePath, help: "Copy path")
             } else if let raw, !raw.isEmpty {
                 Text(raw)
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             } else {
                 Text("not detected")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
             }
             Spacer(minLength: 0)
@@ -268,15 +268,15 @@ private struct InspectorPopover: View {
         HStack(spacing: 8) {
             TextField("Describe a change to this element…", text: $instruction)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .focused($fieldFocused)
                 .onSubmit { sendNow() }
             Button("Send to Claude") { sendNow() }
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .controlSize(.small)
                 .disabled(!canPrompt)
             Button("Add to Tasks") { saveToList() }
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .controlSize(.small)
                 .disabled(!canPrompt || model.annotations == nil)
         }
@@ -309,7 +309,7 @@ private struct AnnotationsPanel: View {
         VStack(spacing: 0) {
             HStack {
                 Text("TASKS")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Theme.Fonts.label)
                     .kerning(0.5)
                     .foregroundStyle(Theme.heading)
                 Spacer()
@@ -320,7 +320,7 @@ private struct AnnotationsPanel: View {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if store.items.isEmpty {
                         Text("Click an element in inspect mode and “Add to Tasks” to queue up changes.")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 12)
                             .padding(.top, 4)
@@ -330,7 +330,7 @@ private struct AnnotationsPanel: View {
                     }
                     if !store.doneItems.isEmpty {
                         Text("DONE")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(Theme.Fonts.label)
                             .kerning(0.5)
                             .foregroundStyle(Theme.heading)
                             .padding(.horizontal, 12)
@@ -351,7 +351,7 @@ private struct AnnotationsPanel: View {
                 Button("Send all open (\(unsentOpen.count))") {
                     model.sendAllOpen()
                 }
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .controlSize(.small)
                 .disabled(model.server.cwd == nil)
                 .padding(.vertical, 10)
@@ -398,13 +398,13 @@ private struct ToolbarIconButton: View {
                 )
                 .frame(width: 24, height: 24)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .overlay(alignment: .topTrailing) {
                     if badge > 0 {
                         Text(String(badge))
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 3)
                             .frame(minWidth: 12, minHeight: 12)

@@ -136,7 +136,7 @@ private struct MenuListRow<Content: View>: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
@@ -173,7 +173,7 @@ struct CopyIconButton: View {
                 )
                 .frame(width: 20, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
                 .contentShape(Rectangle())
@@ -215,40 +215,73 @@ func formatTokens(_ n: Int) -> String {
     return String(format: "%.1fM", Double(n) / 1_000_000)
 }
 
-/// Inline alert banner for panel sections: red hairline, 5% red wash,
-/// title in the primary text color with the body at 60% — the red stays
-/// in the chrome, not the words. (`Theme.text`, not literal white, so the
-/// light theme keeps its contrast.)
-struct AlertBanner: View {
+/// Inline notice for panel sections — THE feedback pattern, app-wide: a
+/// quiet color wash (no border), the signal icon and hue in the chrome,
+/// title in the primary text color with the body at 60% so the color
+/// stays out of the words. One shape for error, success, and warning, so
+/// feedback reads the same everywhere.
+struct InlineNotice: View {
+    enum Kind {
+        case error, success, warning
+
+        var icon: String {
+            switch self {
+            case .error: "exclamationmark.triangle.fill"
+            case .success: "checkmark.circle.fill"
+            case .warning: "exclamationmark.circle.fill"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .error: Theme.textDanger
+            case .success: Theme.textPositive
+            case .warning: Theme.textWarning
+            }
+        }
+
+        var wash: Color {
+            switch self {
+            case .error: Theme.closeRed.opacity(0.07)
+            case .success: Theme.textPositive.opacity(0.08)
+            case .warning: Theme.textWarning.opacity(0.08)
+            }
+        }
+    }
+
+    var kind: Kind = .error
     let title: String
     let message: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.xs) {
+            Image(systemName: kind.icon)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.textDanger)
+                .foregroundStyle(kind.tint)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
                 Text(message)
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.text.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
                     .lineSpacing(2)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Theme.Space.s)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.closeRed.opacity(0.05)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Theme.closeRed, lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(kind.wash)
         )
     }
+}
+
+/// The old name for the error notice; call sites migrate to `InlineNotice`.
+func AlertBanner(title: String, message: String) -> InlineNotice {
+    InlineNotice(kind: .error, title: title, message: message)
 }
 
 /// QR code for a share URL, shown from the Wi-Fi row's "View QR Code"

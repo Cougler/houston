@@ -93,8 +93,8 @@ struct SkillsPanel: View {
 
     private func sectionLabel(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 9, weight: .semibold))
-            .kerning(0.6)
+            .font(Theme.Fonts.label)
+            .kerning(0.5)
             .foregroundStyle(Theme.heading)
             .padding(.leading, 2)
             .padding(.top, 6)
@@ -103,16 +103,16 @@ struct SkillsPanel: View {
     private var emptyState: some View {
         VStack(spacing: 8) {
             Text("No skills found")
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             Text("Skills live in ~/.claude/skills — one folder per skill with a SKILL.md inside.")
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
             Button("Open Skills Folder") {
                 Actions.openFolder(path: "~/.claude/skills".expandingTildePath)
             }
-            .font(.system(size: 11))
+            .font(Theme.Fonts.secondary)
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -137,7 +137,7 @@ private struct SkillRow: View {
                         // Resting on the row-hover tint, dropping to the
                         // control tint under the pointer — rowSelected was
                         // indistinguishable on an already-tinted row.
-                        RoundedRectangle(cornerRadius: 5)
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
                             .fill(playHovered ? Theme.controlHovered : Theme.rowHovered)
                     )
                     .contentShape(Rectangle())
@@ -155,7 +155,7 @@ private struct SkillRow: View {
                             .lineLimit(1)
                         if !skill.description.isEmpty {
                             Text(skill.description)
-                                .font(.system(size: 11))
+                                .font(Theme.Fonts.secondary)
                                 .foregroundStyle(Theme.textSecondary)
                                 .lineLimit(1)
                         }
@@ -175,16 +175,12 @@ private struct SkillRow: View {
         .padding(.trailing, 10)
         .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
                 .fill(Theme.buttonFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
         )
         .onHover { hovered = $0 }
     }
@@ -205,7 +201,7 @@ private struct SkillDetail: View {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 9, weight: .semibold))
                     Text("Skills")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Theme.Fonts.secondaryMedium)
                 }
                 .foregroundStyle(backHovered ? Theme.text : Theme.textSecondary)
                 .contentShape(Rectangle())
@@ -222,32 +218,28 @@ private struct SkillDetail: View {
                         .foregroundStyle(Theme.text)
                     if HoustonSkills.isHouston(skill.name) {
                         Text("COMES WITH HOUSTON")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(Theme.Fonts.label)
                             .kerning(0.5)
                             .foregroundStyle(Theme.heading)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(
-                                RoundedRectangle(cornerRadius: 4)
+                                RoundedRectangle(cornerRadius: Theme.radiusControl)
                                     .fill(Theme.buttonFill)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .strokeBorder(Theme.buttonStroke, lineWidth: 1)
                             )
                     }
                 }
 
                 if !skill.description.isEmpty {
                     Text(skill.description)
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.text)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let details = HoustonSkills.details(for: skill.name) {
                     Text(details)
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -264,7 +256,7 @@ private struct SkillDetail: View {
                     Actions.openFolder(path: skill.path)
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .padding(.top, 2)
             }
@@ -295,22 +287,18 @@ private struct DetailActionButton: View {
                         .foregroundStyle(Theme.text.opacity(0.75))
                 }
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Fonts.secondaryMedium)
                     .foregroundStyle(Theme.text)
             }
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(Theme.buttonFill)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
                             .fill(hovered ? Theme.rowHovered : .clear)
                     )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Theme.buttonStroke, lineWidth: 1)
             )
             .contentShape(Rectangle())
         }

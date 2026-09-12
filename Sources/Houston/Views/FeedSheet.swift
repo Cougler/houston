@@ -38,11 +38,11 @@ struct FeedSheet: View {
                 .font(.system(size: 20))
                 .foregroundStyle(Theme.heading)
             Text("You\u{2019}re all caught up")
-                .font(.system(size: 12, weight: .medium))
+                .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             Text("Sessions needing you, tracked reminders, and commits "
                 + "show up here.")
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -76,7 +76,7 @@ private struct FeedEventCard: View {
                         .foregroundStyle(Theme.textPath)
                 }
                 Text(event.detail)
-                    .font(.system(size: 10.5))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -85,18 +85,14 @@ private struct FeedEventCard: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
                 .fill(Theme.buttonFill)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .fill(hovered ? Theme.rowHovered : .clear)
                 )
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         .onTapGesture(perform: action)
         .onHover { hovered = $0 }
     }

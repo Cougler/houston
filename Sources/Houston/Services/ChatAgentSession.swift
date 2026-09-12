@@ -173,6 +173,10 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     @Published private(set) var liveBlocks: [ChatMessage.Block] = []
     /// The currently-streaming text tail.
     @Published private(set) var streamText = ""
+    /// Exchanges superseded by a newer send before the transcript
+    /// re-read absorbed them — rendered ahead of the pending message so
+    /// back-to-back sends never make the earlier one vanish.
+    @Published private(set) var carriedTurns: [ChatMessage] = []
     @Published private(set) var approval: ApprovalRequest?
     @Published private(set) var lastError: String?
     /// Bumps when a turn finishes — the transcript view reloads on it.
@@ -209,7 +213,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
 
     var hasLiveContent: Bool {
         pendingUserText != nil || !liveBlocks.isEmpty || !streamText.isEmpty
-            || approval != nil || lastError != nil
+            || approval != nil || lastError != nil || !carriedTurns.isEmpty
     }
 
     // MARK: Public controls
@@ -218,6 +222,11 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         lastModel = model
         lastError = nil
         interrupting = false
+        // A send while the previous exchange exists only in the live
+        // section (mid-turn, or inside the transcript flush lag) must
+        // not wipe it — the message visibly vanished until the next
+        // reload. Carry it until a transcript re-read absorbs it.
+        carryLiveTurn()
         pendingUserText = text
         liveBlocks = []
         streamText = ""
@@ -283,12 +292,96 @@ final class ChatAgentSession: ObservableObject, Identifiable {
 
     func dismissError() { lastError = nil }
 
+    // MARK: - Context meter
+
+    /// Context occupancy from the last usage-bearing event — the full
+    /// prompt footprint (input + cache read/create + output), the same
+    /// math the terminal status pipeline uses. Claude only: Codex's
+    /// app-server publishes no cumulative usage, so codex chats show no
+    /// meter rather than a guess.
+    @Published private(set) var contextTokens: Int?
+    private var contextModel: String?
+    var contextWindow: Int { ProcessDetect.contextWindow(for: contextModel) }
+
+    /// Initial value for a resumed chat, read off the transcript tail by
+    /// the hub — live events overwrite it and always win.
+    func seedUsage(tokens: Int, model: String?) {
+        guard contextTokens == nil, tokens > 0 else { return }
+        contextTokens = tokens
+        if contextModel == nil { contextModel = model }
+    }
+
+    private func captureUsage(_ usage: [String: Any]?, model: String?) {
+        if let model { contextModel = model }
+        guard let usage else { return }
+        let total = ((usage["input_tokens"] as? Int) ?? 0)
+            + ((usage["cache_read_input_tokens"] as? Int) ?? 0)
+            + ((usage["cache_creation_input_tokens"] as? Int) ?? 0)
+            + ((usage["output_tokens"] as? Int) ?? 0)
+        if total > 0 { contextTokens = total }
+    }
+
+    /// The last error reads as "not signed in" — the CLIs phrase it many
+    /// ways ("Invalid API key · Please run /login", "Not logged in, run
+    /// codex login", 401s), so this is a hint match, not a protocol field.
+    /// When it fires, the chat offers the terminal login flow instead of
+    /// a dead-end error line.
+    var needsLogin: Bool {
+        guard let message = lastError?.lowercased() else { return false }
+        let hints = [
+            "login", "log in", "logged in", "logged out", "sign in",
+            "api key", "unauthorized", "401", "authentication",
+            "not authenticated", "credential", "oauth",
+        ]
+        return hints.contains { message.contains($0) }
+    }
+
     /// Absorb the finished turn (the transcript re-read now shows it).
     func clearTurn() {
         guard !running else { return }
         pendingUserText = nil
         liveBlocks = []
         streamText = ""
+        carriedTurns = []
+    }
+
+    /// Snapshot the current live exchange into `carriedTurns`.
+    private func carryLiveTurn() {
+        if let pending = pendingUserText {
+            carriedTurns.append(ChatMessage(
+                role: .user, blocks: ChatArchive.userBlocks(pending)
+            ))
+        }
+        var blocks = liveBlocks
+        if !streamText.isEmpty { blocks.append(.text(streamText)) }
+        if !blocks.isEmpty {
+            carriedTurns.append(ChatMessage(role: .assistant, blocks: blocks))
+        }
+    }
+
+    /// Drop carried turns a fresh transcript parse now contains, so an
+    /// exchange never renders twice while a later turn is still running
+    /// (`clearTurn` can't run then — it's gated on idle).
+    func dropCarried(absorbedBy parsed: [ChatMessage]) {
+        guard !carriedTurns.isEmpty else { return }
+        carriedTurns.removeAll { turn in
+            guard let needle = Self.matchText(turn) else { return true }
+            return parsed.contains { message in
+                message.role == turn.role && message.blocks.contains { block in
+                    if case let .text(text) = block { return text.contains(needle) }
+                    return false
+                }
+            }
+        }
+    }
+
+    private static func matchText(_ message: ChatMessage) -> String? {
+        for block in message.blocks {
+            if case let .text(text) = block, !text.isEmpty {
+                return String(text.prefix(60))
+            }
+        }
+        return nil
     }
 
     func shutdown() {
@@ -362,6 +455,10 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         case "assistant":
             guard let message = o["message"] as? [String: Any],
                   let content = message["content"] as? [[String: Any]] else { return }
+            captureUsage(
+                message["usage"] as? [String: Any],
+                model: message["model"] as? String
+            )
             for block in content {
                 switch block["type"] as? String {
                 case "text":
@@ -411,6 +508,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 approval = nil
             }
         case "result":
+            captureUsage(o["usage"] as? [String: Any], model: nil)
             let subtype = o["subtype"] as? String
             endTurn(error: (subtype == "success" || interrupting)
                 ? nil : "The turn failed (\(subtype ?? "unknown")).")
@@ -762,7 +860,24 @@ final class ChatSessionHub: ObservableObject {
             harness: ref.harness, projectPath: project, resumeID: id
         )
         sessions[ref.filePath] = session
+        seedContext(session, transcript: ref.filePath)
         return session
+    }
+
+    /// Seed a resumed Claude chat's context meter from its transcript
+    /// tail, so the meter reads before the first new turn. Off-main —
+    /// `readUsage` hits the filesystem (and can fall back to a full read).
+    private func seedContext(_ session: ChatAgentSession, transcript path: String) {
+        guard session.harness == .claude else { return }
+        Task.detached(priority: .utility) {
+            let summary = ProcessDetect.readUsage(jsonlPath: path)
+            guard summary.contextTokens > 0 else { return }
+            await MainActor.run {
+                session.seedUsage(
+                    tokens: summary.contextTokens, model: summary.model
+                )
+            }
+        }
     }
 
     /// The new-chat session for a project — reused until it's promoted to
@@ -787,6 +902,7 @@ final class ChatSessionHub: ObservableObject {
             harness: harness, projectPath: project, resumeID: id
         )
         sessions[file] = session
+        seedContext(session, transcript: file)
         return session
     }
 
@@ -809,10 +925,13 @@ final class ChatSessionHub: ObservableObject {
     }
 
     /// Idle sessions are cheap but not free — drop the ones no chat is
-    /// looking at, keeping any that are mid-turn.
+    /// looking at, keeping any that are mid-turn OR still holding a
+    /// finished turn the transcript re-read hasn't absorbed yet (killing
+    /// those ate the last reply when the user navigated away right as a
+    /// turn ended).
     func releaseIdle(except keep: Set<String> = []) {
         for (file, session) in sessions
-        where !keep.contains(file) && !session.running {
+        where !keep.contains(file) && !session.running && !session.hasLiveContent {
             session.shutdown()
             sessions.removeValue(forKey: file)
         }

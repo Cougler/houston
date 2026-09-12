@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// One entry in the composer's model menu — the harness decides which CLI
 /// the send runs, the arg rides its --model flag (nil = that CLI's default).
@@ -129,6 +130,9 @@ struct ChatBrowserView: View {
     @State private var historyShown = 150
     /// Bumped on every send so the transcript scrolls the new bubble into view.
     @State private var sendScrollTick = 0
+    /// Whether the transcript is scrolled near its bottom — the stream is
+    /// only followed while it is, so reading upward isn't yanked back down.
+    @State private var nearBottom = true
 
     /// The selection is derived synchronously from the file path — going
     /// through a directory listing first flashed the empty state over
@@ -164,16 +168,29 @@ struct ChatBrowserView: View {
         // The file is part of the identity so retargeting (another sidebar
         // row, a run finishing in a fresh file) reloads into it.
         .task(id: projectPath + "|" + (initialSessionFile ?? "")) {
-            messages = nil
             historyShown = 150
             selected = initialSessionFile.map(Self.quickRef)
-            if let selected { reload(selected) }
+            // The cached parse renders immediately (no spinner flash on
+            // reopen); the real read still runs and lands only if the
+            // file changed.
+            messages = selected.flatMap { ChatArchive.cachedTranscript($0) }
+            guard let selected else { return }
+            if let session = hub.sessions[selected.filePath],
+               !session.running, session.hasLiveContent {
+                // A turn finished while this chat wasn't on screen — the
+                // session kept it (releaseIdle spares live content).
+                // Absorb it now, or the transcript and the live section
+                // would both render it.
+                reloadThenClear(selected, session)
+            } else {
+                reload(selected)
+            }
         }
     }
 
     private func open(_ ref: ChatSessionRef) {
         selected = ref
-        messages = nil
+        messages = ChatArchive.cachedTranscript(ref)
         historyShown = 150
         reload(ref)
     }
@@ -218,7 +235,7 @@ struct ChatBrowserView: View {
                                         historyShown += 200
                                     }
                                     .buttonStyle(.plain)
-                                    .font(.system(size: 12))
+                                    .font(Theme.Fonts.body)
                                     .foregroundStyle(Theme.link)
                                     .frame(maxWidth: .infinity)
                                 }
@@ -230,11 +247,23 @@ struct ChatBrowserView: View {
                                     .id(message.id)
                                 }
                                 if let session = hub.sessions[ref.filePath] {
-                                    LiveTurnView(session: session, harness: ref.harness) {
+                                    LiveTurnView(
+                                        session: session, harness: ref.harness,
+                                        onGrow: {
+                                            guard nearBottom else { return }
+                                            proxy.scrollTo("chat-bottom", anchor: .bottom)
+                                        }
+                                    ) {
                                         reloadThenClear(ref, session)
                                     }
                                 }
                                 Color.clear.frame(height: 1).id("chat-bottom")
+                                    .background(GeometryReader { sentinel in
+                                        Color.clear.preference(
+                                            key: ChatBottomYKey.self,
+                                            value: sentinel.frame(in: .named("chatScroll")).minY
+                                        )
+                                    })
                             }
                             .padding(.horizontal, 32)
                             .padding(.vertical, 18)
@@ -249,6 +278,12 @@ struct ChatBrowserView: View {
                             .thinScrollbar()
                         }
                         .defaultScrollAnchor(.bottom)
+                        .coordinateSpace(name: "chatScroll")
+                        .onPreferenceChange(ChatBottomYKey.self) { y in
+                            // Within ~two lines of the sentinel counts as
+                            // "at the bottom".
+                            nearBottom = y <= geo.size.height + 60
+                        }
                         .onChange(of: messages.count) {
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
@@ -483,6 +518,7 @@ struct ChatBrowserView: View {
                 try? await Task.sleep(nanoseconds: 400_000_000)
             }
             if token == loadToken { messages = parsed }
+            session.dropCarried(absorbedBy: parsed)
             session.clearTurn()
             ChatIndexStore.shared.refresh(projectPath, force: true)
         }
@@ -546,6 +582,15 @@ struct ChatBrowserView: View {
 
 }
 
+/// The bottom sentinel's offset within the transcript's viewport — how
+/// far down the user is scrolled, measured against the viewport height.
+private struct ChatBottomYKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 // MARK: - Row actions
 
 /// Chat actions shared by the sidebar's context menu and the browser
@@ -570,8 +615,12 @@ enum ChatRowActions {
 
     /// A fork: the transcript re-exported as a fresh native session for
     /// the same harness, named "<title> copy".
-    static func duplicate(_ ref: ChatSessionRef, project: String) {
-        let title = ChatTitler.shared.displayTitle(ref) + " copy"
+    /// `asBranch` marks the copy as a fork of the original — same
+    /// mechanics, but it reads as "this conversation diverges here" (the
+    /// sidebar gives it the branch glyph) instead of a plain backup.
+    static func duplicate(_ ref: ChatSessionRef, project: String, asBranch: Bool = false) {
+        let title = ChatTitler.shared.displayTitle(ref)
+            + (asBranch ? " branch" : " copy")
         Task.detached(priority: .userInitiated) {
             let messages = ChatArchive.transcript(ref)
             let file: String? = switch ref.harness {
@@ -584,7 +633,12 @@ enum ChatRowActions {
                 ).flatMap { ChatArchive.codexRolloutPath(id: $0) }
             }
             await MainActor.run {
-                if let file { ChatTitler.shared.setCustomTitle(title, for: file) }
+                if let file {
+                    ChatTitler.shared.setCustomTitle(title, for: file)
+                    if asBranch {
+                        ChatMetaStore.shared.markBranch(file, of: ref.filePath)
+                    }
+                }
                 ChatIndexStore.shared.refresh(project, force: true)
             }
         }
@@ -602,6 +656,8 @@ enum ChatRowActions {
                     case let .code(c, lang): "```" + (lang ?? "") + "\n" + c + "\n```"
                     case let .tool(name, detail):
                         detail.isEmpty ? "*[\(name)]*" : "*[\(name): \(detail)]*"
+                    case let .capsule(title, _): "*[Capsule: \(title)]*"
+                    case let .fragment(title, _): "*[Fragment: \(title)]*"
                     }
                 }.joined(separator: "\n\n")
                 return heading + "\n\n" + body
@@ -623,14 +679,25 @@ enum ChatRowActions {
 private struct LiveTurnView: View {
     @ObservedObject var session: ChatAgentSession
     let harness: ChatHarness
+    /// Fired as the live turn grows — the transcript follows the stream.
+    var onGrow: () -> Void = {}
     /// Fired when a turn completes — the owner re-reads the transcript.
     let onTurnEnd: () -> Void
 
     var body: some View {
         Group {
+            // Exchanges a newer send superseded before the transcript
+            // caught up — without these, the earlier message vanished.
+            ForEach(session.carriedTurns) { message in
+                MessageView(message: message, harness: harness)
+            }
             if let pending = session.pendingUserText {
+                // Through userBlocks so an attached capsule shows as its
+                // chip while the turn streams, same as it will on disk.
                 MessageView(
-                    message: ChatMessage(role: .user, blocks: [.text(pending)]),
+                    message: ChatMessage(
+                        role: .user, blocks: ChatArchive.userBlocks(pending)
+                    ),
                     harness: harness
                 )
             }
@@ -658,24 +725,100 @@ private struct LiveTurnView: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Working…")
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
             if let error = session.lastError {
-                HStack(spacing: 10) {
-                    Text(error)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textDanger)
-                        .lineLimit(3)
-                    Button("Dismiss") { session.dismissError() }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.link)
+                if session.needsLogin {
+                    // A signed-out CLI, not a failed turn: offer the login
+                    // flow instead of a dead end. The button opens the
+                    // project's terminal and starts the provider's own
+                    // sign-in (claude /login or codex login).
+                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        InlineNotice(
+                            kind: .error,
+                            title: "\(session.harness.rawValue) isn't signed in",
+                            message: error
+                        )
+                        HStack(spacing: Theme.Space.s) {
+                            Button {
+                                PromptDelivery.login(
+                                    session.harness,
+                                    project: session.projectPath
+                                )
+                            } label: {
+                                Text("Sign in from Terminal")
+                                    .font(Theme.Fonts.secondaryMedium)
+                                    .foregroundStyle(Theme.text)
+                                    .padding(.horizontal, Theme.Space.s)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(
+                                            cornerRadius: Theme.radiusControl
+                                        )
+                                        .fill(Theme.buttonFill)
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Opens the project's terminal and runs the "
+                                + "provider's sign-in; send again once you're in")
+                            Button("Dismiss") { session.dismissError() }
+                                .buttonStyle(.plain)
+                                .font(Theme.Fonts.body)
+                                .foregroundStyle(Theme.link)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        Text(error)
+                            .font(Theme.Fonts.body)
+                            .foregroundStyle(Theme.textDanger)
+                            .lineLimit(3)
+                        Button("Dismiss") { session.dismissError() }
+                            .buttonStyle(.plain)
+                            .font(Theme.Fonts.body)
+                            .foregroundStyle(Theme.link)
+                    }
                 }
             }
         }
         .onChange(of: session.completedTurns) { onTurnEnd() }
+        .onChange(of: session.streamText) { onGrow() }
+        .onChange(of: session.liveBlocks.count) { onGrow() }
+        .onChange(of: session.pendingUserText) { onGrow() }
+        .onChange(of: session.approval != nil) { onGrow() }
+    }
+}
+
+/// How full the model's context window is, in the composer's corner — so
+/// a chat maxing out is visible before compaction hits. Claude only (the
+/// session publishes no usage for codex) and hidden until usage lands;
+/// same bar + color ramp as the terminal status strip.
+private struct ContextMeter: View {
+    @ObservedObject var session: ChatAgentSession
+
+    var body: some View {
+        if let tokens = session.contextTokens, session.contextWindow > 0 {
+            let fraction = min(1, Double(tokens) / Double(session.contextWindow))
+            HStack(spacing: 6) {
+                ContextBar(
+                    pct: fraction,
+                    color: Theme.Context.color(for: fraction),
+                    trackWidth: 56,
+                    trackHeight: 4
+                )
+                Text("\(Int((fraction * 100).rounded()))%")
+                    .font(Theme.Fonts.meta)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .help(
+                "\(formatTokens(tokens)) of "
+                + "\(formatTokens(session.contextWindow)) context used"
+            )
+        }
     }
 }
 
@@ -693,7 +836,7 @@ private struct ApprovalCard: View {
                 .foregroundStyle(Theme.text)
             if !request.detail.isEmpty {
                 Text(request.detail)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Theme.Fonts.monoSmall)
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(6)
                     .textSelection(.enabled)
@@ -705,18 +848,18 @@ private struct ApprovalCard: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.ctaFill))
+                        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.ctaFill))
                 }
                 .buttonStyle(.plain)
                 Button(action: onDeny) {
                     Text("Deny")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Theme.Fonts.secondaryMedium)
                         .foregroundStyle(Theme.text)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
                         .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Theme.buttonStroke, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                .fill(Theme.buttonFill)
                         )
                 }
                 .buttonStyle(.plain)
@@ -724,14 +867,28 @@ private struct ApprovalCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panelFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10).stroke(Theme.buttonStroke, lineWidth: 1)
-        )
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.panelFill))
     }
 }
 
 // MARK: - Composer
+
+/// A quoted fragment staged in the composer: the full marker-wrapped
+/// quote for the send, a short label for the chip.
+private struct StagedFragment: Identifiable {
+    let id = UUID()
+    let label: String
+    let text: String
+
+    /// The label out of the wire format's `[Fragment "…"]` first line.
+    static func label(from text: String) -> String {
+        guard let open = text.range(of: "[Fragment \""),
+              let close = text.range(of: "\"", range: open.upperBound..<text.endIndex)
+        else { return "fragment" }
+        let label = String(text[open.upperBound..<close.lowerBound])
+        return label.isEmpty ? "fragment" : label
+    }
+}
 
 /// The chat input bar: image attach, model picker, ghost-text autocomplete
 /// (on-device model — dimmed inline continuation, Tab accepts), send.
@@ -759,6 +916,17 @@ private struct ChatComposer: View {
     @State private var permission: ChatPermissionMode?
     @State private var suggestion = ""
     @State private var ghostTask: Task<Void, Never>?
+    @State private var dropTargeted = false
+    /// Images (or files) staged for the next send — shown as thumbnails,
+    /// sent as quoted paths appended to the message text.
+    @State private var attachments: [URL] = []
+    /// Capsules staged for the next send — shown as chips, sent as their
+    /// reference marker lines (which render back as chips).
+    @State private var stagedCapsules: [ChatCapsule] = []
+    /// Quoted fragments staged for the next send — shown as small chips
+    /// (the full quote never touches the draft editor; big pasted text
+    /// there made every keystroke re-run layout + ghost autocomplete).
+    @State private var stagedFragments: [StagedFragment] = []
     @FocusState private var inputFocused: Bool
 
     private var model: ChatModelChoice { picked ?? initialModel }
@@ -772,44 +940,84 @@ private struct ChatComposer: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Button(action: attachImage) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Theme.rowHovered))
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Attach an image (inserts its path)")
-                harnessMenu
-                modelMenu
-                permissionMenu
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 6) {
+            // Staged capsules/fragments/images float ABOVE the input,
+            // outside the composer's surface — the chips carry their own
+            // chrome, so they read as riding on top of the bar.
+            if !attachments.isEmpty || !stagedCapsules.isEmpty
+                || !stagedFragments.isEmpty {
+                attachmentRow
             }
-            HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 inputField
-                if let runningSession {
-                    SendStopButton(
-                        session: runningSession, sendDisabled: draftEmpty,
-                        onSendTap: send
-                    )
-                } else {
-                    SendGlyphButton(disabled: draftEmpty, action: send)
+                // Controls live UNDER the input: attach + pickers on the
+                // left, meter and send on the right.
+                HStack(alignment: .center, spacing: 6) {
+                    Button(action: attachImage) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Theme.rowHovered))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Attach an image (inserts its path)")
+                    harnessMenu
+                    modelMenu
+                    permissionMenu
+                    Spacer(minLength: 0)
+                    if let runningSession {
+                        ContextMeter(session: runningSession)
+                    }
+                    if let runningSession {
+                        SendStopButton(
+                            session: runningSession, sendDisabled: draftEmpty,
+                            onSendTap: send
+                        )
+                    } else {
+                        SendGlyphButton(disabled: draftEmpty, action: send)
+                    }
                 }
             }
+            // The input well's own 44pt box already airs out the top —
+            // a token 4 up there, and the frame stays even.
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
+            // Same surface as the sidebar so the bar sits on the chrome —
+            // one tint step off the window background, and that step
+            // defines it.
+            .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.sidebarFill))
+            // Drag-and-drop feedback only — no resting hairline.
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                    .stroke(Theme.link, lineWidth: 1.5)
+                    .opacity(dropTargeted ? 1 : 0)
+            )
         }
-        // Even 12px frame; the well's own vertical padding closes the
-        // bottom, so the bar reads balanced around both rows.
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 6)
-        // Same surface as the sidebar so the bar sits on the chrome, the
-        // stroke alone defining it.
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.sidebarFill))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.buttonStroke, lineWidth: 1))
+        .onDrop(
+            of: [.fileURL, .image, .plainText], isTargeted: $dropTargeted,
+            perform: handleDrop
+        )
+        // Capsule-view insert buttons route here; drags land via onDrop
+        // instead.
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonComposerInsert)
+        ) { note in
+            guard let text = note.object as? String else { return }
+            stageText(text)
+        }
+        // Clicking a capsule on the shelf stages it as a chip here.
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonComposerAttachCapsule)
+        ) { note in
+            guard let capsule = note.object as? ChatCapsule,
+                  !stagedCapsules.contains(where: { $0.id == capsule.id })
+            else { return }
+            stagedCapsules.append(capsule)
+            inputFocused = true
+        }
         // Same column as the transcript: 800 cap including 32px gutters.
         .padding(.horizontal, 32)
         .frame(maxWidth: 800)
@@ -938,8 +1146,8 @@ private struct ChatComposer: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 32, height: 32)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ctaFill))
-                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.ctaFill))
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
                 }
                 .buttonStyle(.plain)
                 .help("Stop this turn")
@@ -959,8 +1167,8 @@ private struct ChatComposer: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ctaFill))
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.ctaFill))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
             }
             .buttonStyle(.plain)
             .disabled(disabled)
@@ -978,8 +1186,8 @@ private struct ChatComposer: View {
         .foregroundStyle(tint ?? Theme.text)
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.rowHovered))
-        .contentShape(RoundedRectangle(cornerRadius: 7))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.rowHovered))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
     }
 
     /// The field with the ghost suggestion painted behind it: the typed
@@ -1001,6 +1209,13 @@ private struct ChatComposer: View {
                 .lineLimit(1...10)
                 .focused($inputFocused)
                 .onSubmit(send)
+                // Shift+Enter breaks the line; plain Enter still submits
+                // via onSubmit.
+                .onKeyPress(keys: [.return], phases: .down) { press in
+                    guard press.modifiers.contains(.shift) else { return .ignored }
+                    draft += "\n"
+                    return .handled
+                }
                 .onKeyPress(.tab) {
                     guard !suggestion.isEmpty else { return .ignored }
                     draft += suggestion
@@ -1015,8 +1230,14 @@ private struct ChatComposer: View {
         // the text's left edge lines up with the + circle above it.
         .padding(.vertical, 8)
         .frame(minHeight: 44, alignment: .leading)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         .onTapGesture { inputFocused = true }
+        // The whole well is a text target — cursor says so. set(), not
+        // push()/pop(), same as LinkButton: a view that vanishes
+        // mid-hover would leave a pushed cursor stranded.
+        .onHover { inside in
+            (inside ? NSCursor.iBeam : NSCursor.arrow).set()
+        }
     }
 
     /// A menu row that carries the native checkmark on the current pick.
@@ -1046,13 +1267,30 @@ private struct ChatComposer: View {
 
     private var draftEmpty: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && attachments.isEmpty && stagedCapsules.isEmpty
+            && stagedFragments.isEmpty
     }
 
     private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Attachments travel as file paths in the message text — both
+        // CLIs read images straight off disk, same as the terminal.
+        // Capsules lead as their marker lines, fragments as their marker
+        // blocks (so the transcript renders both back as chips).
+        let paths = attachments.map { url in
+            url.path.contains(" ") ? "\"\(url.path)\"" : url.path
+        }
+        let body = ((base.isEmpty ? [] : [base]) + paths).joined(separator: " ")
+        let parts = stagedCapsules.map(\.referenceText)
+            + stagedFragments.map(\.text)
+            + (body.isEmpty ? [] : [body])
+        let text = parts.joined(separator: "\n")
         guard !text.isEmpty else { return }
         draft = ""
         suggestion = ""
+        attachments = []
+        stagedCapsules = []
+        stagedFragments = []
         onSend(text, model.applying(effort: effort, permission: activePermission))
     }
 
@@ -1061,8 +1299,167 @@ private struct ChatComposer: View {
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let quoted = url.path.contains(" ") ? "\"\(url.path)\"" : url.path
-        draft = draft.isEmpty ? quoted + " " : draft + " " + quoted
+        stage(url)
+    }
+
+    private func stage(_ url: URL) {
+        guard !attachments.contains(url) else { return }
+        attachments.append(url)
+    }
+
+    /// Staged capsule/fragment chips and file thumbnails, each removable
+    /// before the send.
+    private var attachmentRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(stagedCapsules) { capsule in
+                    CapsuleChip(
+                        title: capsule.shortTitle, file: capsule.sourceFile,
+                        onRemove: {
+                            stagedCapsules.removeAll { $0.id == capsule.id }
+                        }
+                    )
+                }
+                ForEach(stagedFragments) { fragment in
+                    FragmentChip(
+                        title: fragment.label,
+                        onRemove: {
+                            stagedFragments.removeAll { $0.id == fragment.id }
+                        }
+                    )
+                }
+                ForEach(attachments, id: \.self) { url in
+                    ZStack(alignment: .topTrailing) {
+                        AttachmentThumb(url: url)
+                        Button {
+                            attachments.removeAll { $0 == url }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white, .black.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(2)
+                        .help("Remove")
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    /// Reference text (a dragged capsule or fragment, an insert button)
+    /// stages as a chip — never into the draft editor, where a 6KB quote
+    /// slowed every keystroke (layout + ghost autocomplete over all of
+    /// it). Plain dropped text still joins the draft.
+    private func stageText(_ text: String) {
+        if text.hasPrefix("[Capsule \""),
+           let capsule = CapsuleStore.shared.capsules
+               .first(where: { $0.referenceText == text }) {
+            if !stagedCapsules.contains(where: { $0.id == capsule.id }) {
+                stagedCapsules.append(capsule)
+            }
+            inputFocused = true
+        } else if text.hasPrefix("[Fragment \"") {
+            stagedFragments.append(StagedFragment(
+                label: StagedFragment.label(from: text), text: text
+            ))
+            inputFocused = true
+        } else {
+            appendToDraft(text)
+        }
+    }
+
+    private func appendToDraft(_ text: String) {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = trimmed.isEmpty ? text : trimmed + "\n\n" + text
+        suggestion = ""
+        inputFocused = true
+    }
+
+    /// Dropped files stage as attachments; raw image data (a drag from a
+    /// browser or a screenshot thumbnail) is saved to a temp PNG first;
+    /// dropped text stages capsules/fragments as chips, else appends to
+    /// the draft.
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                handled = true
+                provider.loadItem(
+                    forTypeIdentifier: UTType.fileURL.identifier, options: nil
+                ) { item, _ in
+                    let url: URL? = switch item {
+                    case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
+                    case let url as URL: url
+                    default: nil
+                    }
+                    guard let url else { return }
+                    DispatchQueue.main.async { stage(url) }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                handled = true
+                provider.loadDataRepresentation(
+                    forTypeIdentifier: UTType.image.identifier
+                ) { data, _ in
+                    guard let data, let saved = Self.saveDroppedImage(data) else { return }
+                    DispatchQueue.main.async { stage(URL(fileURLWithPath: saved)) }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(
+                UTType.plainText.identifier
+            ) {
+                handled = true
+                _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                    guard let text = object as? String, !text.isEmpty else { return }
+                    DispatchQueue.main.async { stageText(text) }
+                }
+            }
+        }
+        return handled
+    }
+
+    /// One staged attachment: the image itself when it decodes, else the
+    /// file's Finder icon (non-image drops stage too).
+    private struct AttachmentThumb: View {
+        let url: URL
+
+        var body: some View {
+            Group {
+                if let image = NSImage(contentsOf: url) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(8)
+                }
+            }
+            .frame(width: 48, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                    .stroke(Theme.buttonStroke, lineWidth: 1)
+            )
+            .help((url.path as NSString).abbreviatingWithTildeInPath)
+        }
+    }
+
+    private nonisolated static func saveDroppedImage(_ data: Data) -> String? {
+        guard let rep = NSBitmapImageRep(data: data),
+              let png = rep.representation(using: .png, properties: [:])
+        else { return nil }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HoustonDrops", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let file = dir.appendingPathComponent(
+            "drop-\(UUID().uuidString.prefix(8)).png"
+        )
+        guard (try? png.write(to: file)) != nil else { return nil }
+        return file.path
     }
 }
 
@@ -1148,15 +1545,15 @@ private struct MessageView: View {
                     blocksView
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(RoundedRectangle(cornerRadius: 12).fill(style.bubble))
+                .padding(.vertical, 13)
+                .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(style.bubble))
                 .frame(maxWidth: 500, alignment: .trailing)
             }
         } else {
             // The agent's turn: plain rich text on the page.
             VStack(alignment: .leading, spacing: 8) {
                 Text(harness.rawValue.uppercased())
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(Theme.Fonts.label)
                     .kerning(0.5)
                     .foregroundStyle(Theme.heading)
                 blocksView
@@ -1172,7 +1569,7 @@ private struct MessageView: View {
             case let .text(text):
                 MarkdownBlockView(
                     text: text,
-                    color: message.role == .user ? style.text : Theme.text,
+                    color: message.role == .user ? style.text : Theme.chatProse,
                     accent: message.role == .user
                 )
             case let .code(code, lang):
@@ -1183,15 +1580,113 @@ private struct MessageView: View {
                         Image(systemName: "wrench.and.screwdriver")
                             .font(.system(size: 10, weight: .medium))
                         Text(detail.isEmpty ? name : "\(name) · \(detail)")
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(Theme.Fonts.mono)
                             .lineLimit(1)
                     }
                     .foregroundStyle(Theme.textSecondary)
                 }
+            case let .capsule(title, file):
+                CapsuleChip(
+                    title: title, file: file,
+                    accent: message.role == .user
+                )
+            case let .fragment(title, _):
+                FragmentChip(title: title, accent: message.role == .user)
             }
         }
     }
 
+}
+
+/// A capsule attachment in a chat: icon + short title. Click (or the
+/// context menu) opens the capsule view in the right sheet, which shows
+/// the sealed chat's full transcript.
+struct CapsuleChip: View {
+    let title: String
+    let file: String
+    /// On the user bubble — chip chrome adapts to the bubble color.
+    var accent = false
+    /// Staged in the composer: shows the remove ✕.
+    var onRemove: (() -> Void)? = nil
+
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "capsule")
+                .font(.system(size: 10, weight: .medium))
+            Text(title)
+                .font(Theme.Fonts.bodyMedium)
+                .lineLimit(1)
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .semibold))
+                        .opacity(0.7)
+                }
+                .buttonStyle(.plain)
+                .help("Remove")
+            }
+        }
+        .foregroundStyle(accent ? .white : Theme.text)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                .fill(accent
+                    ? Color.white.opacity(hovered ? 0.3 : 0.22)
+                    : (hovered ? Theme.rowHovered : Theme.panelFill))
+        )
+        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .onHover { hovered = $0 }
+        .onTapGesture { openCapsuleView() }
+        .contextMenu {
+            Button("Open Capsule View") { openCapsuleView() }
+        }
+        .help("Open the capsule view — the sealed chat's full transcript")
+    }
+
+    private func openCapsuleView() {
+        NotificationCenter.default.post(name: .houstonOpenCapsule, object: file)
+    }
+}
+
+/// A quoted fragment in a chat or the composer: quote icon + a short
+/// label. Just a marker — the quote itself is for the model, not the
+/// reader (rendering 6KB of it froze the transcript).
+struct FragmentChip: View {
+    let title: String
+    /// On the user bubble — chip chrome adapts to the bubble color.
+    var accent = false
+    /// Staged in the composer: shows the remove ✕.
+    var onRemove: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "text.quote")
+                .font(.system(size: 10, weight: .medium))
+            Text(title)
+                .font(Theme.Fonts.bodyMedium)
+                .lineLimit(1)
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .semibold))
+                        .opacity(0.7)
+                }
+                .buttonStyle(.plain)
+                .help("Remove")
+            }
+        }
+        .foregroundStyle(accent ? .white : Theme.text)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                .fill(accent ? Color.white.opacity(0.22) : Theme.panelFill)
+        )
+        .help("A quoted piece of an earlier chat, attached as context")
+    }
 }
 
 /// The stylized snippet every piece of code rides in: a header strip with
@@ -1224,10 +1719,7 @@ private struct CodeCard: View {
                     .padding(12)
             }
         }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.attachedWellFill))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10).stroke(Theme.buttonStroke, lineWidth: 1)
-        )
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.attachedWellFill))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -1285,20 +1777,28 @@ private struct MarkdownBlockView: View {
 
     /// The blank-line feel after each paragraph-grade part; list items
     /// get their own smaller air so a list breathes without falling apart.
+    /// The user bubble skips it entirely — a return in the input reads as
+    /// a line break, not a paragraph; only agent prose gets paragraph air.
     private func gap(after part: Part) -> CGFloat {
+        if accent { return 2 }
         switch part {
-        case .bullet, .numbered: 8
-        case .heading: 6
-        default: 16
+        case .bullet, .numbered: return 8
+        case .heading: return 6
+        default: return 16
         }
     }
+
+    /// Extra points between lines. The user bubble (`accent`) sits at a
+    /// tight ~1.2 line height — 16pt SF's natural leading is already
+    /// ~1.2×, so barely any extra; assistant prose keeps its airier 1.4×.
+    private var proseGap: CGFloat { accent ? 1 : 8 }
 
     @ViewBuilder
     private func partView(_ part: Part) -> some View {
         switch part {
         case let .paragraph(body):
             styled(body, size: 16)
-                .lineSpacing(8)
+                .lineSpacing(proseGap)
         case let .heading(level, body):
             styled(body, size: level <= 1 ? 20 : (level == 2 ? 18 : 16), weight: .semibold)
                 .padding(.top, 4)
@@ -1308,7 +1808,7 @@ private struct MarkdownBlockView: View {
                     .font(.system(size: 16))
                     .foregroundStyle(color.opacity(0.65))
                 styled(body, size: 16)
-                    .lineSpacing(8)
+                    .lineSpacing(proseGap)
             }
             .padding(.leading, 12 + CGFloat(indent) * 18)
         case let .numbered(indent, marker, body):
@@ -1318,7 +1818,7 @@ private struct MarkdownBlockView: View {
                     .monospacedDigit()
                     .foregroundStyle(color.opacity(0.65))
                 styled(body, size: 16)
-                    .lineSpacing(8)
+                    .lineSpacing(proseGap)
             }
             .padding(.leading, 12 + CGFloat(indent) * 18)
         case let .quote(body):
@@ -1327,7 +1827,7 @@ private struct MarkdownBlockView: View {
                     .fill(color.opacity(0.3))
                     .frame(width: 3)
                 styled(body, size: 15)
-                    .lineSpacing(6)
+                    .lineSpacing(accent ? 1 : 6)
                     .opacity(0.85)
             }
         case let .linkCard(url):
@@ -1454,13 +1954,13 @@ private struct LinkCard: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.link)
                     .frame(width: 28, height: 28)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Theme.rowHovered))
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.rowHovered))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(url.host() ?? url.absoluteString)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(Theme.Fonts.title)
                         .foregroundStyle(Theme.text)
                     Text(url.absoluteString)
-                        .font(.system(size: 11))
+                        .font(Theme.Fonts.secondary)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -1473,14 +1973,10 @@ private struct LinkCard: View {
             .padding(8)
             .frame(maxWidth: 420, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
                     .fill(hovered ? Theme.rowHovered : Theme.panelFill)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Theme.buttonStroke, lineWidth: 1)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }

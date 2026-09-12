@@ -126,7 +126,7 @@ struct GitPanel: View {
                 }
             } else {
                 Text("Reading git status…")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .padding(16)
             }
@@ -163,7 +163,7 @@ struct GitPanel: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Theme.heading)
                         Text("Branch")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(Theme.Fonts.title)
                             .foregroundStyle(Theme.text)
                         Image(systemName: "chevron.down")
                             .font(.system(size: 8, weight: .semibold))
@@ -187,13 +187,13 @@ struct GitPanel: View {
                 }
             }
             Text(info.branchLabel)
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if !info.headerSubtext.isEmpty {
                 Text(info.headerSubtext)
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary.opacity(0.7))
             }
         }
@@ -249,15 +249,15 @@ struct GitPanel: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.heading)
                 Text("Not under version control")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Theme.Fonts.title)
                     .foregroundStyle(Theme.text)
             }
             Text("Git keeps a history of every change in this project, so you can always see what happened and roll anything back.")
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Initialize Repository") { onInitialize() }
-                .font(.system(size: 11))
+                .font(Theme.Fonts.secondary)
                 .padding(.top, 2)
         }
         .padding(16)
@@ -279,7 +279,7 @@ private struct CommitDetailPage: View {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 10, weight: .semibold))
                         Text("Back")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(Theme.Fonts.secondaryMedium)
                     }
                     .foregroundStyle(Theme.heading)
                     .contentShape(Rectangle())
@@ -291,7 +291,7 @@ private struct CommitDetailPage: View {
                     .foregroundStyle(Theme.textSecondary)
                 if commit.isUnpushed {
                     Text("not pushed")
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.textWarning)
                 }
             }
@@ -303,17 +303,17 @@ private struct CommitDetailPage: View {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(detail?.subject ?? commit.subject)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(Theme.Fonts.title)
                             .foregroundStyle(Theme.text)
                             .fixedSize(horizontal: false, vertical: true)
                         if let body = detail?.body, !body.isEmpty {
                             Text(body)
-                                .font(.system(size: 11))
+                                .font(Theme.Fonts.secondary)
                                 .foregroundStyle(Theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Text(byline)
-                            .font(.system(size: 10))
+                            .font(Theme.Fonts.meta)
                             .foregroundStyle(Theme.textSecondary)
                     }
                     .padding(.horizontal, 6)
@@ -331,7 +331,7 @@ private struct CommitDetailPage: View {
                         }
                     } else {
                         Text("Loading…")
-                            .font(.system(size: 11))
+                            .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
                             .padding(.horizontal, 6)
                     }
@@ -433,7 +433,7 @@ private struct GitCommandsPage: View {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 10, weight: .semibold))
                         Text("Back")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(Theme.Fonts.secondaryMedium)
                     }
                     .foregroundStyle(Theme.heading)
                     .contentShape(Rectangle())
@@ -447,10 +447,10 @@ private struct GitCommandsPage: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Git Commands")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Theme.Fonts.title)
                     .foregroundStyle(Theme.text)
                 Text("Click one to run it in this project's terminal.")
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary)
             }
             .padding(.horizontal, 16)
@@ -486,7 +486,7 @@ private struct CommandRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(spec.title)
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Text(spec.command.replacingOccurrences(of: "%@", with: "…"))
@@ -505,7 +505,7 @@ private struct CommandRow: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(hovered ? Theme.rowHovered : .clear)
             )
             .contentShape(Rectangle())
@@ -538,7 +538,7 @@ private struct GitSectionLabel: View {
                 .foregroundStyle(Theme.heading)
             if !subtext.isEmpty {
                 Text(subtext)
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary.opacity(0.7))
             }
         }
@@ -570,18 +570,18 @@ private struct ChangeRow: View {
                     .frame(width: 6, height: 6)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(change.fileName)
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Text(subtext)
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
                 Text(kindWord(change.kind))
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 8, weight: .semibold))
@@ -590,7 +590,7 @@ private struct ChangeRow: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(hovered ? Theme.rowHovered : .clear)
             )
             .contentShape(Rectangle())
@@ -622,7 +622,7 @@ private struct FileDiffPage: View {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 10, weight: .semibold))
                         Text("Back")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(Theme.Fonts.secondaryMedium)
                     }
                     .foregroundStyle(Theme.heading)
                     .contentShape(Rectangle())
@@ -630,7 +630,7 @@ private struct FileDiffPage: View {
                 .buttonStyle(.plain)
                 Spacer(minLength: 0)
                 Text(kindWord(change.kind))
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary)
                 // A deleted file has nothing to open.
                 if change.kind != .deleted {
@@ -643,12 +643,12 @@ private struct FileDiffPage: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(change.fileName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Theme.Fonts.title)
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 if !change.directory.isEmpty {
                     Text(change.directory)
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -662,7 +662,7 @@ private struct FileDiffPage: View {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(diff) { line in
                             Text(line.text.isEmpty ? " " : line.text)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(Theme.Fonts.monoSmall)
                                 .foregroundStyle(color(for: line.kind))
                                 .fixedSize(horizontal: true, vertical: false)
                         }
@@ -672,7 +672,7 @@ private struct FileDiffPage: View {
                 }
             } else {
                 Text("Loading diff…")
-                    .font(.system(size: 11))
+                    .font(Theme.Fonts.secondary)
                     .foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 16)
             }
@@ -700,12 +700,12 @@ private struct CommitFileRow: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textSecondary)
             Text(file.fileName)
-                .font(.system(size: 12))
+                .font(Theme.Fonts.body)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
             if !file.directory.isEmpty {
                 Text(file.directory)
-                    .font(.system(size: 10))
+                    .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.head)
@@ -720,7 +720,7 @@ private struct CommitFileRow: View {
                     .foregroundStyle(Theme.textDanger)
             }
             Text(kindWord(file.kind))
-                .font(.system(size: 10))
+                .font(Theme.Fonts.meta)
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 52, alignment: .trailing)
         }
@@ -743,11 +743,11 @@ private struct CommitRow: View {
                     .help(commit.isUnpushed ? "Not pushed yet" : "On the remote")
                 VStack(alignment: .leading, spacing: 1) {
                     Text(commit.subject)
-                        .font(.system(size: 12))
+                        .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                     Text(commit.timeAgo)
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.meta)
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 4)
@@ -758,7 +758,7 @@ private struct CommitRow: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(hovered ? Theme.rowHovered : .clear)
             )
             .contentShape(Rectangle())
