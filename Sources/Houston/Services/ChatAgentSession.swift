@@ -162,6 +162,13 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         let codexIDRaw: String?
     }
 
+    /// A send parked while a turn was running.
+    struct QueuedSend: Identifiable {
+        let id = UUID()
+        let text: String
+        let model: ChatModelChoice
+    }
+
     let harness: ChatHarness
     let projectPath: String
 
@@ -177,6 +184,9 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// re-read absorbed them — rendered ahead of the pending message so
     /// back-to-back sends never make the earlier one vanish.
     @Published private(set) var carriedTurns: [ChatMessage] = []
+    /// Messages the user sent while a turn was running — held (like the
+    /// terminal's line editor) and sent one at a time as each turn ends.
+    @Published private(set) var queued: [QueuedSend] = []
     @Published private(set) var approval: ApprovalRequest?
     @Published private(set) var lastError: String?
     /// Bumps when a turn finishes — the transcript view reloads on it.
@@ -214,12 +224,35 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     var hasLiveContent: Bool {
         pendingUserText != nil || !liveBlocks.isEmpty || !streamText.isEmpty
             || approval != nil || lastError != nil || !carriedTurns.isEmpty
+            || !queued.isEmpty
     }
 
     // MARK: Public controls
 
+    /// Every send goes through the queue — one turn runs at a time, like
+    /// the terminal's line editor. Idle with an empty queue means the
+    /// message starts immediately; otherwise it's HELD and drains FIFO
+    /// (so a fresh composer send can never jump ahead of messages already
+    /// shown as queued). The session drains itself on each successful
+    /// turn end — no view needs to be mounted.
     func send(text: String, model: ChatModelChoice) {
         lastModel = model
+        queued.append(QueuedSend(text: text, model: model))
+        drainQueue()
+    }
+
+    /// Drop a held message before it runs (the ✕ on a queued bubble).
+    func cancelQueued(_ id: UUID) {
+        queued.removeAll { $0.id == id }
+    }
+
+    private func drainQueue() {
+        guard !running, !queued.isEmpty else { return }
+        let next = queued.removeFirst()
+        begin(text: next.text, model: next.model)
+    }
+
+    private func begin(text: String, model: ChatModelChoice) {
         lastError = nil
         interrupting = false
         // A send while the previous exchange exists only in the live
@@ -792,12 +825,21 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     }
 
     private func endTurn(error: String?) {
+        let wasInterrupting = interrupting
         running = false
         interrupting = false
         approval = nil
         currentTurnID = nil
         if let error { lastError = error }
         completedTurns += 1
+        // Only a cleanly finished turn auto-fires the next held message.
+        // Stop means "halt, await me" (the queue holds, visibly, until
+        // the user's next send resumes it), and an errored turn must not
+        // launch messages into the failed state — or wipe the error the
+        // user hasn't seen yet.
+        if error == nil, !wasInterrupting {
+            drainQueue()
+        }
     }
 
     private func fail(_ message: String) {

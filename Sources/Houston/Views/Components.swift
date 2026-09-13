@@ -146,6 +146,58 @@ private struct MenuListRow<Content: View>: View {
     }
 }
 
+/// A small circular icon button on the chip chrome: quiet at rest, the
+/// shared hover wash under the pointer. THE hover-circle control — reach
+/// for this instead of hand-rolling the ✕/+/chip pattern per view.
+struct CircleIconButton: View {
+    let systemName: String
+    var size: CGFloat = 20
+    var iconSize: CGFloat = 10
+    let help: String
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: iconSize, weight: .semibold))
+                .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
+                .frame(width: size, height: size)
+                .background(Circle().fill(
+                    hovered ? Theme.controlHovered : Theme.controlChip
+                ))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+    }
+}
+
+/// A traditional dialog button: filled rose CTA when primary, quiet
+/// chrome fill otherwise. Shared so every dialog's footer reads the same.
+struct DialogButton: View {
+    let title: String
+    var primary = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(primary ? .white : Theme.text)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(
+                    primary ? Theme.ctaFill : Theme.buttonFill
+                ))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// Copy-to-clipboard icon button that confirms: the doc glyph flips to a
 /// green check for a beat after copying. Hover chrome matches
 /// `ControlIconButton`'s quiet square.

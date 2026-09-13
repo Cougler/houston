@@ -39,7 +39,7 @@ enum RightPanel: Equatable {
     case server(String)
     /// A project's capsule shelf — its sealed chats. `focus` (a capsule
     /// id) lands straight in that capsule's transcript view.
-    case capsules(project: String, focus: String?)
+    case capsules(project: String)
 }
 
 /// Which terminal row the rename card is editing.
@@ -110,6 +110,14 @@ struct MainWindowView: View {
     /// 5 (mirroring the chats' disclosure). Resets when the project
     /// header folds.
     @State private var capsuleRowsShown: [String: Int] = [:]
+    /// The centered capsule dialog (transcript + fragment selection).
+    /// Clicking a capsule anywhere opens this; the right sheet only ever
+    /// shows the shelf.
+    @State private var capsuleDialog: ChatCapsule?
+    /// Whether the dialog fronts the "Introducing Capsules" explainer —
+    /// the persisted flag is read ONCE per open here, never in the
+    /// dialog's init (which re-runs on every body evaluation).
+    @State private var capsuleDialogIntro = false
     /// Projects whose archived chats are expanded in the sidebar — the
     /// only surface archived chats appear on (the transcript view has no
     /// list anymore).
@@ -1200,10 +1208,9 @@ struct MainWindowView: View {
             } else {
                 rightSheetPlaceholder("This server is no longer listening.")
             }
-        case let .capsules(path, focus):
+        case let .capsules(path):
             CapsulePanel(
                 projectPath: path,
-                focus: focus,
                 onAttach: { capsule in
                     attachCapsuleToNewChat(project: path, capsule: capsule)
                 },
@@ -1212,9 +1219,7 @@ struct MainWindowView: View {
                     chatIndex.refresh(path, force: true)
                     if !rightPanelDocked { closeRightPanel() }
                 },
-                onInsert: { text in
-                    insertIntoComposer(project: path, text: text)
-                }
+                onView: { openCapsuleDialog($0) }
             )
         case .feed:
             FeedSheet(feed: feed) { event in
@@ -1228,17 +1233,82 @@ struct MainWindowView: View {
         }
     }
 
+    private func openCapsuleDialog(_ capsule: ChatCapsule) {
+        capsuleDialogIntro = !HoustonSettings.read().capsuleHintDismissed
+        withAnimation(Theme.quick) { capsuleDialog = capsule }
+    }
+
+    private func openCapsuleDialog(id: String) {
+        if let capsule = capsuleStore.capsules.first(where: { $0.id == id }) {
+            openCapsuleDialog(capsule)
+        }
+    }
+
+    private func closeCapsuleDialog() {
+        withAnimation(Theme.quick) { capsuleDialog = nil }
+    }
+
+    /// The centered capsule dialog: traditional modal — dimmed scrim,
+    /// click-away or ✕ closes, actions in the dialog's footer.
+    @ViewBuilder
+    private var capsuleDialogLayer: some View {
+        if let capsule = capsuleDialog {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black.opacity(0.25)
+                        .contentShape(Rectangle())
+                        .onTapGesture { closeCapsuleDialog() }
+                    CapsuleDialog(
+                        capsule: capsule,
+                        showIntroInitially: capsuleDialogIntro,
+                        onClose: closeCapsuleDialog,
+                        onAttach: {
+                            closeCapsuleDialog()
+                            attachCapsuleToNewChat(
+                                project: capsule.project, capsule: capsule
+                            )
+                        },
+                        onInsert: { references in
+                            closeCapsuleDialog()
+                            insertIntoComposer(
+                                project: capsule.project, texts: references
+                            )
+                        }
+                    )
+                    // 80vw × 90vh as a CEILING — the transcript fills it;
+                    // the intro dialog stays its own fitting size.
+                    .frame(
+                        maxWidth: geo.size.width * 0.8,
+                        maxHeight: geo.size.height * 0.9
+                    )
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+            .transition(.opacity)
+        }
+    }
+
     /// A capsule-view section insert: make sure a chat surface for the
     /// project is up (a new chat if none is), then hand the composer the
     /// text — after a beat, so a freshly mounted composer is listening.
     private func insertIntoComposer(project: String, text: String) {
+        insertIntoComposer(project: project, texts: [text])
+    }
+
+    /// Multi-fragment adds ride ONE delayed hop — N separate asyncAfter
+    /// blocks landing together made the composer rebuild N times in a
+    /// single runloop burst.
+    private func insertIntoComposer(project: String, texts: [String]) {
+        guard !texts.isEmpty else { return }
         if chatTarget?.path != project {
             chatTarget = ChatTarget(path: project, sessionFile: nil)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            NotificationCenter.default.post(
-                name: .houstonComposerInsert, object: text
-            )
+            for text in texts {
+                NotificationCenter.default.post(
+                    name: .houstonComposerInsert, object: text
+                )
+            }
         }
     }
 
@@ -1679,9 +1749,14 @@ struct MainWindowView: View {
         return custom.isEmpty ? name(of: path) : custom
     }
 
-    /// The topmost overlay tier: the first-launch onboarding takeover.
+    /// The topmost overlay tier: the capsule dialog (a true modal — it
+    /// must dim the right sheet too, so it can't ride the flyout slots),
+    /// with the first-launch onboarding takeover above everything.
     private var modalLayer: some View {
-        onboardingLayer
+        ZStack {
+            capsuleDialogLayer
+            onboardingLayer
+        }
     }
 
     @ViewBuilder
@@ -1798,7 +1873,7 @@ struct MainWindowView: View {
                 capsuleRowsShown[path] = (capsuleRowsShown[path] ?? 5) + 5
             } else if key.hasPrefix("capsules:") {
                 let path = String(key.dropFirst("capsules:".count))
-                toggleRightPanel(.capsules(project: path, focus: nil))
+                toggleRightPanel(.capsules(project: path))
             }
         }
     }
@@ -1902,8 +1977,8 @@ struct MainWindowView: View {
                             .strokeBorder(Theme.borderSidebar, lineWidth: 1)
                     )
                     // Top-aligned with the Servers item: the traffic-light
-                    // inset plus the three 26pt rows (2pt spacing) above it.
-                    .offset(x: sidebarWidth + 6, y: trafficLightInset + 3 * 28)
+                    // inset plus the three 30pt rows (2pt spacing) above it.
+                    .offset(x: sidebarWidth + 6, y: trafficLightInset + 3 * 32)
                     .transition(.opacity.combined(with: .offset(x: -8)))
             }
         }
@@ -3051,11 +3126,11 @@ struct MainWindowView: View {
                 }
             }
 
-        case let .capsuleChat(project, capsuleID, title):
+        case let .capsuleChat(_, capsuleID, title):
             // A sealed chat: the chat bubble wrapped in a capsule outline.
-            // Click shows its transcript in the right sheet; dragging the
-            // row into a composer attaches the whole capsule as a chip.
-            let viewing = rightPanel == .capsules(project: project, focus: capsuleID)
+            // Click opens the centered capsule dialog; dragging the row
+            // into a composer attaches the whole capsule as a chip.
+            let viewing = capsuleDialog?.id == capsuleID
             HStack(spacing: 6) {
                 Image(systemName: "bubble.left")
                     .font(.system(size: 6.5))
@@ -3073,9 +3148,7 @@ struct MainWindowView: View {
             .padding(.leading, 24)
             .modifier(RowChrome(hovered: hovered, selected: viewing))
             .contentShape(Rectangle())
-            .onTapGesture {
-                toggleRightPanel(.capsules(project: project, focus: capsuleID))
-            }
+            .onTapGesture { openCapsuleDialog(id: capsuleID) }
             .onDrag {
                 let reference = capsuleStore.capsules
                     .first { $0.id == capsuleID }?.referenceText ?? ""
@@ -3110,8 +3183,10 @@ struct MainWindowView: View {
                 }
                 .frame(width: 18, height: 18)
                 Text(folderName)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
+                    // Regular weight at 0.85 — headers should sit in the
+                    // chrome, not shout over the rows (2026-09-12).
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.text.opacity(0.85))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if hovered {
@@ -3234,8 +3309,8 @@ struct MainWindowView: View {
             let branch = chatMeta.branches[file] != nil
             return "ch:\(title)|\(open ? "o" : "-")|\(pinned ? "p" : "-")"
                 + "|\(branch ? "b" : "-")|\(hovered ? "h" : "-")"
-        case let .capsuleChat(project, capsuleID, title):
-            let viewing = rightPanel == .capsules(project: project, focus: capsuleID)
+        case let .capsuleChat(_, capsuleID, title):
+            let viewing = capsuleDialog?.id == capsuleID
             return "cc:\(title)|\(viewing ? "v" : "-")|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
             let collapsed = collapsedProjects.contains(path)
@@ -3372,7 +3447,7 @@ struct MainWindowView: View {
            let capsule = capsuleStore.capsules.first(where: { $0.id == capsuleID }) {
             let menu = NSMenu()
             menu.addItem(ClosureMenuItem("Open Capsule View") {
-                toggleRightPanel(.capsules(project: project, focus: capsuleID))
+                openCapsuleDialog(id: capsuleID)
             })
             menu.addItem(ClosureMenuItem("New Chat with Capsule") {
                 attachCapsuleToNewChat(project: project, capsule: capsule)
@@ -3595,12 +3670,15 @@ struct MainWindowView: View {
             ) { note in
                 guard let file = note.object as? String else { return }
                 if let capsule = capsuleStore.capsule(forFile: file) {
-                    toggleRightPanel(
-                        .capsules(project: capsule.project, focus: capsule.id)
-                    )
+                    openCapsuleDialog(capsule)
                 } else if let project = chatTarget?.path {
-                    // The capsule was dissolved — land on the shelf.
-                    toggleRightPanel(.capsules(project: project, focus: nil))
+                    // The capsule was dissolved — land on the shelf. Open,
+                    // never toggle: with the shelf already showing, a
+                    // toggle would CLOSE it and the click would read as
+                    // doing nothing.
+                    if rightPanel != .capsules(project: project) {
+                        toggleRightPanel(.capsules(project: project))
+                    }
                 }
             }
             // The auto-seal sweep lives in CapsuleStore; the view's only
@@ -3856,11 +3934,11 @@ private struct FooterLabeledButton: View {
                         ? (hovered || active ? Theme.text : Theme.heading)
                         : Theme.text))
                 if let label {
-                    // Top-level items read in the primary color a step
-                    // above the 13pt rows (2026-09-12).
+                    // Top-level items: 14pt regular at 0.85 — a size step
+                    // above the rows without weight or full-white glare.
                     Text(label)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Theme.text)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.text.opacity(0.85))
                     if count > 0 {
                         Text(String(count))
                             .font(.system(size: 12, weight: .medium))
@@ -3872,7 +3950,13 @@ private struct FooterLabeledButton: View {
                 }
             }
             .padding(.horizontal, label == nil ? 0 : 6)
-            .frame(width: label == nil ? 22 : nil, height: label == nil ? 22 : 26)
+            // Labeled items: 2px more air top and bottom, and the row
+            // stretches the sidebar's width so the hover pill does too.
+            .frame(width: label == nil ? 22 : nil, height: label == nil ? 22 : 30)
+            .frame(
+                maxWidth: label == nil ? nil : .infinity,
+                alignment: .leading
+            )
             // Badge INSIDE the button's frame, not overhanging the glyph —
             // an ancestor clips at the frame edge and was slicing the pill.
             .overlay(alignment: .topTrailing) {
@@ -5383,12 +5467,13 @@ private struct GearLabel: View {
                 // Matches FooterLabeledButton's labeled style — the top
                 // cluster reads as one set.
                 Text("Settings")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.text.opacity(0.85))
             }
         }
         .padding(.horizontal, labeled ? 6 : 0)
-        .frame(width: labeled ? nil : 22, height: labeled ? 26 : 22)
+        .frame(width: labeled ? nil : 22, height: labeled ? 30 : 22)
+        .frame(maxWidth: labeled ? .infinity : nil, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .fill(hovered ? Theme.rowHovered : .clear)

@@ -1,57 +1,26 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The capsule shelf and capsule view, in the right sheet like Git and
-/// Skills. The shelf lists a project's sealed chats; clicking one opens
-/// the capsule view — the sealed chat's FULL transcript — where the user
-/// either attaches the whole capsule or drags a fragment of it into the
-/// composer. Both land as small chips, never raw text.
+/// The capsule shelf, in the right sheet like Git and Skills. It lists a
+/// project's sealed chats; clicking one opens the capsule DIALOG — a
+/// centered modal owned by MainWindowView — where the user attaches the
+/// whole capsule or selects fragments. Both land as small chips, never
+/// raw text.
 struct CapsulePanel: View {
     let projectPath: String
-    /// Capsule id to open straight into the transcript view (a chip
-    /// click); nil lands on the shelf.
-    var focus: String? = nil
     /// Click a capsule row: a new chat with this capsule attached.
     let onAttach: (ChatCapsule) -> Void
     /// Reopen a sealed chat: the capsule dissolves, the transcript opens.
     let onOpenChat: (String) -> Void
-    /// Push reference text into the chat composer (the insert buttons).
-    let onInsert: (String) -> Void
+    /// Open the centered capsule dialog on this capsule.
+    let onView: (ChatCapsule) -> Void
 
     @ObservedObject private var store = CapsuleStore.shared
-    @State private var viewing: ChatCapsule?
 
     var body: some View {
-        Group {
-            if let viewing {
-                CapsuleTranscriptView(
-                    capsule: viewing,
-                    onBack: {
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            self.viewing = nil
-                        }
-                    },
-                    onAttach: { onAttach(viewing) },
-                    onInsert: onInsert
-                )
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-            } else {
-                shelf
-                    .transition(.opacity)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .clipped()
-        // A chip click retargets an already-open panel to its capsule; a
-        // focus-less open (the sidebar row) lands back on the shelf.
-        .task(id: focus) {
-            if let focus {
-                viewing = store.capsules.first { $0.id == focus }
-            } else {
-                viewing = nil
-            }
-        }
+        shelf
+            .frame(maxWidth: .infinity)
+            .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var shelf: some View {
@@ -66,11 +35,7 @@ struct CapsulePanel: View {
                             CapsuleShelfRow(
                                 capsule: capsule,
                                 onAttach: { onAttach(capsule) },
-                                onView: {
-                                    withAnimation(.easeOut(duration: 0.18)) {
-                                        viewing = capsule
-                                    }
-                                },
+                                onView: { onView(capsule) },
                                 onReopen: {
                                     store.unseal(capsule)
                                     onOpenChat(capsule.sourceFile)
@@ -107,8 +72,8 @@ struct CapsulePanel: View {
                 .font(Theme.Fonts.bodyMedium)
                 .foregroundStyle(Theme.text)
             Text("Chats seal into capsules once they go quiet. Click one "
-                + "to open it, then attach the whole chat or drag a piece "
-                + "of the old conversation in.")
+                + "to open it, then add the entire capsule to a chat or "
+                + "select the pieces you want as fragments.")
                 .font(Theme.Fonts.secondary)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -199,159 +164,56 @@ private struct CapsuleShelfRow: View {
     }
 }
 
-/// The capsule view: the sealed chat's full transcript, compact for the
-/// sheet's width. Every message drags into the composer as quoted
-/// context (the hover + inserts the same without the drag).
-private struct CapsuleTranscriptView: View {
+/// The capsule dialog: a centered modal (MainWindowView owns the scrim
+/// and presentation) showing the sealed chat's full transcript. Bubbles
+/// select like a checklist; the bottom bar adds the selection as
+/// fragments or attaches the entire capsule. First open shows the
+/// "Introducing Capsules" explainer in its place.
+struct CapsuleDialog: View {
     let capsule: ChatCapsule
-    let onBack: () -> Void
+    let onClose: () -> Void
     let onAttach: () -> Void
-    let onInsert: (String) -> Void
+    /// Selected fragments' reference texts, in transcript order.
+    let onInsert: ([String]) -> Void
 
     @State private var messages: [ChatMessage]?
-    @State private var backHovered = false
-    /// The first-use explainer: shows on every capsule open until its
-    /// "don't show this again" box is checked (persisted in settings).
-    @State private var hintDismissed = HoustonSettings.read().capsuleHintDismissed
+    @State private var selected: Set<String> = []
+    /// The first-use explainer: fronts the dialog on every capsule open
+    /// until its "don't show this again" box is checked. The OPENER reads
+    /// the persisted flag once — a settings read in a property initializer
+    /// would re-hit disk on every parent body evaluation.
+    @State private var showIntro: Bool
     @State private var hintSuppress = false
 
+    init(
+        capsule: ChatCapsule,
+        showIntroInitially: Bool,
+        onClose: @escaping () -> Void,
+        onAttach: @escaping () -> Void,
+        onInsert: @escaping ([String]) -> Void
+    ) {
+        self.capsule = capsule
+        self.onClose = onClose
+        self.onAttach = onAttach
+        self.onInsert = onInsert
+        _showIntro = State(initialValue: showIntroInitially)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: onBack) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text("Capsules")
-                            .font(Theme.Fonts.secondaryMedium)
-                    }
-                    .foregroundStyle(backHovered ? Theme.text : Theme.textSecondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { backHovered = $0 }
-                Spacer(minLength: 4)
-                // THE way to carry the whole conversation forward — a
-                // filled CTA, not a link, so it can't be missed.
-                Button(action: onAttach) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "capsule")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Start a chat with this capsule")
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Theme.ctaFill))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("Opens a new chat with this whole conversation "
-                    + "attached as context")
-            }
-            .padding(.bottom, 8)
-
-            Text(capsule.title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(2)
-                .padding(.bottom, 8)
-
-            if let messages {
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(messages) { message in
-                            CapsuleMessageRow(
-                                message: message,
-                                capsuleTitle: capsule.title,
-                                onInsert: onInsert
-                            )
-                        }
-                    }
-                    .padding(.bottom, 12)
-                }
-                // Like the chat: open on the latest exchange, scroll up
-                // for history.
-                .defaultScrollAnchor(.bottom)
-                .thinScrollbar()
+        Group {
+            if showIntro {
+                introView
+                    .frame(width: 420)
             } else {
-                ProgressView()
-                    .controlSize(.small)
+                capsuleContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .overlay(alignment: .bottom) {
-            if !hintDismissed { hintCard }
-        }
-        .task(id: capsule.sourceFile) {
-            let ref = ChatSessionRef(
-                harness: ChatHarness(rawValue: capsule.harness) ?? .claude,
-                filePath: capsule.sourceFile,
-                title: capsule.title, modified: capsule.sealedAt
-            )
-            messages = ChatArchive.cachedTranscript(ref)
-            let parsed = await Task.detached(priority: .userInitiated) {
-                ChatArchive.transcript(ref)
-            }.value
-            messages = parsed
-        }
-    }
-
-    /// What a capsule is and what to do with it, floated over the
-    /// transcript's tail. "Got it" dismisses this open; the checkbox
-    /// retires it for good.
-    private var hintCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "capsule")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Theme.buttonActiveStroke)
-                    .frame(width: 32, height: 32)
-                    .background(Circle().fill(Theme.buttonActiveFill))
-                Text("This chat is sealed into a capsule")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-            }
-            Text("Drag any bubble into the composer to quote that piece, "
-                + "or start a chat with the whole capsule attached. To "
-                + "keep chatting here, right-click the capsule in the "
-                + "sidebar and choose Reopen Chat.")
-                .font(.system(size: 13))
-                .lineSpacing(3)
-                .foregroundStyle(Theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 10) {
-                Toggle("Don't show this again", isOn: $hintSuppress)
-                    .toggleStyle(.checkbox)
-                    .font(Theme.Fonts.secondary)
-                    .foregroundStyle(Theme.textSecondary)
-                Spacer(minLength: 4)
-                Button {
-                    if hintSuppress {
-                        var settings = HoustonSettings.read()
-                        settings.capsuleHintDismissed = true
-                        HoustonSettings.write(settings)
-                    }
-                    withAnimation(Theme.quick) {
-                        hintDismissed = true
-                    }
-                } label: {
-                    Text("Got it")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Theme.ctaFill))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(16)
+        // Same surface as the chat itself (near-black in dark) so the
+        // capsule reads as the conversation it was, not a panel.
         .background(
-            RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                .fill(Theme.panelFill)
+            RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                .fill(Theme.gitPanelFill)
                 .shadow(
                     color: Theme.floatShadowColor,
                     radius: Theme.floatShadowRadius,
@@ -359,30 +221,230 @@ private struct CapsuleTranscriptView: View {
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                .strokeBorder(Theme.buttonStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
         )
-        .padding(.bottom, 8)
-        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .onExitCommand { onClose() }
+        .task(id: capsule.sourceFile) {
+            let ref = ChatSessionRef(
+                harness: ChatHarness(rawValue: capsule.harness) ?? .claude,
+                filePath: capsule.sourceFile,
+                title: capsule.title, modified: capsule.sealedAt
+            )
+            // Filtered ONCE here — running quotableText over the whole
+            // transcript in the render path made every selection toggle
+            // pay an O(messages × blocks) string pass.
+            messages = ChatArchive.cachedTranscript(ref).map(Self.contentOnly)
+            let parsed = await Task.detached(priority: .userInitiated) {
+                ChatArchive.transcript(ref)
+            }.value
+            messages = Self.contentOnly(parsed)
+        }
+    }
+
+    /// Prose/code messages only — tool-only messages would render as a
+    /// bare role label with nothing quotable.
+    private static func contentOnly(_ all: [ChatMessage]) -> [ChatMessage] {
+        all.filter { !CapsuleMessageRow.quotableText(of: $0).isEmpty }
+    }
+
+    // MARK: - Intro
+
+    /// "Introducing Capsules" — a traditional first-run dialog, centered
+    /// copy, buttons at the bottom.
+    private var introView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "capsule")
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(Theme.buttonActiveStroke)
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Theme.buttonActiveFill))
+            Text("Introducing Capsules")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.text)
+            Text("A finished chat seals into a capsule: the whole "
+                + "conversation, ready to reuse. Select the pieces you "
+                + "want and add them to a chat as fragments, or add the "
+                + "entire capsule as context. To pick up where it left "
+                + "off, right-click the capsule and choose Reopen Chat.")
+                .font(.system(size: 13))
+                .lineSpacing(3)
+                .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Toggle("Don't show this again", isOn: $hintSuppress)
+                    .toggleStyle(.checkbox)
+                    .font(Theme.Fonts.secondary)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer(minLength: 4)
+                DialogButton(title: "Got it", primary: true) {
+                    if hintSuppress {
+                        var settings = HoustonSettings.read()
+                        settings.capsuleHintDismissed = true
+                        HoustonSettings.write(settings)
+                    }
+                    withAnimation(Theme.quick) { showIntro = false }
+                }
+            }
+            .padding(.top, 6)
+        }
+        .padding(24)
+    }
+
+    // MARK: - Capsule content
+
+    private var capsuleContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "capsule")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.buttonActiveStroke)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Theme.buttonActiveFill))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(capsule.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text(sealedLine)
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer(minLength: 8)
+                // Own hover state (CircleIconButton) — a dialog-level
+                // hover flag re-diffed the whole transcript per enter/leave.
+                CircleIconButton(
+                    systemName: "xmark", size: 24,
+                    help: "Close", action: onClose
+                )
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
+
+            hairline
+
+            if let messages {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(messages) { message in
+                            CapsuleMessageRow(
+                                message: message,
+                                harness: harness,
+                                capsuleTitle: capsule.title,
+                                isSelected: selected.contains(message.id),
+                                onToggle: { toggle(message) },
+                                onAdd: { onInsert([reference(for: message)]) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
+                    // Chat-width reading column: agent prose gets a max
+                    // width, no min, and centers in the wider dialog.
+                    .frame(maxWidth: 780)
+                    .frame(maxWidth: .infinity)
+                }
+                // Like the chat: open on the latest exchange, scroll up
+                // for history.
+                .defaultScrollAnchor(.bottom)
+                .thinScrollbar()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            hairline
+
+            // Traditional dialog footer: status on the left, actions
+            // bottom-right, primary on the outside.
+            HStack(spacing: 12) {
+                if !selected.isEmpty {
+                    Text("\(selected.count) selected")
+                        .font(Theme.Fonts.secondary)
+                        .foregroundStyle(Theme.textSecondary)
+                    LinkButton(title: "Clear", size: 11) { selected = [] }
+                }
+                Spacer(minLength: 8)
+                DialogButton(
+                    title: "Add entire capsule",
+                    primary: selected.isEmpty,
+                    action: onAttach
+                )
+                if !selected.isEmpty {
+                    DialogButton(
+                        title: selected.count == 1
+                            ? "Add 1 fragment"
+                            : "Add \(selected.count) fragments",
+                        primary: true,
+                        action: { onInsert(selectedReferences) }
+                    )
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+    }
+
+    private var hairline: some View {
+        Rectangle().fill(Theme.borderSidebar).frame(height: 1)
+    }
+
+    private var harness: ChatHarness {
+        ChatHarness(rawValue: capsule.harness) ?? .claude
+    }
+
+    private var sealedLine: String {
+        let date = capsule.sealedAt.formatted(.dateTime.month(.abbreviated).day())
+        return "Sealed \(date) · \(capsule.harness)"
+    }
+
+    private func toggle(_ message: ChatMessage) {
+        if selected.contains(message.id) {
+            selected.remove(message.id)
+        } else {
+            selected.insert(message.id)
+        }
+    }
+
+    /// The ONE place a fragment's reference string is built — the quick
+    /// add and the multi-select footer must produce identical chips.
+    private func reference(for message: ChatMessage) -> String {
+        CapsuleMessageRow.referenceText(for: message, capsuleTitle: capsule.title)
+    }
+
+    private var selectedReferences: [String] {
+        (messages ?? [])
+            .filter { selected.contains($0.id) }
+            .map { reference(for: $0) }
     }
 }
 
-/// One message of the sealed chat, laid out like the chat itself: the
-/// user's bubble pushed right in the chat's bubble color, the agent's
-/// left. The whole bubble drags as quoted context; the hover + inserts
-/// the same.
+/// One message of the sealed chat, rendered through the chat's own
+/// `MessageView` so the capsule reads exactly like the conversation:
+/// agent replies as plain prose (no min width, a reading max width, no
+/// well), the user's turn as the orange bubble. The whole message is a
+/// hover row — it washes under the pointer and surfaces its controls
+/// (select toggle, quick add) at the top-right; a selected row keeps a
+/// quiet accent wash and its check.
 private struct CapsuleMessageRow: View {
     let message: ChatMessage
+    let harness: ChatHarness
     let capsuleTitle: String
-    let onInsert: (String) -> Void
+    let isSelected: Bool
+    let onToggle: () -> Void
+    /// Insert just this fragment, immediately.
+    let onAdd: () -> Void
 
-    @ObservedObject private var style = ChatStyleStore.shared
     @State private var hovered = false
-    @State private var insertHovered = false
+    @State private var toggleHovered = false
 
     /// Prose and code only — tool chips and nested capsule markers are
     /// plumbing, not quotable content.
-    private var text: String {
+    static func quotableText(of message: ChatMessage) -> String {
         message.blocks.compactMap { block -> String? in
             switch block {
             case let .text(t): t
@@ -392,15 +454,18 @@ private struct CapsuleMessageRow: View {
         }.joined(separator: "\n\n")
     }
 
-    /// What dragging this section into the composer inserts. The
+    /// What a selected section inserts into the composer. The
     /// `[Fragment "…"]` wrapper renders back as a small chip
     /// (`ChatArchive.userBlocks`); the model gets the whole quote.
-    private var referenceText: String {
+    static func referenceText(
+        for message: ChatMessage, capsuleTitle: String
+    ) -> String {
+        let text = quotableText(of: message)
         let role = message.role == .user ? "the user said" : "the assistant said"
         let body = text.count > 6_000
             ? String(text.prefix(6_000)) + "\n… (trimmed; the full exchange is in the transcript)"
             : text
-        let label = Self.fragmentLabel(for: text)
+        let label = fragmentLabel(for: text)
         return "[Fragment \"\(label)\"]\n"
             + "[From the earlier chat \"\(capsuleTitle)\", \(role):]\n"
             + body + "\n[/Fragment]"
@@ -417,70 +482,69 @@ private struct CapsuleMessageRow: View {
         return flat.count > 20 ? String(flat.prefix(19)) + "…" : flat
     }
 
-    private var isUser: Bool { message.role == .user }
-
     var body: some View {
-        if text.isEmpty {
-            EmptyView()
-        } else {
-            HStack(spacing: 0) {
-                if isUser { Spacer(minLength: 24) }
-                bubble
-                if !isUser { Spacer(minLength: 24) }
+        HStack(alignment: .top, spacing: 10) {
+            // The controls live in a fixed gutter OUTSIDE the message and
+            // its wash — they never overlap content, and the reserved
+            // width keeps every message's left edge aligned. They fade in
+            // on hover; the check stays visible while selected.
+            HStack(spacing: 4) {
+                if hovered { addButton }
+                selectToggle
             }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        }
-    }
-
-    private var bubble: some View {
-        Text(text)
-            // Chat-scale prose (the transcript reads like the chat it
-            // was), with the same dark-mode step-down.
-            .font(.system(size: 16))
-            .lineSpacing(4)
-            .foregroundStyle(isUser ? style.text : Theme.chatProse)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .lineLimit(nil)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                    .fill(isUser ? style.bubble : Theme.attachedWellFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                    .strokeBorder(
-                        hovered ? Theme.buttonStroke : .clear, lineWidth: 1
-                    )
-            )
-            // Floats on the bubble's corner, so hover never shifts layout.
-            .overlay(alignment: .topTrailing) {
-                if hovered { insertButton.padding(3) }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
-            .onHover { hovered = $0 }
-            .onDrag { NSItemProvider(object: referenceText as NSString) }
-            .help("Drag into the composer to quote this section")
-    }
-
-    private var insertButton: some View {
-        Button {
-            onInsert(referenceText)
-        } label: {
-            Image(systemName: "plus.bubble")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(insertHovered ? Theme.text : Theme.textSecondary)
-                .frame(width: 20, height: 20)
+            .frame(width: 48, alignment: .trailing)
+            .padding(.top, 12)
+            .opacity(hovered || isSelected ? 1 : 0)
+            MessageView(message: message, harness: harness, showTools: false)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                // The message is the fragment's surface: it washes under
+                // the pointer; a selected one holds a quiet accent tint.
                 .background(
-                    RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .fill(insertHovered
-                            ? Theme.controlHovered : Theme.rowHovered)
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                        .fill(isSelected
+                            ? Theme.buttonActiveFill
+                            : hovered ? Theme.cardHovered : .clear)
                 )
-                .contentShape(Rectangle())
+        }
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+    }
+
+    private var selectToggle: some View {
+        Button(action: onToggle) {
+            ZStack {
+                if isSelected {
+                    Circle().fill(Theme.buttonActiveStroke)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Circle()
+                        .fill(Theme.controlChip)
+                    Circle()
+                        .strokeBorder(
+                            toggleHovered
+                                ? Theme.buttonActiveStroke : Theme.buttonStroke,
+                            lineWidth: 1.5
+                        )
+                }
+            }
+            .frame(width: 20, height: 20)
+            .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .onHover { insertHovered = $0 }
-        .help("Add this section to the chat as context")
+        .onHover { toggleHovered = $0 }
+        .help(isSelected
+            ? "Remove from the selection"
+            : "Select this section to add as a fragment")
+    }
+
+    private var addButton: some View {
+        CircleIconButton(
+            systemName: "plus",
+            help: "Add just this fragment to the chat",
+            action: onAdd
+        )
     }
 }

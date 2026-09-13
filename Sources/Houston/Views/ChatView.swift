@@ -130,9 +130,14 @@ struct ChatBrowserView: View {
     @State private var historyShown = 150
     /// Bumped on every send so the transcript scrolls the new bubble into view.
     @State private var sendScrollTick = 0
-    /// Whether the transcript is scrolled near its bottom — the stream is
-    /// only followed while it is, so reading upward isn't yanked back down.
-    @State private var nearBottom = true
+    /// Whether the transcript follows the stream. Latching with hysteresis
+    /// (not a bare "is the sentinel visible" recompute): a chunky append
+    /// briefly shoves the sentinel far below the fold, and the old
+    /// recompute latched false there and never recovered — the stream
+    /// stopped following mid-answer. Now it only turns OFF when the user
+    /// scrolls up past a wide margin, and back ON when they return near
+    /// the bottom; growth-driven blips inside the margin don't flip it.
+    @State private var stickToBottom = true
 
     /// The selection is derived synchronously from the file path — going
     /// through a directory listing first flashed the empty state over
@@ -169,11 +174,17 @@ struct ChatBrowserView: View {
         // row, a run finishing in a fresh file) reloads into it.
         .task(id: projectPath + "|" + (initialSessionFile ?? "")) {
             historyShown = 150
+            // A fresh chat always opens following its tail — the latch
+            // must not carry over from a chat the user had scrolled up in.
+            stickToBottom = true
             selected = initialSessionFile.map(Self.quickRef)
             // The cached parse renders immediately (no spinner flash on
             // reopen); the real read still runs and lands only if the
-            // file changed.
-            messages = selected.flatMap { ChatArchive.cachedTranscript($0) }
+            // file changed. Trimmed the same way as `reload` so a chat
+            // reopened mid-turn doesn't double-show the running exchange.
+            messages = selected.flatMap { ref in
+                ChatArchive.cachedTranscript(ref).map { committed($0, ref) }
+            }
             guard let selected else { return }
             if let session = hub.sessions[selected.filePath],
                !session.running, session.hasLiveContent {
@@ -192,6 +203,7 @@ struct ChatBrowserView: View {
         selected = ref
         messages = ChatArchive.cachedTranscript(ref)
         historyShown = 150
+        stickToBottom = true
         reload(ref)
     }
 
@@ -204,8 +216,58 @@ struct ChatBrowserView: View {
             let parsed = await Task.detached(priority: .userInitiated) {
                 ChatArchive.transcript(ref)
             }.value
-            if token == loadToken { messages = parsed }
+            if token == loadToken {
+                messages = committed(parsed, ref)
+            }
         }
+    }
+
+    /// The transcript minus the turn the live section is already showing.
+    /// The CLI persists the user message (and each completed assistant
+    /// step) as the turn runs, so a full re-read mid-turn would render the
+    /// running exchange twice — once from disk, once live. Everything from
+    /// the running turn's user message onward belongs to the live section,
+    /// so trim it off. Idle sessions get the whole transcript.
+    private func committed(
+        _ parsed: [ChatMessage], _ ref: ChatSessionRef
+    ) -> [ChatMessage] {
+        guard let session = hub.sessions[ref.filePath],
+              session.running,
+              let pending = session.pendingUserText else { return parsed }
+        // Compare in parsed space: the transcript stores the message as
+        // blocks — capsule/fragment markers become chips — so a raw-text
+        // needle would miss any send that led with an attachment. Match
+        // on the pending message's first text RUN instead.
+        let needle = ChatArchive.userBlocks(pending)
+            .compactMap { block -> String? in
+                if case let .text(text) = block, !text.isEmpty {
+                    return String(text.prefix(60))
+                }
+                return nil
+            }
+            .first
+        // The running turn's user message can only be the transcript's
+        // LAST user message (only assistant output follows it) — anything
+        // else matching the needle is an older duplicate; trimming there
+        // would eat committed history.
+        guard let lastUser = parsed.lastIndex(where: { $0.role == .user })
+        else { return parsed }
+        let candidate = parsed[lastUser]
+        let matches: Bool
+        if let needle {
+            matches = candidate.blocks.contains { block in
+                if case let .text(text) = block { return text.contains(needle) }
+                return false
+            }
+        } else {
+            // A chips-only send (pure attachment): match a chips-only
+            // last user message.
+            matches = !candidate.blocks.contains { block in
+                if case .text = block { return true }
+                return false
+            }
+        }
+        return matches ? Array(parsed.prefix(lastUser)) : parsed
     }
 
     // MARK: - Transcript
@@ -250,7 +312,7 @@ struct ChatBrowserView: View {
                                     LiveTurnView(
                                         session: session, harness: ref.harness,
                                         onGrow: {
-                                            guard nearBottom else { return }
+                                            guard stickToBottom else { return }
                                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                                         }
                                     ) {
@@ -280,14 +342,28 @@ struct ChatBrowserView: View {
                         .defaultScrollAnchor(.bottom)
                         .coordinateSpace(name: "chatScroll")
                         .onPreferenceChange(ChatBottomYKey.self) { y in
-                            // Within ~two lines of the sentinel counts as
-                            // "at the bottom".
-                            nearBottom = y <= geo.size.height + 60
+                            // Distance of the sentinel below the viewport
+                            // bottom. Wide hysteresis so a growth blip
+                            // never latches "not following": only a real
+                            // scroll-up past 240pt turns it off; returning
+                            // within 80pt turns it back on.
+                            // Guarded writes: this fires per scroll/growth
+                            // frame, so the steady state must cost a
+                            // comparison, not a state write.
+                            let distance = y - geo.size.height
+                            if distance <= 80 {
+                                if !stickToBottom { stickToBottom = true }
+                            } else if distance > 240, stickToBottom {
+                                stickToBottom = false
+                            }
                         }
                         .onChange(of: messages.count) {
+                            guard stickToBottom else { return }
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
                         .onChange(of: sendScrollTick) {
+                            // A send always re-follows the stream.
+                            stickToBottom = true
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
                     }
@@ -517,7 +593,10 @@ struct ChatBrowserView: View {
                     || attempt == 14 { break }
                 try? await Task.sleep(nanoseconds: 400_000_000)
             }
-            if token == loadToken { messages = parsed }
+            // A queued send may already be running by now (the session
+            // drains itself at turn end) — trim its exchange the same as
+            // any other mid-turn read.
+            if token == loadToken { messages = committed(parsed, ref) }
             session.dropCarried(absorbedBy: parsed)
             session.clearTurn()
             ChatIndexStore.shared.refresh(projectPath, force: true)
@@ -729,6 +808,14 @@ private struct LiveTurnView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
+            // Held messages: sent while the turn was running, waiting their
+            // turn (like the terminal's queued line). Dimmed, with a clock
+            // and a ✕ to drop one before it runs.
+            ForEach(session.queued) { held in
+                QueuedMessageRow(text: held.text) {
+                    session.cancelQueued(held.id)
+                }
+            }
             if let error = session.lastError {
                 if session.needsLogin {
                     // A signed-out CLI, not a failed turn: offer the login
@@ -789,6 +876,48 @@ private struct LiveTurnView: View {
         .onChange(of: session.liveBlocks.count) { onGrow() }
         .onChange(of: session.pendingUserText) { onGrow() }
         .onChange(of: session.approval != nil) { onGrow() }
+        .onChange(of: session.queued.count) { onGrow() }
+    }
+}
+
+/// A held message: sent while a turn was running, shown dimmed on the
+/// trailing edge (where the user's bubbles sit) until it's its turn.
+private struct QueuedMessageRow: View {
+    let text: String
+    let onCancel: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Spacer(minLength: 40)
+            if hovered {
+                CircleIconButton(
+                    systemName: "xmark", iconSize: 9,
+                    help: "Remove this held message",
+                    action: onCancel
+                )
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary)
+                Text(text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(3)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                    .fill(Theme.attachedWellFill)
+            )
+            .opacity(0.65)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .onHover { hovered = $0 }
+        .help("Queued — sends when the current turn finishes")
     }
 }
 
@@ -1537,7 +1666,9 @@ final class ChatStyleStore: ObservableObject {
 
 // MARK: - Messages
 
-private struct MessageView: View {
+/// One rendered message — user bubble or agent prose. Internal (not
+/// private) so the capsule dialog renders its transcript identically.
+struct MessageView: View {
     let message: ChatMessage
     let harness: ChatHarness
     /// Tool chips show during a live turn (the "it's working" feedback)
