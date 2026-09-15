@@ -449,7 +449,7 @@ private struct CapsuleMessageRow: View {
             switch block {
             case let .text(t): t
             case let .code(c, lang): "```\(lang ?? "")\n\(c)\n```"
-            case .tool, .capsule, .fragment: nil
+            case .tool, .capsule, .fragment, .image: nil
             }
         }.joined(separator: "\n\n")
     }

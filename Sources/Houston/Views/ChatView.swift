@@ -74,6 +74,9 @@ struct ChatModelChoice: Hashable {
             ("Minimal", "minimal"), ("Low", "low"), ("Medium", "medium"),
             ("High", "high"), ("XHigh", "xhigh"),
         ]
+        // ACP harnesses (Gemini, Grok) choose model/effort by the model id
+        // itself (Pro vs Flash, Grok 4 vs Fast); no separate effort flag.
+        case .gemini, .grok: []
         }
     }
 
@@ -89,7 +92,19 @@ struct ChatModelChoice: Hashable {
     }
 
     static func fallback(for harness: ChatHarness) -> ChatModelChoice {
-        harness == .codex ? openAI[0] : claude[0]
+        switch harness {
+        case .codex: openAI[0]
+        case .gemini: providerFallback(.gemini)
+        case .grok: providerFallback(.grok)
+        case .claude: claude[0]
+        }
+    }
+
+    private static func providerFallback(_ provider: ChatProvider) -> ChatModelChoice {
+        ChatModelChoice(
+            label: provider.models[0].label, harness: provider.harness,
+            arg: provider.models[0].arg, provider: provider.id
+        )
     }
 
     /// The flags this choice adds to its CLI invocation. Codex takes
@@ -117,6 +132,10 @@ struct ChatBrowserView: View {
     /// Jump straight into this transcript (a sidebar chat row); nil opens
     /// the new-chat empty state — the sidebar IS the chat list.
     var initialSessionFile: String? = nil
+    /// Projects the new-chat composer's project chip offers — a chat
+    /// opened without a project (sidebar New Chat, path = home) picks its
+    /// home here before the first send.
+    var projects: [String] = []
 
     @ObservedObject private var titler = ChatTitler.shared
     @ObservedObject private var hub = ChatSessionHub.shared
@@ -130,6 +149,9 @@ struct ChatBrowserView: View {
     @State private var historyShown = 150
     /// Bumped on every send so the transcript scrolls the new bubble into view.
     @State private var sendScrollTick = 0
+    /// The earliest rollover segment currently expanded into the
+    /// transcript (nil = only the chain head is shown).
+    @State private var chainEarliest: String?
     /// Whether the transcript follows the stream. Latching with hysteresis
     /// (not a bare "is the sentinel visible" recompute): a chunky append
     /// briefly shoves the sentinel far below the fold, and the old
@@ -138,15 +160,29 @@ struct ChatBrowserView: View {
     /// scrolls up past a wide margin, and back ON when they return near
     /// the bottom; growth-driven blips inside the margin don't flip it.
     @State private var stickToBottom = true
+    /// The floating composer's measured height — the transcript's content
+    /// insets by it (via safeAreaInset) and the "fill the viewport" floor
+    /// subtracts it, so a short chat still reads from the top.
+    @State private var composerHeight: CGFloat = 120
 
     /// The selection is derived synchronously from the file path — going
     /// through a directory listing first flashed the empty state over
     /// every chat open.
-    init(projectPath: String, initialSessionFile: String? = nil) {
+    init(
+        projectPath: String, initialSessionFile: String? = nil,
+        projects: [String] = []
+    ) {
         self.projectPath = projectPath
         self.initialSessionFile = initialSessionFile
+        self.projects = projects
         _selected = State(initialValue: initialSessionFile.map(Self.quickRef))
     }
+
+    /// The project the next send runs in — the composer's project chip
+    /// can redirect a not-yet-started chat away from the path the view
+    /// opened with.
+    @State private var chosenProject: String?
+    private var activeProject: String { chosenProject ?? projectPath }
 
     private static func quickRef(_ file: String) -> ChatSessionRef {
         ChatSessionRef(
@@ -159,7 +195,7 @@ struct ChatBrowserView: View {
         Group {
             if let selected {
                 transcriptView(selected)
-            } else if let draft = hub.drafts[projectPath] {
+            } else if let draft = hub.drafts[activeProject] {
                 draftView(draft)
             } else {
                 newChatView
@@ -167,13 +203,14 @@ struct ChatBrowserView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.gitPanelFill)
-        // Closing the browser drops idle agent processes; mid-turn ones
-        // stay so their turn can finish writing the transcript.
-        .onDisappear { hub.releaseIdle() }
+        // No teardown on close: warm processes now outlive the browser
+        // (the hub's TTL sweep reclaims them), so returning to a chat
+        // doesn't pay a CLI cold start.
         // The file is part of the identity so retargeting (another sidebar
         // row, a run finishing in a fresh file) reloads into it.
         .task(id: projectPath + "|" + (initialSessionFile ?? "")) {
             historyShown = 150
+            chainEarliest = nil
             // A fresh chat always opens following its tail — the latch
             // must not carry over from a chat the user had scrolled up in.
             stickToBottom = true
@@ -187,15 +224,20 @@ struct ChatBrowserView: View {
             }
             guard let selected else { return }
             if let session = hub.sessions[selected.filePath],
-               !session.running, session.hasLiveContent {
+               session.phase == .settling {
                 // A turn finished while this chat wasn't on screen — the
-                // session kept it (releaseIdle spares live content).
+                // session kept it (the sweep spares live content).
                 // Absorb it now, or the transcript and the live section
                 // would both render it.
                 reloadThenClear(selected, session)
             } else {
                 reload(selected)
             }
+            // Boot the agent while the user is still reading/typing —
+            // the first send then costs a keystroke, not a CLI start +
+            // session load. This is what makes chat feel like a warm
+            // terminal pane.
+            hub.prewarm(selected, project: activeProject)
         }
     }
 
@@ -203,6 +245,7 @@ struct ChatBrowserView: View {
         selected = ref
         messages = ChatArchive.cachedTranscript(ref)
         historyShown = 150
+        chainEarliest = nil
         stickToBottom = true
         reload(ref)
     }
@@ -218,6 +261,15 @@ struct ChatBrowserView: View {
             }.value
             if token == loadToken {
                 messages = committed(parsed, ref)
+                // A plain reload can supersede an in-flight absorb (its
+                // token check makes it stand down) — if the session is
+                // still holding a finished turn, absorb it now instead of
+                // leaving the live section stranded next to a transcript
+                // that may already contain the same turn.
+                if let session = hub.sessions[ref.filePath],
+                   !session.running, session.hasUnabsorbedTurn {
+                    reloadThenClear(ref, session)
+                }
             }
         }
     }
@@ -292,6 +344,19 @@ struct ChatBrowserView: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 28) {
+                                // A rolled-over chat presents as one
+                                // conversation — this walks the chain one
+                                // sealed segment back per click, like
+                                // "load earlier messages" anywhere else.
+                                if meta.continuations[chainEarliest ?? ref.filePath] != nil {
+                                    Button("Show earlier conversation") {
+                                        expandChain(ref)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(Theme.Fonts.body)
+                                    .foregroundStyle(Theme.link)
+                                    .frame(maxWidth: .infinity)
+                                }
                                 if messages.count > historyShown {
                                     Button("Show earlier messages") {
                                         historyShown += 200
@@ -328,19 +393,41 @@ struct ChatBrowserView: View {
                                     })
                             }
                             .padding(.horizontal, 32)
-                            .padding(.vertical, 18)
+                            .padding(.top, 22)
+                            .padding(.bottom, 18)
                             .frame(maxWidth: 800)
                             .frame(maxWidth: .infinity)
-                            // Stretched to at least the viewport, content
-                            // pinned to its top: a short chat reads from
-                            // the top instead of dropping to the bottom,
-                            // while the bottom anchor still follows growth
-                            // once the content actually overflows.
-                            .frame(minHeight: geo.size.height, alignment: .top)
+                            // Stretched to at least the visible viewport
+                            // (the pane minus the floating composer),
+                            // content pinned to its top: a short chat
+                            // reads from the top instead of dropping to
+                            // the bottom, while the bottom anchor still
+                            // follows growth once the content overflows.
+                            .frame(
+                                minHeight: max(0, geo.size.height - composerHeight),
+                                alignment: .top
+                            )
                             .thinScrollbar()
                         }
                         .defaultScrollAnchor(.bottom)
                         .coordinateSpace(name: "chatScroll")
+                        // The composer floats over the transcript on
+                        // frosted glass: safeAreaInset keeps the resting
+                        // content above it while the scroll view itself
+                        // runs full height, so text slides behind the
+                        // blur mid-scroll.
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            transcriptComposer(ref)
+                                .background(GeometryReader { bar in
+                                    Color.clear.preference(
+                                        key: ComposerHeightKey.self,
+                                        value: bar.size.height
+                                    )
+                                })
+                        }
+                        .onPreferenceChange(ComposerHeightKey.self) {
+                            composerHeight = $0
+                        }
                         .onPreferenceChange(ChatBottomYKey.self) { y in
                             // Distance of the sentinel below the viewport
                             // bottom. Wide hysteresis so a growth blip
@@ -372,18 +459,25 @@ struct ChatBrowserView: View {
                 ProgressView()
                     .controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                transcriptComposer(ref)
             }
-            ChatComposer(
-                placeholder: "What's next?",
-                initialModel: hub.sessions[ref.filePath]?.lastModel
-                    ?? .fallback(for: ref.harness),
-                ghostContext: ref.harness == .claude ? ghostContext : nil,
-                runningSession: hub.sessions[ref.filePath],
-                onSend: { text, model in
-                    handleSend(ref, text: text, model: model)
-                }
-            )
         }
+    }
+
+    /// The transcript's composer — one construction for the loaded
+    /// transcript (where it floats via safeAreaInset) and the momentary
+    /// loading state (where it sits below the spinner).
+    private func transcriptComposer(_ ref: ChatSessionRef) -> some View {
+        ChatComposer(
+            placeholder: "What's next?",
+            initialModel: hub.sessions[ref.filePath]?.lastModel
+                ?? .fallback(for: ref.harness),
+            ghostContext: ref.harness == .claude ? ghostContext : nil,
+            runningSession: hub.sessions[ref.filePath],
+            onSend: { text, model in
+                handleSend(ref, text: text, model: model)
+            }
+        )
     }
 
     // MARK: - New chat empty state
@@ -400,7 +494,9 @@ struct ChatBrowserView: View {
             VStack(spacing: 20) {
                 Spacer()
                 Spacer()
-                Text("What's the mission for \(projectName)?")
+                Text(activeProject == NSHomeDirectory()
+                    ? "What's the mission?"
+                    : "What's the mission for \(projectName)?")
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(Theme.skyText)
                     .opacity(skyRevealed ? 1 : 0)
@@ -409,8 +505,12 @@ struct ChatBrowserView: View {
                     placeholder: "Let's do it…",
                     initialModel: .fallback(for: .claude),
                     ghostContext: nil,
+                    projectChoices: projects,
+                    selectedProject: activeProject,
+                    onSelectProject: { chosenProject = $0 },
+                    attached: false,
                     onSend: { text, model in
-                        hub.draft(in: projectPath, harness: model.harness)
+                        hub.draft(in: activeProject, harness: model.harness)
                             .send(text: text, model: model)
                     }
                 )
@@ -433,8 +533,8 @@ struct ChatBrowserView: View {
     }
 
     private var projectName: String {
-        projectPath == NSHomeDirectory()
-            ? "~" : (projectPath as NSString).lastPathComponent
+        activeProject == NSHomeDirectory()
+            ? "~" : (activeProject as NSString).lastPathComponent
     }
 
     // MARK: - New chat (draft)
@@ -443,26 +543,28 @@ struct ChatBrowserView: View {
     /// the whole conversation. Once its first turn lands, the draft is
     /// promoted onto its real file and this becomes a normal transcript.
     private func draftView(_ session: ChatAgentSession) -> some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    LiveTurnView(session: session, harness: session.harness) {
-                        promoteDraft(session)
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                LiveTurnView(session: session, harness: session.harness) {
+                    promoteDraft(session)
                 }
-                .padding(.horizontal, 32)
-                .padding(.vertical, 18)
-                .frame(maxWidth: 800)
-                .frame(maxWidth: .infinity)
-                .thinScrollbar()
             }
+            .padding(.horizontal, 32)
+            .padding(.top, 22)
+            .padding(.bottom, 18)
+            .frame(maxWidth: 800)
+            .frame(maxWidth: .infinity)
+            .thinScrollbar()
+        }
+        // Same floating-glass composer as the transcript view.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             ChatComposer(
                 placeholder: "What's next?",
                 initialModel: session.lastModel ?? .fallback(for: session.harness),
                 ghostContext: nil,
                 runningSession: session,
                 onSend: { text, model in
-                    hub.draft(in: projectPath, harness: model.harness)
+                    hub.draft(in: activeProject, harness: model.harness)
                         .send(text: text, model: model)
                 }
             )
@@ -473,7 +575,7 @@ struct ChatBrowserView: View {
     /// rekey the draft session onto it.
     private func promoteDraft(_ session: ChatAgentSession) {
         Task {
-            let project = projectPath
+            let project = activeProject
             // The transcript file may lag the turn-done event by a beat —
             // giving up on the first miss left the draft stuck on its
             // live turn forever.
@@ -490,6 +592,12 @@ struct ChatBrowserView: View {
                         ChatArchive.sessions(for: project)
                             .first { $0.harness == .codex }?.filePath
                     }.value
+                case .gemini, .grok:
+                    // Houston names the file itself from the ACP session id.
+                    file = session.sessionID.map {
+                        ChatArchive.acpSessionFile(
+                            for: project, id: $0, harness: session.harness)
+                    }
                 }
                 if let file, FileManager.default.fileExists(atPath: file) {
                     found = file
@@ -516,7 +624,7 @@ struct ChatBrowserView: View {
     private func handleSend(_ ref: ChatSessionRef, text: String, model: ChatModelChoice) {
         sendScrollTick += 1
         if model.harness == ref.harness {
-            hub.session(for: ref, project: projectPath)
+            hub.session(for: ref, project: activeProject)
                 .send(text: text, model: model)
         } else {
             transplantAndSend(ref, text: text, model: model)
@@ -528,7 +636,7 @@ struct ChatBrowserView: View {
     ) {
         Task {
             let target = model.harness
-            let project = projectPath
+            let project = activeProject
             let source = await Task.detached(priority: .userInitiated) {
                 ChatArchive.transcript(ref)
             }.value
@@ -546,14 +654,25 @@ struct ChatBrowserView: View {
             }
             let toExport = payload
             let exported = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
-                guard let id = target == .claude
-                    ? ChatArchive.exportToClaude(toExport, projectPath: project)
-                    : ChatArchive.exportToCodex(toExport, projectPath: project)
-                else { return nil }
-                let file = target == .claude
-                    ? ChatArchive.claudeProjectDir(for: project) + "/" + id + ".jsonl"
-                    : ChatArchive.codexRolloutPath(id: id)
-                return file.map { (id, $0) }
+                switch target {
+                case .claude:
+                    guard let id = ChatArchive.exportToClaude(toExport, projectPath: project)
+                    else { return nil }
+                    return (id, ChatArchive.claudeProjectDir(for: project) + "/" + id + ".jsonl")
+                case .codex:
+                    guard let id = ChatArchive.exportToCodex(toExport, projectPath: project),
+                          let file = ChatArchive.codexRolloutPath(id: id) else { return nil }
+                    return (id, file)
+                case .gemini, .grok:
+                    // exportToACP returns the file path; the id is its
+                    // basename (Houston names it <id>.jsonl).
+                    guard let file = ChatArchive.exportToACP(
+                        toExport, projectPath: project, harness: target)
+                    else { return nil }
+                    let id = ((file as NSString).lastPathComponent as NSString)
+                        .deletingPathExtension
+                    return (id, file)
+                }
             }.value
             guard let (id, file) = exported else {
                 // Transplant failed — fall back to a fresh chat there.
@@ -569,6 +688,10 @@ struct ChatBrowserView: View {
             reload(newRef)
             hub.adopt(file: file, harness: target, project: project, id: id)
                 .send(text: text, model: model)
+            NotificationCenter.default.post(
+                name: .houstonChatRekeyed, object: nil,
+                userInfo: ["project": project, "file": file]
+            )
             ChatIndexStore.shared.refresh(project, force: true)
         }
     }
@@ -596,10 +719,126 @@ struct ChatBrowserView: View {
             // A queued send may already be running by now (the session
             // drains itself at turn end) — trim its exchange the same as
             // any other mid-turn read.
-            if token == loadToken { messages = committed(parsed, ref) }
-            session.dropCarried(absorbedBy: parsed)
-            session.clearTurn()
-            ChatIndexStore.shared.refresh(projectPath, force: true)
+            // The clear is gated on the SAME token as the messages write:
+            // clearing after a newer load superseded this one wiped the
+            // live section while the on-screen transcript never received
+            // the turn — the reply visibly vanished until the next reload.
+            // A superseded absorb leaves the live section intact; whoever
+            // owns the newer token re-absorbs (reload re-arms it).
+            if token == loadToken {
+                messages = committed(parsed, ref)
+                session.dropCarried(absorbedBy: parsed)
+                session.clearTurn()
+                rolloverIfNeeded(ref, session)
+            }
+            ChatIndexStore.shared.refresh(activeProject, force: true)
+        }
+    }
+
+    // MARK: - Context rollover
+
+    /// Walk the rollover chain one segment back: prepend the superseded
+    /// transcript above what's shown. The seam is deduped — rollover
+    /// seeds the new session with the parent's verbatim tail, so the
+    /// parent's trailing copies of those messages are dropped (showing
+    /// them twice, adjacent, is exactly the confusion this view exists
+    /// to avoid).
+    private func expandChain(_ ref: ChatSessionRef) {
+        let current = chainEarliest ?? ref.filePath
+        guard let parentFile = meta.continuations[current] else { return }
+        let parentRef = ChatSessionRef(
+            harness: ref.harness, filePath: parentFile,
+            title: "", modified: .distantPast
+        )
+        Task {
+            let parsed = await Task.detached(priority: .userInitiated) {
+                ChatArchive.transcript(parentRef)
+            }.value
+            guard let shown = messages, !parsed.isEmpty else { return }
+            let headKeys = Set(shown.prefix(20).compactMap(Self.seamKey))
+            var parent = parsed
+            while let last = parent.last,
+                  let key = Self.seamKey(last), headKeys.contains(key) {
+                parent.removeLast()
+            }
+            messages = parent + shown
+            historyShown += parent.count + 1
+            chainEarliest = parentFile
+        }
+    }
+
+    /// Identity of a message across the rollover seam: role + the head
+    /// of its first text run.
+    private static func seamKey(_ message: ChatMessage) -> String? {
+        for block in message.blocks {
+            if case let .text(text) = block, !text.isEmpty {
+                return (message.role == .user ? "u:" : "a:") + String(text.prefix(60))
+            }
+        }
+        return nil
+    }
+
+    /// Fraction of the context window at which the chat rolls over.
+    private static let rolloverFraction = 0.8
+
+    /// Context-pressure rollover: past the threshold, the chat's history
+    /// seals into a capsule and the conversation continues in a fresh
+    /// session seeded with a handoff brief + the recent verbatim tail
+    /// (plus the sealed transcript's path, so the model can read the
+    /// full history on demand). To the user it's still "the one chat" —
+    /// same title, same place — it just never fills up. Claude-only:
+    /// codex publishes no cumulative usage to trigger on. Runs only
+    /// between turns; a queued send postpones it to the next turn end.
+    private func rolloverIfNeeded(_ ref: ChatSessionRef, _ session: ChatAgentSession) {
+        guard ref.harness == .claude,
+              session.phase == .idle,
+              session.queued.isEmpty,
+              let tokens = session.contextTokens,
+              Double(tokens) >= Double(session.contextWindow) * Self.rolloverFraction
+        else { return }
+        Task {
+            let project = activeProject
+            let source = await Task.detached(priority: .userInitiated) {
+                ChatArchive.transcript(ref)
+            }.value
+            guard !source.isEmpty else { return }
+            let (chunks, tail) = ChatArchive.splitForHandoff(source)
+            let brief = await ChatTitler.handoffBrief(chunks)
+                ?? "(The earlier part of this conversation lives in the "
+                + "attached transcript — read it for anything you're missing.)"
+            let payload = [ChatArchive.handoffMessage(
+                brief: brief, from: ref.harness, fullTranscript: ref.filePath
+            )] + tail
+            let exported = await Task.detached(priority: .userInitiated) { () -> (String, String)? in
+                guard let id = ChatArchive.exportToClaude(payload, projectPath: project)
+                else { return nil }
+                return (id, ChatArchive.claudeProjectDir(for: project) + "/" + id + ".jsonl")
+            }.value
+            // Export failed → keep the old session; nothing changed.
+            guard let (id, file) = exported else { return }
+            // The chain presents as ONE chat: the new file takes the
+            // chat's identity (title, pin ride along in
+            // markContinuation), the old segment hides as superseded,
+            // reachable via "Show earlier conversation".
+            let title = titler.displayTitle(ref)
+            titler.setCustomTitle(title, for: file)
+            ChatMetaStore.shared.markContinuation(file, of: ref.filePath)
+            hub.forget(file: ref.filePath)
+            let newRef = ChatSessionRef(
+                harness: .claude, filePath: file, title: title, modified: Date()
+            )
+            selected = newRef
+            reload(newRef)
+            // Warm the fresh session immediately, on the model the user
+            // was just driving — the roll must not reintroduce the cold
+            // start it exists to hide.
+            hub.adopt(file: file, harness: .claude, project: project, id: id)
+                .warmUp(model: session.lastModel ?? .fallback(for: .claude))
+            NotificationCenter.default.post(
+                name: .houstonChatRekeyed, object: nil,
+                userInfo: ["project": project, "file": file]
+            )
+            ChatIndexStore.shared.refresh(project, force: true)
         }
     }
 
@@ -629,36 +868,91 @@ struct ChatBrowserView: View {
                 return false
             }
         }) else { return false }
-        let tail = String(
-            (finalText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).suffix(60)
-        )
+        // The stream is raw markdown but the parse splits fenced code into
+        // `.code` blocks — a reply ENDING in code never matched a
+        // text-only search, so every such turn burned the full retry loop
+        // and then cleared against whatever the last read held. Compare in
+        // a normalized space instead: fence lines dropped, whitespace
+        // collapsed, text and code searched together.
+        let tail = String(normalizedForMatch(finalText ?? "").suffix(60))
         return messages[index...].contains { message in
-            message.role == .assistant && message.blocks.contains { block in
-                if case let .text(text) = block {
-                    // A turn with no streamed text (tool-only, or one that
-                    // errored out) settles for any assistant text.
-                    return tail.isEmpty || text.contains(tail)
-                }
-                return false
-            }
+            guard message.role == .assistant else { return false }
+            let flat = normalizedForMatch(
+                message.blocks.compactMap { block -> String? in
+                    switch block {
+                    case let .text(text): text
+                    case let .code(code, _): code
+                    default: nil
+                    }
+                }.joined(separator: " ")
+            )
+            // A turn with no streamed text (tool-only, or one that
+            // errored out) settles for any assistant text.
+            return tail.isEmpty ? !flat.isEmpty : flat.contains(tail)
         }
+    }
+
+    /// Match space for stream-vs-parse comparison: fence lines gone
+    /// (they exist only on the stream side), all whitespace runs a single
+    /// space (block boundaries re-join differently than the raw stream).
+    private static func normalizedForMatch(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+            .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     /// The transcript's autocomplete context: the tail of the conversation.
-    private var ghostContext: String {
-        guard let messages else { return "" }
+    /// Non-nil ONLY while the assistant's last message ends in a question —
+    /// the ghost text (typed completion and the pre-typed suggested reply)
+    /// exists to answer a pending question, not to guess mid-thought.
+    private var ghostContext: String? {
+        guard let messages, let last = messages.last,
+              last.role == .assistant, Self.endsInQuestion(last)
+        else { return nil }
         var parts: [String] = []
-        for message in messages.suffix(3) {
+        let tail = Array(messages.suffix(3))
+        for (index, message) in tail.enumerated() {
             for block in message.blocks {
                 if case let .text(text) = block {
                     let role = message.role == .user ? "User" : "Assistant"
-                    parts.append("\(role): \(String(text.prefix(400)))")
+                    // The last message clips from the END — that's where
+                    // the question lives, and it's what the ghost answers.
+                    let clipped = index == tail.count - 1
+                        ? String(text.suffix(400)) : String(text.prefix(400))
+                    parts.append("\(role): \(clipped)")
                 }
             }
         }
-        return parts.suffix(4).joined(separator: "\n")
+        let joined = parts.suffix(4).joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
     }
 
+    /// Whether a message's final text block reads as a question — trailing
+    /// markdown dressing (emphasis, quotes, parens) stripped first.
+    private static func endsInQuestion(_ message: ChatMessage) -> Bool {
+        for block in message.blocks.reversed() {
+            if case let .text(text) = block {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                return trimmed
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "*_`\"'“”’)] \n\t"))
+                    .hasSuffix("?")
+            }
+        }
+        return false
+    }
+
+}
+
+/// The floating composer bar's measured height — drives the transcript's
+/// "fill the visible viewport" floor.
+private struct ComposerHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 120
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
 }
 
 /// The bottom sentinel's offset within the transcript's viewport — how
@@ -710,6 +1004,9 @@ enum ChatRowActions {
                 ChatArchive.exportToCodex(
                     messages, projectPath: project, originator: "Houston-Fork"
                 ).flatMap { ChatArchive.codexRolloutPath(id: $0) }
+            case .gemini, .grok:
+                ChatArchive.exportToACP(
+                    messages, projectPath: project, harness: ref.harness)
             }
             await MainActor.run {
                 if let file {
@@ -737,6 +1034,7 @@ enum ChatRowActions {
                         detail.isEmpty ? "*[\(name)]*" : "*[\(name): \(detail)]*"
                     case let .capsule(title, _): "*[Capsule: \(title)]*"
                     case let .fragment(title, _): "*[Fragment: \(title)]*"
+                    case let .image(path): "![image](\(path))"
                     }
                 }.joined(separator: "\n\n")
                 return heading + "\n\n" + body
@@ -871,7 +1169,18 @@ private struct LiveTurnView: View {
                 }
             }
         }
-        .onChange(of: session.completedTurns) { onTurnEnd() }
+        // Level-triggered, not edge-triggered: `.task(id:)` runs on MOUNT
+        // as well as on every bump, so a turn that ended while this view
+        // wasn't on screen (first open still parsing, a navigation flash)
+        // is absorbed the moment it appears — the old `.onChange` fired
+        // into the void then, and the reply didn't show until the user
+        // navigated away and back. The guard keeps a mount of an
+        // already-absorbed session from re-reading for nothing.
+        .task(id: session.completedTurns) {
+            guard session.completedTurns > 0, session.hasUnabsorbedTurn
+            else { return }
+            onTurnEnd()
+        }
         .onChange(of: session.streamText) { onGrow() }
         .onChange(of: session.liveBlocks.count) { onGrow() }
         .onChange(of: session.pendingUserText) { onGrow() }
@@ -905,7 +1214,8 @@ private struct QueuedMessageRow: View {
                 Text(text)
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.text)
-                    .lineLimit(3)
+                    // No clamp — a clipped queued message read as the
+                    // input being truncated (it never was on the wire).
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
@@ -1038,19 +1348,30 @@ private struct ChatComposer: View {
     let placeholder: String
     /// Menu selection before the user touches it — the session's harness.
     let initialModel: ChatModelChoice
-    /// Conversation tail for autocomplete; nil disables the ghost text.
+    /// Conversation tail for autocomplete — non-nil only while the
+    /// assistant's last message ended in a question; nil disables the
+    /// ghost text entirely (both typed completion and the empty-field
+    /// suggested reply).
     let ghostContext: String?
     /// The chat's live session, when one exists — the send button turns
     /// into Stop while its turn runs.
     var runningSession: ChatAgentSession? = nil
+    /// Projects the leading chip offers (nil hides the chip — a
+    /// transcript's composer already belongs to a project). Home stands
+    /// in for "no project".
+    var projectChoices: [String]? = nil
+    var selectedProject: String? = nil
+    var onSelectProject: ((String) -> Void)? = nil
+    /// Attached bars sit flush on the window's bottom edge — square
+    /// bottom corners, no gap. The new-chat composer floats mid-sky and
+    /// keeps the all-round radius.
+    var attached: Bool = true
     let onSend: (String, ChatModelChoice) -> Void
 
     @ObservedObject private var localModels = LocalModelStore.shared
+    @ObservedObject private var providerAuth = ProviderAuthStore.shared
     @State private var draft = ""
     @State private var picked: ChatModelChoice?
-    /// Each harness's last pick in this composer, so toggling the harness
-    /// back restores the model that was chosen there.
-    @State private var perHarness: [ChatHarness: ChatModelChoice] = [:]
     /// Chosen effort level (flag value); nil = the model's default. Only
     /// applied when the current model's harness supports the level.
     @State private var effort: String?
@@ -1092,22 +1413,22 @@ private struct ChatComposer: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 inputField
-                // Controls live UNDER the input: attach + pickers on the
-                // left, meter and send on the right.
+                // Controls live UNDER the input: project + attach +
+                // pickers on the left, meter and send on the right.
                 HStack(alignment: .center, spacing: 6) {
+                    if projectChoices != nil { projectMenu }
                     Button(action: attachImage) {
                         Image(systemName: "plus")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Theme.text)
                             .frame(width: 24, height: 24)
-                            .background(Circle().fill(Theme.rowHovered))
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
                     .help("Attach an image (inserts its path)")
-                    harnessMenu
                     modelMenu
-                    permissionMenu
+                    harnessMenu
+                    if model.provider == nil { effortMenu }
                     Spacer(minLength: 0)
                     if let runningSession {
                         ContextMeter(session: runningSession)
@@ -1122,20 +1443,32 @@ private struct ChatComposer: View {
                     }
                 }
             }
-            // The input well's own 44pt box already airs out the top —
-            // a token 4 up there, and the frame stays even.
             .padding(.horizontal, 12)
-            .padding(.top, 4)
-            .padding(.bottom, 6)
-            // Same surface as the sidebar so the bar sits on the chrome —
-            // one tint step off the window background, and that step
-            // defines it.
-            .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.sidebarFill))
-            // Drag-and-drop feedback only — no resting hairline.
+            .padding(.top, 8)
+            // Bottom padding matches the side padding (12) so the controls
+            // sit evenly inset; the input height drops to compensate.
+            .padding(.bottom, 12)
+            // Frosted glass: the transcript scrolls behind the bar and
+            // reads through the blur. The sidebarFill wash on top keeps
+            // the chips and text at full contrast (bare material washed
+            // them out over bright message text).
+            .background(
+                ZStack {
+                    barShape.fill(.ultraThinMaterial)
+                    barShape.fill(Theme.sidebarFill.opacity(0.6))
+                }
+                // On the background, not the bar — a whole-view shadow
+                // would shadow the input text and chips too.
+                .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+            )
+            // A hairline catches the glass edge against whatever slides
+            // under it; the drop-target rose replaces it during a drag.
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                    .stroke(Theme.link, lineWidth: 1.5)
-                    .opacity(dropTargeted ? 1 : 0)
+                barShape
+                    .strokeBorder(
+                        dropTargeted ? Theme.link : Theme.text.opacity(0.09),
+                        lineWidth: dropTargeted ? 1.5 : 1
+                    )
             )
         }
         .onDrop(
@@ -1160,118 +1493,221 @@ private struct ChatComposer: View {
             stagedCapsules.append(capsule)
             inputFocused = true
         }
-        // Same column as the transcript: 800 cap including 32px gutters.
-        .padding(.horizontal, 32)
+        // Same column as the transcript: 800 cap, and the bar's 20px
+        // gutter plus its 12px inner padding lands the input text on the
+        // transcript text's own 32px line — the glass extends wider, the
+        // words align.
+        .padding(.horizontal, 20)
         .frame(maxWidth: 800)
         .frame(maxWidth: .infinity)
-        .padding(.bottom, 12)
+        .padding(.bottom, attached ? 0 : 12)
         .padding(.top, 8)
         .onAppear { localModels.refresh() }
     }
 
+    /// Attached: docked to the window's bottom edge, rounded on top only
+    /// (a step up from radiusFloat), square where it meets the edge.
+    /// Floating (the new-chat sky): the original all-round radius.
+    private var barShape: UnevenRoundedRectangle {
+        attached
+            ? UnevenRoundedRectangle(
+                topLeadingRadius: 16, bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0, topTrailingRadius: 16
+            )
+            : UnevenRoundedRectangle(
+                topLeadingRadius: Theme.radiusFloat,
+                bottomLeadingRadius: Theme.radiusFloat,
+                bottomTrailingRadius: Theme.radiusFloat,
+                topTrailingRadius: Theme.radiusFloat
+            )
+    }
+
     // MARK: Control chips
 
-    /// Which CLI runs the send; switching restores that harness's last
-    /// pick here (or its default model).
-    private var harnessMenu: some View {
+    /// Where the chat runs — the leading chip on a new chat. Home stands
+    /// in for "no project".
+    private var projectMenu: some View {
         Menu {
-            harnessItem("Claude Code", .claude)
-            harnessItem("Codex", .codex)
+            Toggle("No project", isOn: Binding(
+                get: { effectiveProject == NSHomeDirectory() },
+                set: { _ in onSelectProject?(NSHomeDirectory()) }
+            ))
+            Divider()
+            ForEach(projectChoices ?? [], id: \.self) { path in
+                Toggle((path as NSString).lastPathComponent, isOn: Binding(
+                    get: { effectiveProject == path },
+                    set: { _ in onSelectProject?(path) }
+                ))
+            }
         } label: {
-            chip(model.harness == .claude ? "Claude Code" : "Codex")
+            chip(effectiveProject == NSHomeDirectory()
+                ? "No project"
+                : (effectiveProject as NSString).lastPathComponent)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Which CLI runs this chat")
+        .help("Project this chat runs in")
     }
 
-    private func harnessItem(_ label: String, _ harness: ChatHarness) -> some View {
-        Toggle(label, isOn: Binding(
-            get: { model.harness == harness },
-            set: { _ in
-                guard model.harness != harness else { return }
-                perHarness[model.harness] = model
-                picked = perHarness[harness] ?? .fallback(for: harness)
-            }
-        ))
+    private var effectiveProject: String {
+        selectedProject ?? NSHomeDirectory()
     }
 
-    /// The active harness's models only — cloud list, plus the Local
-    /// engines on the codex side, plus effort levels.
+    /// The top-level choice: every model across both harnesses (picking
+    /// one selects its harness), with the permission modes riding along.
     private var modelMenu: some View {
         Menu {
-            if model.harness == .claude {
+            // One submenu per provider, each carrying its own sign-in
+            // path at the bottom.
+            Menu("Claude") {
                 ForEach(ChatModelChoice.claude, id: \.self) { choice in
                     modelItem(choice)
                 }
-            } else {
-                Section("OpenAI") {
-                    ForEach(ChatModelChoice.openAI, id: \.self) { choice in
-                        modelItem(choice)
-                    }
+                Divider()
+                Button("Sign in to Claude…") { providerAuth.signInClaude() }
+            }
+            Menu("OpenAI") {
+                ForEach(ChatModelChoice.openAI, id: \.self) { choice in
+                    modelItem(choice)
                 }
-                Section("Local") {
-                    if localModels.mlxModels.isEmpty {
-                        Button(localModels.mlxPlaceholder) {}.disabled(true)
-                    } else {
-                        Menu("MLX Core") {
-                            ForEach(localModels.mlxModels, id: \.self) { name in
-                                modelItem(.mlx(name))
-                            }
+                Divider()
+                Button("Sign in to OpenAI…") { providerAuth.signInOpenAI() }
+            }
+            ForEach(ChatProvider.cloud) { provider in
+                cloudProviderMenu(provider)
+            }
+            Section("Local") {
+                if localModels.mlxModels.isEmpty {
+                    Button(localModels.mlxPlaceholder) {}.disabled(true)
+                } else {
+                    Menu("MLX Core") {
+                        ForEach(localModels.mlxModels, id: \.self) { name in
+                            modelItem(.mlx(name))
                         }
                     }
-                    Button("Ollama — Coming soon") {}.disabled(true)
-                    Button("LM Studio — Coming soon") {}.disabled(true)
                 }
+                Button("Ollama — Coming soon") {}.disabled(true)
+                Button("LM Studio — Coming soon") {}.disabled(true)
             }
-            if model.provider == nil {
-                Section("Effort") {
-                    Toggle("Default", isOn: Binding(
-                        get: { activeEffort == nil },
-                        set: { _ in effort = nil }
-                    ))
-                    ForEach(ChatModelChoice.efforts(for: model.harness), id: \.arg) { level in
-                        Toggle(level.label, isOn: Binding(
-                            get: { activeEffort?.arg == level.arg },
-                            set: { _ in effort = level.arg }
-                        ))
+            Section("Permissions") {
+                ForEach(ChatPermissionMode.allCases, id: \.self) { mode in
+                    Toggle(isOn: Binding(
+                        get: { activePermission == mode },
+                        set: { _ in permission = mode }
+                    )) {
+                        Text(mode.label)
+                        Text(mode.detail)
                     }
                 }
             }
         } label: {
-            chip(activeEffort.map { "\(model.label) · \($0.label)" } ?? model.label)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Model for this message")
-    }
-
-    /// What the agent may do without asking; Full access reads as the
-    /// warning it is.
-    private var permissionMenu: some View {
-        Menu {
-            ForEach(ChatPermissionMode.allCases, id: \.self) { mode in
-                Toggle(isOn: Binding(
-                    get: { activePermission == mode },
-                    set: { _ in permission = mode }
-                )) {
-                    Text(mode.label)
-                    Text(mode.detail)
-                }
-            }
-        } label: {
-            chip(activePermission.label,
+            chip(model.label,
                  tint: activePermission == .full ? Theme.textWarning : nil)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("What the agent may do without asking")
+        .help("Model for this message, and what it may do without asking")
+    }
+
+    /// A cloud provider's submenu: its models (usable once signed in and
+    /// the provider's API speaks the Responses wire codex needs), with
+    /// sign-in / sign-out at the bottom. Sign-in opens the provider's
+    /// console in the browser; the key pastes back into Houston.
+    private func cloudProviderMenu(_ provider: ChatProvider) -> some View {
+        Menu(provider.name) {
+            ForEach(provider.models, id: \.arg) { m in
+                modelItem(ChatModelChoice(
+                    label: m.label, harness: provider.harness, arg: m.arg,
+                    provider: provider.id
+                ))
+                .disabled(!provider.compatible || !providerAuth.signedIn(provider.id))
+            }
+            if !provider.compatible {
+                Button("Models coming soon — the \(provider.name) harness "
+                    + "is in progress") {}
+                    .disabled(true)
+            }
+            Divider()
+            if providerAuth.signedIn(provider.id) {
+                Button("Sign out of \(provider.name)") {
+                    providerAuth.clearKey(for: provider.id)
+                }
+            } else if provider.harness == .gemini {
+                // Gemini: real browser OAuth through its CLI's ACP surface;
+                // the key console stays as the fallback.
+                Button("Sign in with Google…") { providerAuth.signInGemini() }
+                Button("Use an API Key…") { providerAuth.beginSignIn(provider) }
+            } else if provider.harness == .grok {
+                // Grok Build owns its own browser OAuth (`grok login`).
+                Button("Sign in to Grok…") {
+                    PromptDelivery.login(.grok, project: effectiveProject)
+                }
+            } else {
+                Button("Sign in to \(provider.name)…") {
+                    providerAuth.beginSignIn(provider)
+                }
+            }
+        }
+    }
+
+    /// Which CLI runs the send — decided by the model (each model runs on
+    /// exactly one CLI today), so the incompatible option is disabled.
+    private var harnessMenu: some View {
+        Menu {
+            harnessItem("Claude Code", .claude)
+            harnessItem("Codex", .codex)
+            harnessItem("Gemini CLI", .gemini)
+            harnessItem("Grok Build", .grok)
+        } label: {
+            chip(harnessLabel(model.harness))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Which CLI runs this chat (follows the model)")
+    }
+
+    private func harnessItem(_ label: String, _ harness: ChatHarness) -> some View {
+        Toggle(label, isOn: .constant(model.harness == harness))
+            .disabled(harness != model.harness)
+    }
+
+    private func harnessLabel(_ harness: ChatHarness) -> String {
+        switch harness {
+        case .claude: "Claude Code"
+        case .codex: "Codex"
+        case .gemini: "Gemini CLI"
+        case .grok: "Grok Build"
+        }
+    }
+
+    /// Reasoning effort, its own chip — hidden for local models (the
+    /// local server decides).
+    private var effortMenu: some View {
+        Menu {
+            Toggle("Default", isOn: Binding(
+                get: { activeEffort == nil },
+                set: { _ in effort = nil }
+            ))
+            ForEach(ChatModelChoice.efforts(for: model.harness), id: \.arg) { level in
+                Toggle(level.label, isOn: Binding(
+                    get: { activeEffort?.arg == level.arg },
+                    set: { _ in effort = level.arg }
+                ))
+            }
+        } label: {
+            chip(activeEffort?.label ?? "Effort")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Reasoning effort for this message")
     }
 
     /// Send while idle, Stop while the session's turn runs — one slot,
@@ -1326,9 +1762,8 @@ private struct ChatComposer: View {
                 .font(.system(size: 8, weight: .semibold))
         }
         .foregroundStyle(tint ?? Theme.text)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 4)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.rowHovered))
         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
     }
 
@@ -1345,7 +1780,11 @@ private struct ChatComposer: View {
                     .allowsHitTesting(false)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            TextField(placeholder, text: $draft, axis: .vertical)
+            // Suppress the placeholder while a ghost suggestion is showing:
+            // the dimmed suggestion IS the affordance (Tab accepts), and a
+            // live placeholder underneath it just printed two strings on
+            // the same line.
+            TextField(suggestion.isEmpty ? placeholder : "", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .lineLimit(1...10)
@@ -1365,13 +1804,22 @@ private struct ChatComposer: View {
                     return .handled
                 }
                 .onChange(of: draft) { _, text in refreshGhost(text) }
+                // A finished turn changes the tail (a question appears or
+                // the old one clears) — re-derive the empty-field ghost.
+                .onChange(of: ghostContext) { _, _ in refreshGhost(draft) }
+                .onAppear { refreshGhost(draft) }
         }
-        // Its own 44px well, the send button riding outside it. One line
-        // sits centered; more lines grow the well downward (to 10). The
-        // whole well is the click target for focus. No horizontal inset —
-        // the text's left edge lines up with the + circle above it.
-        .padding(.vertical, 8)
-        .frame(minHeight: 44, alignment: .leading)
+        // A text AREA, not a field: the line sits at the top of a 64px
+        // well with open space under it (more lines grow it further, to
+        // 10). The whole well is the click target for focus. No
+        // horizontal inset — the text's left edge lines up with the +
+        // circle below it.
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .padding(.horizontal, 2)
+        // Shortened to offset the extra bottom padding added under the
+        // controls, so the bar's overall height holds.
+        .frame(minHeight: 58, alignment: .topLeading)
         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         .onTapGesture { inputFocused = true }
         // The whole well is a text target — cursor says so. NOT an
@@ -1390,11 +1838,31 @@ private struct ChatComposer: View {
     }
 
     /// Debounced on-device completion; anything typed since the request
-    /// went out invalidates the answer.
+    /// went out invalidates the answer. An EMPTY field gets a suggested
+    /// reply to the assistant's pending question ("Yes, build it" — Tab
+    /// drops it into the prompt, Enter sends); a partial one gets the
+    /// continuation. Both exist only while ghostContext is non-nil, i.e.
+    /// the assistant actually asked something.
     private func refreshGhost(_ text: String) {
         suggestion = ""
         ghostTask?.cancel()
-        guard let ghostContext, text.count >= 3, !text.hasSuffix("\n") else { return }
+        guard let ghostContext else { return }
+        if text.isEmpty {
+            ghostTask = Task {
+                try? await Task.sleep(for: .milliseconds(250))
+                // Post-send the field is empty too, but the turn is
+                // running — no suggestion for a question already answered.
+                // (.settling passes: that's a FINISHED turn absorbing, the
+                // moment a fresh question lands.)
+                guard !Task.isCancelled, runningSession?.phase != .working
+                else { return }
+                let reply = await ChatTitler.suggestReply(context: ghostContext)
+                guard !Task.isCancelled, draft.isEmpty, let reply else { return }
+                suggestion = reply
+            }
+            return
+        }
+        guard text.count >= 3, !text.hasSuffix("\n") else { return }
         ghostTask = Task {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
@@ -1735,10 +2203,68 @@ struct MessageView: View {
                 )
             case let .fragment(title, _):
                 FragmentChip(title: title, accent: message.role == .user)
+            case let .image(path):
+                ChatImageBlock(path: path)
             }
         }
     }
 
+}
+
+/// An attached image in a transcript bubble: a real thumbnail (the path
+/// still travels in the message text for the CLI). Click opens the file;
+/// a deleted temp file degrades to a filename chip.
+private struct ChatImageBlock: View {
+    let path: String
+
+    /// Decoded thumbnails, keyed by path — transcripts re-render often
+    /// and screenshots are megabytes; decode each at most once.
+    @MainActor private static var cache: [String: NSImage] = [:]
+
+    private var image: NSImage? {
+        if let hit = Self.cache[path] { return hit }
+        guard let loaded = NSImage(contentsOfFile: path) else { return nil }
+        Self.cache[path] = loaded
+        return loaded
+    }
+
+    var body: some View {
+        if let image {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(
+                    maxWidth: min(280, max(80, image.size.width)),
+                    maxHeight: 220,
+                    alignment: .leading
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                        .strokeBorder(Color.black.opacity(0.15), lineWidth: 1)
+                )
+                .onTapGesture {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                }
+                .help((path as NSString).abbreviatingWithTildeInPath)
+        } else {
+            HStack(spacing: 5) {
+                Image(systemName: "photo")
+                    .font(.system(size: 10, weight: .medium))
+                Text((path as NSString).lastPathComponent)
+                    .font(Theme.Fonts.bodyMedium)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Color.white.opacity(0.8))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(Color.white.opacity(0.22))
+            )
+            .help("The image file is no longer on disk")
+        }
+    }
 }
 
 /// A capsule attachment in a chat: icon + short title. Click (or the

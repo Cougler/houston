@@ -91,7 +91,6 @@ struct StatusBarView: View {
         .padding(.leading, 24)
         .padding(.trailing, 24)
         .frame(height: 26)
-        .background(Theme.background)
         .padding(.bottom, 4)
     }
 

@@ -43,6 +43,11 @@ extension Notification.Name {
     /// Open a capsule's transcript in the right sheet (`object` is the
     /// capsule's source-file path) — posted by chips in chat transcripts.
     static let houstonOpenCapsule = Notification.Name("houstonOpenCapsule")
+    /// A chat continued under a new transcript file (context rollover,
+    /// cross-harness transplant) — `userInfo` carries "project"/"file".
+    /// The main window retargets `chatTarget` so the sidebar highlight
+    /// follows the conversation instead of pointing at the sealed file.
+    static let houstonChatRekeyed = Notification.Name("houstonChatRekeyed")
 }
 
 /// The capsule shelf, persisted to
@@ -63,16 +68,24 @@ final class CapsuleStore: ObservableObject {
     /// Mirror of `capsules` by source file — `isSealed` runs per sidebar
     /// row per render, so it must not scan the array.
     private var sealedFiles: Set<String> = []
+    /// Trivial chats (a skill run canceled at the prompt — no assistant
+    /// output) leave the sidebar WITHOUT becoming capsules: dismissed,
+    /// not sealed. Persisted so they don't resurface every launch; the
+    /// transcript on disk is never touched.
+    @Published private(set) var dismissedFiles: Set<String> = []
     private var saveScheduled = false
 
-    /// Fallback inactivity horizon for the *current* chat: a project's
-    /// newest chat seals only once it's been quiet this long AND a newer
-    /// chat exists — see `autoSealSweep`.
-    static let idleSealAfter: TimeInterval = 30 * 60
+    /// Quiet period before a session is even considered for dismissal —
+    /// a chat mid-first-exchange must never be judged negligible.
+    static let dismissAfterQuiet: TimeInterval = 30 * 60
 
     private static var fileURL: URL {
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         return URL(fileURLWithPath: dir).appendingPathComponent("capsules.json")
+    }
+    private static var dismissedURL: URL {
+        let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
+        return URL(fileURLWithPath: dir).appendingPathComponent("dismissed-chats.json")
     }
 
     private init() {
@@ -81,34 +94,64 @@ final class CapsuleStore: ObservableObject {
             capsules = stored
             sealedFiles = Set(stored.map(\.sourceFile))
         }
-        // The auto-seal heartbeat. The sweep is an in-memory timestamp
-        // compare over the cached chat index — no file reads, no model
-        // calls — so a 2-minute cadence costs nothing.
+        if let data = try? Data(contentsOf: Self.dismissedURL),
+           let stored = try? JSONDecoder().decode(Set<String>.self, from: data) {
+            dismissedFiles = stored
+        }
+        // The dismissal heartbeat. Chats are FOREVER in the sidebar now
+        // (2026-09-14, the ChatGPT mental model) — the sweep's only job
+        // is hiding sessions too slight to be conversations: canceled
+        // skill runs, one-line terminal Q&As. It never touches real
+        // chats, and a dismissal candidate costs one file read, once.
         Task { @MainActor [weak self] in
             while let self {
-                self.autoSealSweep()
+                self.autoDismissSweep()
                 try? await Task.sleep(nanoseconds: 120_000_000_000)
             }
         }
     }
 
-    /// One active chat per project: the newest chat stays open until a
-    /// newer one exists — every other chat seals into a capsule (unless
-    /// it's pinned, archived, on screen, or its agent is mid-turn).
-    private func autoSealSweep() {
-        for (project, refs) in ChatIndexStore.shared.chats {
-            let newest = refs.max { $0.modified < $1.modified }?.filePath
-            for ref in refs where ref.filePath != newest {
-                guard !isSealed(ref.filePath),
+    /// Whether the transcript on disk is too slight to list. The size
+    /// gate keeps this a stat, not a parse, for any real conversation.
+    nonisolated private static func isNegligibleOnDisk(_ ref: ChatSessionRef) -> Bool {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: ref.filePath)
+        if let size = attrs?[.size] as? Int, size > 262_144 { return false }
+        return ChatArchive.isNegligible(ChatArchive.transcript(ref))
+    }
+
+    /// Every quiet, unpinned session gets one substance check; the
+    /// negligible ones are dismissed. `checkedFiles` keeps it one read
+    /// per file per launch — a file that grows later gets re-indexed
+    /// under a new mtime, and a dismissed file that grows is un-dismissed
+    /// by the next sweep's re-check below.
+    private var checkedFiles: Set<String> = []
+    private func autoDismissSweep() {
+        for (_, refs) in ChatIndexStore.shared.chats {
+            for ref in refs {
+                guard !checkedFiles.contains(ref.filePath),
+                      Date().timeIntervalSince(ref.modified) > Self.dismissAfterQuiet,
                       !ChatMetaStore.shared.pinned.contains(ref.filePath),
-                      !ChatMetaStore.shared.archived.contains(ref.filePath),
                       activeChatFile != ref.filePath,
                       ChatSessionHub.shared.sessions[ref.filePath] == nil
                 else { continue }
-                seal(
-                    ref: ref, project: project,
-                    title: ChatTitler.shared.displayTitle(ref)
-                )
+                checkedFiles.insert(ref.filePath)
+                if Self.isNegligibleOnDisk(ref) {
+                    dismiss(file: ref.filePath)
+                }
+            }
+        }
+        // A dismissed chat that grew back into a conversation (resumed
+        // from the terminal, say) returns to the list.
+        for file in dismissedFiles {
+            guard let refs = ChatIndexStore.shared.chats.values
+                .first(where: { $0.contains { $0.filePath == file } }),
+                  let ref = refs.first(where: { $0.filePath == file }),
+                  Date().timeIntervalSince(ref.modified) < Self.dismissAfterQuiet
+            else { continue }
+            if !Self.isNegligibleOnDisk(ref) {
+                dismissedFiles.remove(file)
+                checkedFiles.remove(file)
+                scheduleSave()
             }
         }
     }
@@ -123,9 +166,25 @@ final class CapsuleStore: ObservableObject {
         capsules.first { $0.sourceFile == file }
     }
 
-    /// Sealed chats leave the sidebar's open list — this is the filter.
+    /// Legacy: whether a capsule exists for this file. The sidebar no
+    /// longer filters on it — chats stay listed forever; only
+    /// `isDismissed` hides anything.
     func isSealed(_ file: String) -> Bool {
         sealedFiles.contains(file)
+    }
+
+    /// Sessions too slight to list — the sidebar's only hide filter.
+    func isDismissed(_ file: String) -> Bool {
+        dismissedFiles.contains(file)
+    }
+
+    /// Hide a trivial chat without minting a capsule. Reversed only by
+    /// deleting the transcript (`forget`) — there is nothing in these
+    /// worth surfacing again.
+    func dismiss(file: String) {
+        guard !dismissedFiles.contains(file) else { return }
+        dismissedFiles.insert(file)
+        scheduleSave()
     }
 
     func seal(ref: ChatSessionRef, project: String, title: String) {
@@ -147,11 +206,13 @@ final class CapsuleStore: ObservableObject {
         scheduleSave()
     }
 
-    /// A deleted transcript takes its capsule with it.
+    /// A deleted transcript takes its capsule (or dismissal) with it.
     func forget(file: String) {
-        guard sealedFiles.contains(file) else { return }
+        guard sealedFiles.contains(file) || dismissedFiles.contains(file)
+        else { return }
         capsules.removeAll { $0.sourceFile == file }
         sealedFiles.remove(file)
+        dismissedFiles.remove(file)
         scheduleSave()
     }
 
@@ -168,11 +229,15 @@ final class CapsuleStore: ObservableObject {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(capsules) else { return }
         try? FileManager.default.createDirectory(
             at: Self.fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try? data.write(to: Self.fileURL, options: .atomic)
+        if let data = try? JSONEncoder().encode(capsules) {
+            try? data.write(to: Self.fileURL, options: .atomic)
+        }
+        if let data = try? JSONEncoder().encode(dismissedFiles) {
+            try? data.write(to: Self.dismissedURL, options: .atomic)
+        }
     }
 }

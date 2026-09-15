@@ -13,15 +13,20 @@ enum Theme {
     /// The sidebar panel (and the chat composer, which matches it) — a
     /// step lighter than the window chrome so the column reads as its own
     /// surface.
-    static let sidebarFill = Color(light: 0xF1F1F1, dark: 0x121419)
-    /// The empty state's sky — a step off the chrome in each direction:
-    /// darker than the sidebar in light mode, lighter in dark mode.
-    static let emptyStateBackground = Color(light: 0x000000, dark: 0x000000)
-    /// The sky is black in both appearances, so text sitting directly on it
-    /// (empty state, onboarding chrome) can't use the appearance-tracking
-    /// text tokens — light mode's near-black text would vanish.
-    static let skyText = Color(light: 0xE8E8E8, dark: 0xE8E8E8)
-    static let skyTextSecondary = Color(light: 0x9A9A9A, dark: 0x9A9A9A)
+    static let sidebarFill = Color(light: 0xEDEDED, dark: 0x0E1015)
+    /// The sidebar's top tiles: a raised fill (dark #1D1E22), hover and
+    /// active a step DARKER than the resting fill.
+    static let tileFill = Color(light: 0xF7F7F7, dark: 0x1D1E22)
+    static let tileHovered = Color(light: 0xECECEC, dark: 0x17181B)
+    static let tileActive = Color(light: 0xE2E2E2, dark: 0x111114)
+    /// The empty state's sky — follows the appearance (2026-09-14): a
+    /// daylight gray matching the chat page in light mode, night black in
+    /// dark. The star field's tokens (heading, orbitRing) already track.
+    static let emptyStateBackground = Color(light: 0xEBEBEB, dark: 0x000000)
+    /// Text sitting directly on the sky (empty state, onboarding chrome) —
+    /// tracks the appearance along with it.
+    static let skyText = Color(light: 0x111111, dark: 0xE8E8E8)
+    static let skyTextSecondary = Color(light: 0x666666, dark: 0x9A9A9A)
     /// Floating cards (skills panel, rail flyouts). Light mode matches the
     /// sidebar chrome; dark mode steps lighter to separate from it.
     static let panelFill = Color(light: 0xEBEBEB, dark: 0x262626)

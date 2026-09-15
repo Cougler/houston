@@ -188,6 +188,38 @@ final class TerminalSessionManager: NSObject, ObservableObject {
         _controller?.setTheme(Self.resolvedTheme(named: name))
     }
 
+    /// The resolved theme's background as a chrome color — the full-bleed
+    /// band the floating terminal controls sit on must match the terminal
+    /// surface exactly. Catalog themes carry one background for both
+    /// appearances; the fallback mirrors `designTheme`'s pair.
+    static func themeBackgroundColor(named name: String) -> Color {
+        if let rgb = catalogBackgroundRGB(named: name) {
+            return Color(light: rgb, dark: rgb)
+        }
+        return Color(light: 0xE0E0E0, dark: 0x181818)
+    }
+
+    /// Whether that background reads dark — chrome glyphs over it flip to
+    /// their dark-appearance colors when it does.
+    static func themeBackgroundIsDark(named name: String, darkAppearance: Bool) -> Bool {
+        guard let rgb = catalogBackgroundRGB(named: name) else {
+            // Design default follows the appearance.
+            return darkAppearance
+        }
+        let r = Double((rgb >> 16) & 0xFF)
+        let g = Double((rgb >> 8) & 0xFF)
+        let b = Double(rgb & 0xFF)
+        return (0.299 * r + 0.587 * g + 0.114 * b) < 128
+    }
+
+    private static func catalogBackgroundRGB(named name: String) -> UInt32? {
+        guard !name.isEmpty, let def = GhosttyThemeCatalog.theme(named: name)
+        else { return nil }
+        return UInt32(
+            def.background.replacingOccurrences(of: "#", with: ""), radix: 16
+        )
+    }
+
     // MARK: - Tabs
 
     /// Opens a project's shell if it has none. Idempotent: clicking back to a

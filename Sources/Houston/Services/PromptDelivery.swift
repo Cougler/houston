@@ -33,9 +33,20 @@ enum PromptDelivery {
     /// pane busy with a *different* agent gets a fresh tab so the command
     /// can't land inside the wrong REPL.
     static func login(_ harness: ChatHarness, project path: String) {
+        // Gemini's sign-in is Google OAuth driven through the CLI's ACP
+        // surface, not a terminal command — hand it to ProviderAuthStore.
+        if harness == .gemini {
+            Task { @MainActor in ProviderAuthStore.shared.signInGemini() }
+            return
+        }
         let manager = TerminalSessionManager.shared
         if !manager.hasPane(for: path) { _ = manager.pane(for: path) }
-        let command = harness == .claude ? "claude /login\n" : "codex login\n"
+        let command: String
+        switch harness {
+        case .claude: command = "claude /login\n"
+        case .grok: command = "grok login --oauth\n"
+        default: command = "codex login\n"
+        }
         let running = manager.agents[path]
         var tabID: UUID?
         if harness == .claude, running == .claude {

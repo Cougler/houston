@@ -10,6 +10,11 @@ struct EmptyStateView: View {
     /// screen's -56 lift so the crossfade is static, then animates it to 0
     /// in the same spring that slides the sidebar in — one diagonal glide.
     var skyLift: CGFloat = 0
+    /// Horizontal shift for the same contents. The sky now spans the whole
+    /// window (the sidebar floats over it), so the eye centers against the
+    /// window — the owner passes half the sidebar column's width so the
+    /// solar system lands on the WINDOW's center, not the detail column's.
+    var skyShift: CGFloat = 0
 
     /// Drives the entrance; reset on every appearance because the view is
     /// rebuilt each time the selection empties.
@@ -38,7 +43,7 @@ struct EmptyStateView: View {
             .padding(.bottom, 48)
             .reveal(appeared, delay: 0.4)
         }
-        .offset(y: skyLift)
+        .offset(x: skyShift, y: skyLift)
         .background(Theme.emptyStateBackground)
         .clipped()
         .onAppear {
@@ -308,24 +313,29 @@ private struct Comet: View {
 
     private var endX: CGFloat { -startX }
 
+    /// Ice reads bright on the night sky, deeper teal on the daylight one —
+    /// the near-white nucleus would vanish on light gray.
+    private static let ice = Color(light: 0x4E9AAB, dark: 0x8FD3D9)
+    private static let nucleus = Color(light: 0x2E7A8C, dark: 0xD9EEF5)
+
     var body: some View {
         ZStack {
             // Tail fades away behind the head (which rides at +x).
             Capsule()
                 .fill(LinearGradient(
-                    colors: [.clear, Color(hex: 0x8FD3D9).opacity(0.7)],
+                    colors: [.clear, Self.ice.opacity(0.7)],
                     startPoint: .leading,
                     endPoint: .trailing
                 ))
                 .frame(width: 72, height: 2)
             // Coma glow, then the icy nucleus.
             Circle()
-                .fill(Color(hex: 0x8FD3D9).opacity(0.55))
+                .fill(Self.ice.opacity(0.55))
                 .frame(width: 8, height: 8)
                 .blur(radius: 4)
                 .offset(x: 36)
             Circle()
-                .fill(Color(hex: 0xD9EEF5))
+                .fill(Self.nucleus)
                 .frame(width: 3.5, height: 3.5)
                 .offset(x: 36)
         }

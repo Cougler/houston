@@ -123,6 +123,34 @@ final class ChatTitler: ObservableObject {
         #endif
     }
 
+    /// The empty composer's suggested reply, offered only when the
+    /// assistant's last message ended in a question — "Yes, build it"
+    /// grade, Tab drops it into the prompt for the user to send.
+    static func suggestReply(context: String) async -> String? {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *),
+              SystemLanguageModel.default.availability == .available else { return nil }
+        let session = LanguageModelSession(instructions: """
+        A coding assistant just asked the user a question. Reply with \
+        ONLY the user's single most likely answer — short and direct, \
+        like "Yes, build it" or "Use the first option". Under 8 words, \
+        no quotes. Reply with nothing if the question has no obvious \
+        short answer.
+        """)
+        guard let response = try? await session.respond(
+            to: "Conversation tail:\n\(context)\n\nThe user's likely reply:"
+        ) else { return nil }
+        let text = response.content
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'"))
+        guard !text.isEmpty, text.count <= 60 else { return nil }
+        return text
+        #else
+        return nil
+        #endif
+    }
+
     /// The chat composer's ghost-text autocomplete, same on-device model.
     /// (Claude Code's own TUI autocomplete isn't exposed anywhere, so this
     /// is Houston's equivalent, not a passthrough.)

@@ -81,6 +81,109 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   send, whole-file re-parse every 1.2s, no permissions, no cancel. The
   transcript file is re-read exactly once per finished turn; the live turn
   renders from the stream (`LiveTurnView`, approval cards, Stop).
+- **Chat lanes + warmth (2026-09-13).** Chat processes are WARM:
+  `ChatSessionHub` keeps them alive under a 15-min TTL sweep (4 idle max,
+  the on-screen chat exempt) and `prewarm` boots the CLI on chat *open*,
+  so the first send skips cold start + `--resume` load — the reason chat
+  used to feel slower than a terminal pane. Turn-end absorption is
+  LEVEL-triggered (`ChatAgentSession.phase`: working / settling / idle,
+  `hasUnabsorbedTurn`), never a bare `.onChange(of: completedTurns)` — an
+  edge fired while the observer is unmounted is lost, and the reply
+  didn't render until the user navigated away and back. Context rollover:
+  past 80% of the window (Claude-only; codex publishes no usage) the chat
+  seals into a capsule and continues in a fresh session seeded with an
+  on-device handoff brief + verbatim tail + the sealed transcript's path
+  (hidden in the UI by the handoff prefix-collapse, kept for the model);
+  `.houstonChatRekeyed` retargets `chatTarget` so the sidebar follows.
+  **Chats are FOREVER in the sidebar (2026-09-14)** — the ChatGPT mental
+  model won; do not resurface "capsules" as user-facing objects. The
+  engine work (warmth, rollover, chains) is invisible: a rollover chain
+  presents as ONE chat (head listed, superseded segments hidden via
+  `ChatMetaStore.continuations`, walked back per-click by "Show earlier
+  conversation" with the seam deduped); the only things hidden from the
+  list are negligible sessions (`ChatArchive.isNegligible` — husks and
+  sub-1k single exchanges, dismissed by `CapsuleStore.autoDismissSweep`,
+  reversible if the file grows back) and superseded segments. ✕ archives
+  (never "seals"); any chat row drags into a composer as a context chip
+  (transient `ChatCapsule.referenceText` — the capsule TYPE survives as
+  plumbing for chips/markers, not as a shelf). Sidebar chat rows wear
+  the phase (filled accent bubble while busy), driven by
+  `ChatSessionHub.activityTick`; the busy flag rides in the row's
+  `contentKey`.
+- `ProviderAuth` — third-party cloud models (Grok/xAI, DeepSeek, Gemini)
+  in the chat's model menu, riding codex's custom-provider rail exactly
+  like MLX: `model_providers.<id>.*` overrides + `modelProvider` on the
+  thread, API key delivered as an env var on the spawn (`env_key`), never
+  written to config. Keys live 0600 in `Application Support/Houston/
+  provider-keys.json`; sign-in opens the provider's key console in the
+  browser and the key pastes back (Claude signs in via `claude /login`
+  in a home terminal pane; OpenAI via `codex login`, which round-trips
+  the browser itself). **codex only speaks `wire_api=responses`** —
+  `"chat"` is a load-time error since 0.14x — so a provider needs an
+  OpenAI-compat `/responses` endpoint: xAI has one (probed: 422 ≠ 404),
+  Gemini does not (its models sit disabled behind `compatible: false`),
+  DeepSeek is wired optimistically (catch-all 401, unprovable keyless).
+  Both codex provider configs verified to load (initialize answers with
+  a dummy key — the MLX config bug was a load-time error, so this
+  catches typos). **Gemini's real path is the gemini CLI's ACP surface**
+  (`gemini --acp`, installed via brew): JSON-RPC over stdio, handshake
+  verified live — `authenticate {methodId: "oauth-personal"}` drives
+  Google's browser OAuth and answers when the user finishes
+  (`ProviderAuthStore.signInGemini`), creds cached by the CLI in
+  `~/.gemini`. Sessions land at `~/.gemini/tmp/<dir>/chats/*.jsonl` as
+  an op-log (`$set` patches with typed messages). The full `.gemini`
+  chat harness (ACP session/prompt streaming) is NOT built yet — the
+  assistant/tool stream shapes are only observable in an AUTHED session,
+  and chat plumbing here is never built blind (see the stream-json
+  lesson above).
+- **Gemini chat harness — ACP driver (`ChatHarness.gemini`), 2026-09-14.**
+  The third harness: `gemini --acp` over JSON-RPC/stdio, driven in
+  `ChatAgentSession` alongside claude/codex. Handshake: `initialize` →
+  `session/new` (or `session/load` on resume) → `session/prompt`;
+  streamed via `session/update` notifications (`agent_message_chunk`
+  content → text, `tool_call` → chips, `usage_update` → a REAL context
+  meter, `used`/`size` — unlike codex which publishes none); permissions
+  via the `session/request_permission` server-request (respond
+  `{outcome:{outcome:"selected",optionId}}`); cancel via `session/cancel`.
+  Model is pinned on the spawn (`-m <arg>`); a change respawns like
+  claude. **All message shapes were extracted from the CLI's bundled zod
+  schema** (`.../@google/gemini-cli/bundle/gemini-*.js`) — the
+  authoritative source, so NOT built blind; the wire framing (initialize
+  + session/new id-matching, the unauthed "API key missing" error path)
+  was verified live. **Persistence is Houston-owned**, NOT Gemini's
+  op-log: turns are written from the live stream to `Application Support/
+  Houston/gemini-chats/<munged-cwd>/<acpSessionId>.jsonl` in a trivial
+  one-message-per-line native format (`ChatArchive.geminiTranscript` /
+  `appendGeminiTurn` / `exportToGemini`), parsed by verified code — so no
+  unverifiable op-log parser. Login is Google OAuth through the ACP
+  `authenticate` surface (`ProviderAuthStore.signInGemini`), NOT a
+  terminal command (PromptDelivery.login special-cases it). **Not yet
+  smoke-tested end-to-end** — a real streaming turn needs a signed-in
+  Google account (shapes are schema-derived; the authed round trip is
+  unrun here).
+- **Grok chat harness — same ACP driver (`ChatHarness.grok`), 2026-09-14.**
+  xAI open-sourced **Grok Build** (`xai-org/grok-build`, binary `grok`),
+  an official coding agent that speaks ACP — so it rides the EXACT driver
+  Gemini uses. The `.gemini`/`.grok` paths are unified: `ChatHarness.isACP`
+  gates a shared `sendACP`/`ensureACPTransport`/`handleACP` in
+  `ChatAgentSession` and a shared `acpChatsDir`/`acpTranscript`/
+  `appendACPTurn`/`exportToACP` store (per-harness subdir under
+  `Application Support/Houston/<harness>-chats/`). Only the spawn differs:
+  Gemini `gemini --acp -m <model>`, Grok `grok --model <model> agent
+  stdio` (global flags lead the subcommand). Install: `curl -fsSL
+  https://x.ai/cli/install.sh | bash` → `~/.grok/bin/grok`. Grok Build
+  owns its OWN sandbox + tool loop + auth (so none of the hand-rolled-
+  harness guardrail concerns apply); login is browser OAuth via `grok
+  login --oauth` in a terminal pane (`PromptDelivery.login` case),
+  detected by `~/.grok/auth.json`. The `grok --model … agent stdio`
+  spawn + ACP `initialize` handshake were verified live; a full streaming
+  turn still needs a signed-in xAI account. **The lesson: standardizing
+  the SECOND ACP agent (Grok) onto Gemini's driver was nearly free — new
+  providers that speak ACP are a spawn command + a provider entry, not a
+  new harness.** codex-rail providers (raw `model_providers.*` +
+  Responses wire) stay for OpenAI-compatible key-only providers; codex
+  itself still 422s xAI's Responses tools, which is why Grok goes through
+  Grok Build's ACP agent, not the codex rail.
 - `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to
@@ -158,6 +261,12 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   with no code change. The inverse — allowlisting 1M models — is what broke
   Opus 5 and pinned its bar at 100%.
 - **`Theme.Context.color(for:)` takes a fraction (0–1), not a percentage.**
+- **stream-json `result.usage` is CUMULATIVE across the turn's API calls** —
+  a 3-call turn reported ~86k while the real context footprint was ~29k
+  (measured). Never feed it to the chat context meter: the last *assistant*
+  message's usage is the true occupancy. `result.modelUsage` does carry each
+  model's exact `contextWindow`, which `ChatAgentSession` prefers over the
+  `contextWindow(for:)` name-pattern guess.
 - **Spawned panes MUST get a scrubbed environment.** If Houston is launched from
   a shell already inside a claude session, panes inherit
   `CLAUDE_CODE_CHILD_SESSION`, treat themselves as sub-sessions, and **silently

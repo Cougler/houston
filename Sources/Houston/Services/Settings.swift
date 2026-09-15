@@ -5,6 +5,9 @@ extension Notification.Name {
     /// Settings changed by a path outside MainWindowView (the menu-bar
     /// Settings menu) — the window re-reads and applies.
     static let houstonSettingsChanged = Notification.Name("HoustonSettingsChanged")
+    /// Run a CLI login flow (e.g. `claude /login`) in a home-directory
+    /// terminal pane — posted by ProviderAuthStore, handled by the window.
+    static let houstonRunLoginCommand = Notification.Name("HoustonRunLoginCommand")
     /// The menu bar asked for the Claude status-bar consent prompt.
     static let houstonShowStatusFeedPrompt = Notification.Name("HoustonShowStatusFeedPrompt")
     /// The menu bar's "All Themes…" asked for the searchable theme picker,

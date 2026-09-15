@@ -27,7 +27,10 @@ struct AnnotationRowView: View {
         // sits high in the hover pill. The strip's 21pt (odd) height keeps
         // odd-height text centering on whole pixels.
         HStack(alignment: .center, spacing: 10) {
+            // Carded (tasks sheet): the checkbox centers in the same
+            // fixed 26pt leading slot as the sheet lists' icons.
             checkbox
+                .frame(width: carded ? 26 : 16)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if editing {
@@ -80,11 +83,23 @@ struct AnnotationRowView: View {
         }
         .padding(.horizontal, carded ? 10 : 12)
         .padding(.vertical, carded ? 8 : 6)
+        // Carded rows share the sheet lists' anatomy: 48pt floor (a long
+        // task still grows), hover pill, full-width hairline underneath
+        // that hides beneath the pill.
+        .frame(minHeight: carded ? 48 : 0)
         .background(
-            RoundedRectangle(cornerRadius: carded ? Theme.radiusSurface : Theme.radiusControl)
-                .fill(hovered ? Theme.rowHovered : (carded ? Theme.panelFill : .clear))
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                .fill(hovered ? Theme.rowHovered : .clear)
                 .padding(.horizontal, carded ? 0 : 6)
         )
+        .overlay(alignment: .bottom) {
+            if carded {
+                Rectangle()
+                    .fill(Theme.borderSidebar)
+                    .frame(height: 1)
+                    .opacity(hovered ? 0 : 1)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
     }
@@ -205,24 +220,21 @@ struct AnnotationsSheetPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
+                // Flush rows (no spacing) so the hairlines read as one
+                // linear list, like the SERVERS page.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if store.items.isEmpty {
                         Text("Inspect an element in a web preview, then “Add to Tasks” — or type a task below.")
                             .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
-                            .padding(.horizontal, 2)
+                            .padding(.horizontal, 10)
                             .padding(.top, 4)
                     }
                     ForEach(store.open) { item in
                         row(item)
                     }
                     if !store.doneItems.isEmpty {
-                        Text("DONE")
-                            .font(Theme.Fonts.label)
-                            .kerning(0.5)
-                            .foregroundStyle(Theme.heading)
-                            .padding(.horizontal, 2)
-                            .padding(.top, 10)
+                        sheetSectionLabel("DONE")
                         ForEach(store.doneItems) { item in
                             row(item).opacity(0.55)
                         }
@@ -362,17 +374,33 @@ struct AllTasksPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    RemindersRow(attention: trackedAttention, action: onOpenReminders)
+                // The same linear list as the SERVERS page (2026-09-14):
+                // Reminders on top, then a row per project pushing into
+                // its task page — the tasks themselves live there.
+                VStack(alignment: .leading, spacing: 0) {
+                    SheetListRow(
+                        title: "Reminders",
+                        subtitle: trackedAttention > 0
+                            ? "\(trackedAttention) need attention"
+                            : "Tracked obligations",
+                        dot: trackedAttention > 0,
+                        onTap: onOpenReminders,
+                        icon: {
+                            Image(systemName: "bell")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    )
+                    sheetSectionLabel("PROJECTS")
                     if stores.isEmpty {
                         Text("No tasks yet. Queue changes from a web preview, or type one below.")
                             .font(Theme.Fonts.secondary)
                             .foregroundStyle(Theme.textSecondary)
-                            .padding(.horizontal, 2)
+                            .padding(.horizontal, 10)
                             .padding(.top, 4)
                     }
                     ForEach(stores, id: \.projectPath) { store in
-                        ProjectTasksSection(store: store) {
+                        ProjectTaskRow(store: store) {
                             onOpenProject(store.projectPath)
                         }
                     }
@@ -479,117 +507,35 @@ struct AllTasksPanel: View {
     }
 }
 
-/// The All Tasks root's Reminders entry — a card row that pushes the
-/// Tracked reminders page, carrying the attention dot and count so due
-/// items stay visible without opening it.
-private struct RemindersRow: View {
-    let attention: Int
-    let action: () -> Void
-
-    @State private var hovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "bell")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary)
-                Text("Reminders")
-                    .font(Theme.Fonts.bodyMedium)
-                    .foregroundStyle(Theme.text)
-                if attention > 0 {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Theme.dotDegraded)
-                            .frame(width: 5, height: 5)
-                        Text("\(attention)")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.heading)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                    .fill(hovered ? Theme.rowHovered : Theme.panelFill)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .help("Tracked reminders")
-    }
-}
-
-/// One project's slice of the All Tasks sheet — its own view so each
-/// store's changes re-render just its section.
-private struct ProjectTasksSection: View {
+/// One project's row in the All Tasks root — its own view so each
+/// store's count changes re-render just its row. The tasks themselves
+/// live in the project's pushed page.
+private struct ProjectTaskRow: View {
     @ObservedObject var store: AnnotationStore
     let onOpen: () -> Void
 
-    @State private var headerHovered = false
-
     var body: some View {
         if !store.items.isEmpty {
-            Button(action: onOpen) {
-                HStack(spacing: 6) {
-                    Text((store.projectPath as NSString).lastPathComponent)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(headerHovered ? Theme.link : Theme.text)
-                        .lineLimit(1)
-                    if !store.open.isEmpty {
-                        Text("\(store.open.count)")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.textSecondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Theme.panelFill))
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(headerHovered ? Theme.link : Theme.heading)
-                    Spacer(minLength: 0)
+            SheetListRow(
+                title: (store.projectPath as NSString).lastPathComponent,
+                subtitle: subtitle,
+                onTap: onOpen,
+                icon: {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                .padding(.horizontal, 2)
-                .padding(.top, 12)
-                .padding(.bottom, 2)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { headerHovered = $0 }
+            )
             .help("Open this project's tasks")
-            ForEach(store.open) { item in
-                row(item)
-            }
-            ForEach(store.doneItems) { item in
-                row(item).opacity(0.55)
-            }
         }
     }
 
-    private func row(_ item: Annotation) -> some View {
-        AnnotationRowView(
-            item: item,
-            projectPath: store.projectPath,
-            carded: true,
-            onSend: {
-                PromptDelivery.send(
-                    AnnotationPrompts.compose(item, projectRoot: store.projectPath),
-                    toProject: store.projectPath
-                )
-                store.markSent(item.id)
-            },
-            onToggleDone: {
-                item.done ? store.markUndone(item.id) : store.markDone(item.id)
-            },
-            onDelete: { store.remove(item.id) },
-            onEdit: { store.updateComment(item.id, comment: $0) }
-        )
+    private var subtitle: String {
+        switch store.open.count {
+        case 0: "All done"
+        case 1: "1 open task"
+        case let n: "\(n) open tasks"
+        }
     }
 }
 

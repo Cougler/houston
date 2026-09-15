@@ -387,8 +387,8 @@ struct ComingSoonBadge: View {
 }
 
 /// The server-rack glyph from `Resources/icons/servers.svg`, drawn as a path
-/// so it tints like an SF Symbol: two rounded units with power dashes,
-/// stroked at the SVG's 1.5pt (scaled from its 24pt box).
+/// so it tints like an SF Symbol: two rounded units with a power dash
+/// each, stroked at the SVG's 1pt (scaled from its 18pt box).
 struct ServerGlyph: View {
     var color: Color
     var size: CGFloat = 16
@@ -398,7 +398,7 @@ struct ServerGlyph: View {
             .stroke(
                 color,
                 style: StrokeStyle(
-                    lineWidth: 1.5 * size / 24,
+                    lineWidth: 1.1 * size / 18,
                     lineCap: .round,
                     lineJoin: .round
                 )
@@ -409,18 +409,96 @@ struct ServerGlyph: View {
 
 private struct ServerGlyphShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let s = rect.width / 24
+        let s = rect.width / 18
         var p = Path()
-        for y: CGFloat in [4.5, 13.5] {
+        for y: CGFloat in [3.375, 10.125] {
             p.addRoundedRect(
-                in: CGRect(x: 3 * s, y: y * s, width: 18 * s, height: 6 * s),
-                cornerSize: CGSize(width: 1.2 * s, height: 1.2 * s)
+                in: CGRect(x: 2.25 * s, y: y * s, width: 13.5 * s, height: 4.5 * s),
+                cornerSize: CGSize(width: 0.8 * s, height: 0.9 * s)
             )
-            p.move(to: CGPoint(x: 6 * s, y: (y + 3) * s))
-            p.addLine(to: CGPoint(x: 8 * s, y: (y + 3) * s))
+            p.move(to: CGPoint(x: 4.5 * s, y: (y + 2.25) * s))
+            p.addLine(to: CGPoint(x: 6 * s, y: (y + 2.25) * s))
         }
         return p
     }
+}
+
+/// A linear right-sheet list row, shared by the SERVERS and TASKS pages:
+/// 48pt tall, icon centered in a fixed 26pt leading slot, title over
+/// subtitle, a full-width hairline underneath that hides beneath the
+/// hover pill, and a trailing chevron that firms up on hover.
+struct SheetListRow<Icon: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    var titleTint: Color = Theme.text
+    /// Amber attention dot beside the title.
+    var dot: Bool = false
+    let onTap: () -> Void
+    @ViewBuilder let icon: () -> Icon
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 10) {
+                icon()
+                    .frame(width: 26, height: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(titleTint)
+                            .lineLimit(1)
+                        if dot {
+                            Circle()
+                                .fill(Theme.dotDegraded)
+                                .frame(width: 5, height: 5)
+                        }
+                    }
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(Theme.Fonts.secondary)
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.heading)
+                    .opacity(hovered ? 1 : 0.4)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 48)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(hovered ? Theme.rowHovered : .clear)
+            )
+            // The divider hides under the hover pill instead of cutting
+            // through it.
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Theme.borderSidebar)
+                    .frame(height: 1)
+                    .opacity(hovered ? 0 : 1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+    }
+}
+
+/// The caps section label above a sheet list's rows ("RUNNING",
+/// "PROJECTS", …).
+func sheetSectionLabel(_ title: String) -> some View {
+    Text(title)
+        .font(Theme.Fonts.label)
+        .kerning(0.5)
+        .foregroundStyle(Theme.heading)
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
 }
 
 /// A bundled SVG icon (Resources/icons/<name>.svg) rendered as a template
@@ -442,7 +520,24 @@ struct SVGIcon: View {
 
     @MainActor private static var cache: [String: NSImage] = [:]
 
-    @MainActor private static func template(named name: String) -> NSImage? {
+    /// Full-color bundled art (the rail's app icon) — loaded as-is, no
+    /// template masking, so its own colors survive.
+    @MainActor static func flat(named name: String) -> NSImage? {
+        if let hit = cache["flat:\(name)"] { return hit }
+        let image = ["png", "svg"].lazy
+            .compactMap { ext in
+                Bundle.module.resourceURL
+                    .map { $0.appendingPathComponent("icons/\(name).\(ext)") }
+                    .flatMap { NSImage(contentsOf: $0) }
+            }
+            .first
+        guard let image else { return nil }
+        cache["flat:\(name)"] = image
+        return image
+    }
+
+    // Exposed for non-square art (the sidebar's Houston wordmark).
+    @MainActor static func template(named name: String) -> NSImage? {
         if let hit = cache[name] { return hit }
         // SVG first, PNG as the fallback (alpha-masked art templates the
         // same way).

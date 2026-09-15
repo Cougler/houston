@@ -4,6 +4,18 @@ import Foundation
 enum ChatHarness: String {
     case claude = "Claude"
     case codex = "Codex"
+    /// Gemini CLI, driven over ACP (Zed's Agent Client Protocol). Its
+    /// transcript is Houston-owned — written from the live ACP stream in
+    /// a native one-message-per-line format (Gemini's own on-disk store
+    /// is an op-log Houston doesn't read).
+    case gemini = "Gemini"
+    /// Grok Build (`grok agent stdio`) — xAI's official coding agent,
+    /// also ACP, so it rides the exact same driver + Houston-owned
+    /// transcript store as Gemini.
+    case grok = "Grok"
+
+    /// Harnesses driven over ACP (shared driver + transcript store).
+    var isACP: Bool { self == .gemini || self == .grok }
 }
 
 /// One session file on disk, indexed for the chat browser's list.
@@ -31,6 +43,10 @@ struct ChatMessage: Identifiable {
         /// along for the model (and transplants), but only the short
         /// title renders, as a chip.
         case fragment(title: String, text: String)
+        /// An image the user attached. The path travels in the message
+        /// text (both CLIs read images straight off disk), but the chat
+        /// renders a thumbnail, not the path.
+        case image(path: String)
 
         var id: String {
             switch self {
@@ -39,6 +55,7 @@ struct ChatMessage: Identifiable {
             case let .tool(name, detail): "x:\(name):\(detail.hashValue)"
             case let .capsule(_, file): "cap:\(file.hashValue)"
             case let .fragment(title, _): "frag:\(title.hashValue)"
+            case let .image(path): "img:\(path.hashValue)"
             }
         }
     }
@@ -65,12 +82,171 @@ enum ChatArchive {
     // MARK: - Session index
 
     static func sessions(for projectPath: String) -> [ChatSessionRef] {
-        var out = claudeSessions(for: projectPath) + codexSessions(for: projectPath)
+        var out = claudeSessions(for: projectPath)
+            + codexSessions(for: projectPath)
+            + acpSessions(for: projectPath, harness: .gemini)
+            + acpSessions(for: projectPath, harness: .grok)
         out.sort { $0.modified > $1.modified }
         return out
     }
 
     private static var home: String { NSHomeDirectory() }
+
+    // MARK: - ACP harnesses (Houston-owned native transcript)
+
+    /// Houston writes ACP chats itself (Gemini, Grok — see
+    /// `ChatHarness.isACP`): one JSON message per line under Application
+    /// Support, keyed by the ACP session id. Per-harness subdir; parallels
+    /// `claudeProjectDir`'s cwd-munging so the list finds a project's
+    /// chats the same way.
+    static func acpChatsDir(for projectPath: String, harness: ChatHarness) -> String {
+        let munged = String(projectPath.map { $0.isLetter || $0.isNumber ? $0 : "-" })
+        let base = ("~/Library/Application Support/Houston/"
+            + harness.rawValue.lowercased() + "-chats" as String).expandingTildePath
+        return base + "/" + munged
+    }
+
+    static func acpSessionFile(
+        for projectPath: String, id: String, harness: ChatHarness
+    ) -> String {
+        acpChatsDir(for: projectPath, harness: harness) + "/" + id + ".jsonl"
+    }
+
+    private static func acpSessions(
+        for projectPath: String, harness: ChatHarness
+    ) -> [ChatSessionRef] {
+        let dir = acpChatsDir(for: projectPath, harness: harness)
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var refs: [ChatSessionRef] = []
+        for name in names where name.hasSuffix(".jsonl") {
+            let path = dir + "/" + name
+            let attributes = (try? fm.attributesOfItem(atPath: path)) ?? [:]
+            let mtime = attributes[.modificationDate] as? Date ?? .distantPast
+            let messages = acpTranscript(path: path)
+            guard let first = messages.first(where: { $0.role == .user }),
+                  let title = firstText(first) else { continue }
+            refs.append(ChatSessionRef(
+                harness: harness, filePath: path,
+                title: condense(title), modified: mtime
+            ))
+        }
+        return refs
+    }
+
+    private static func firstText(_ message: ChatMessage) -> String? {
+        for block in message.blocks {
+            if case let .text(text) = block, !text.isEmpty { return text }
+        }
+        return nil
+    }
+
+    /// Append one finished exchange to an ACP chat's native transcript,
+    /// creating the file (with its directory) on the first turn. Called
+    /// from the ACP driver at turn end — the same "the transcript file IS
+    /// the chat" contract the other harnesses honor, just Houston-written.
+    static func appendACPTurn(
+        projectPath: String, id: String, harness: ChatHarness,
+        user: String, assistant: [ChatMessage.Block]
+    ) {
+        let path = acpSessionFile(for: projectPath, id: id, harness: harness)
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var lines = ""
+        if let line = encodeGemini(role: "user", blocks: userBlocks(user)) {
+            lines += line + "\n"
+        }
+        if let line = encodeGemini(role: "assistant", blocks: assistant) {
+            lines += line + "\n"
+        }
+        guard !lines.isEmpty, let data = lines.data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    private static func encodeGemini(
+        role: String, blocks: [ChatMessage.Block]
+    ) -> String? {
+        var encoded: [[String: Any]] = []
+        for block in blocks {
+            switch block {
+            case let .text(text):
+                encoded.append(["t": "text", "v": text])
+            case let .code(code, lang):
+                encoded.append(["t": "code", "v": code, "lang": lang ?? ""])
+            case let .tool(name, detail):
+                encoded.append(["t": "tool", "name": name, "detail": detail])
+            default:
+                break
+            }
+        }
+        guard !encoded.isEmpty else { return nil }
+        let obj: [String: Any] = ["role": role, "blocks": encoded]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let line = String(data: data, encoding: .utf8) else { return nil }
+        return line
+    }
+
+    /// Write a whole transcript as a new ACP chat (a fork/branch) —
+    /// returns the file path, or nil if nothing renderable. A fresh id is
+    /// minted; the ACP session it never had is fine (a fork is read-only
+    /// history until continued, which starts a new ACP session anyway).
+    static func exportToACP(
+        _ messages: [ChatMessage], projectPath: String, harness: ChatHarness
+    ) -> String? {
+        let id = UUID().uuidString
+        let path = acpSessionFile(for: projectPath, id: id, harness: harness)
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        var out = ""
+        for message in messages {
+            let role = message.role == .user ? "user" : "assistant"
+            if let line = encodeGemini(role: role, blocks: message.blocks) {
+                out += line + "\n"
+            }
+        }
+        guard !out.isEmpty else { return nil }
+        try? out.write(toFile: path, atomically: true, encoding: .utf8)
+        return path
+    }
+
+    private static func acpTranscript(path: String) -> [ChatMessage] {
+        var messages: [ChatMessage] = []
+        scanLines(path: path, maxBytes: .max) { obj in
+            guard let role = obj["role"] as? String,
+                  let rawBlocks = obj["blocks"] as? [[String: Any]] else { return true }
+            var blocks: [ChatMessage.Block] = []
+            for raw in rawBlocks {
+                switch raw["t"] as? String {
+                case "text":
+                    if let v = raw["v"] as? String { blocks.append(.text(v)) }
+                case "code":
+                    let lang = (raw["lang"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    blocks.append(.code(raw["v"] as? String ?? "", lang: lang))
+                case "tool":
+                    blocks.append(.tool(
+                        name: raw["name"] as? String ?? "Tool",
+                        detail: raw["detail"] as? String ?? ""
+                    ))
+                default:
+                    break
+                }
+            }
+            guard !blocks.isEmpty else { return true }
+            append(role == "user" ? .user : .assistant, blocks: blocks, into: &messages)
+            return true
+        }
+        return messages
+    }
 
     /// Claude's per-project directory name: every non-alphanumeric character
     /// of the cwd becomes "-".
@@ -137,6 +313,41 @@ enum ChatArchive {
         }
         guard substantive != nil || commandOnly != nil else { return nil }
         return summary ?? (substantive ?? commandOnly).map { condense($0) }
+    }
+
+    /// A throwaway session: the assistant never produced anything — a
+    /// skill run canceled at the prompt, a /command tested and abandoned.
+    /// These must not become capsules; a shelf of skill-invocation husks
+    /// buries the real history. Any assistant output at all (text, code,
+    /// or a tool call — work happened, even if it said little) makes the
+    /// chat worth keeping.
+    static func isTrivial(_ messages: [ChatMessage]) -> Bool {
+        !messages.contains { message in
+            message.role == .assistant && message.blocks.contains { block in
+                switch block {
+                case let .text(text):
+                    return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                case let .code(code, _):
+                    return !code.isEmpty
+                case .tool:
+                    return true
+                default:
+                    return false
+                }
+            }
+        }
+    }
+
+    /// A session too slight to keep in the chat list: a husk (see
+    /// `isTrivial`) or a single tiny exchange — the "what port is this
+    /// on" one-liners every terminal `claude` run leaves behind. A single
+    /// exchange with a substantial answer stays; those are worth finding
+    /// again.
+    static func isNegligible(_ messages: [ChatMessage]) -> Bool {
+        if isTrivial(messages) { return true }
+        let userCount = messages.count { $0.role == .user }
+        let assistantCount = messages.count { $0.role == .assistant }
+        return userCount <= 1 && assistantCount <= 1 && flatSize(messages) < 1_000
     }
 
     /// A message that is a command invocation, not conversation — useless
@@ -395,6 +606,13 @@ enum ChatArchive {
                 default:
                     break
                 }
+            case .gemini, .grok:
+                for message in acpTranscript(path: ref.filePath) {
+                    let text = firstText(message)
+                    if message.role == .user, user == nil { user = text }
+                    if message.role == .assistant, assistant == nil { assistant = text }
+                }
+                return false
             }
             return user == nil || assistant == nil
         }
@@ -452,6 +670,7 @@ enum ChatArchive {
         let parsed = switch ref.harness {
         case .claude: claudeTranscript(path: ref.filePath)
         case .codex: codexTranscript(path: ref.filePath)
+        case .gemini, .grok: acpTranscript(path: ref.filePath)
         }
         transcriptCache.set(
             ref.filePath, mtime: stat.mtime, size: stat.size, messages: parsed
@@ -528,13 +747,10 @@ enum ChatArchive {
                     } else {
                         append(.user, blocks: userBlocks(clean), into: &messages)
                     }
-                } else if text.contains("<INSTRUCTIONS>") {
-                    // Codex's injected project context — a giant blob
-                    // nobody rereads; stand a one-liner in for it.
-                    append(.user, blocks: [.text(
-                        "Brought Codex up to speed on the project."
-                    )], into: &messages)
                 }
+                // Codex's injected project-context blob (`<INSTRUCTIONS>`)
+                // is skipped entirely — it isn't something the user said,
+                // and a stand-in line just cluttered the first bubble.
             case "assistant":
                 // Codex Desktop encodes tool traffic as marked-up text.
                 if let chip = codexToolChip(text) {
@@ -738,12 +954,21 @@ enum ChatArchive {
     /// the chat view shows a one-liner while the model keeps the detail.
     static let handoffPrefix = "[Handoff] This conversation continues"
     static let handoffNote = "Brought the model up to speed on the earlier conversation."
-    static func handoffMessage(brief: String, from harness: ChatHarness) -> ChatMessage {
-        ChatMessage(role: .user, blocks: [.text(
-            handoffPrefix + " from a session run under "
+    /// `fullTranscript` (context-rollover only) rides INSIDE the brief
+    /// message, so the prefix-collapse hides it from the chat view while
+    /// the model keeps the path to the complete sealed history.
+    static func handoffMessage(
+        brief: String, from harness: ChatHarness, fullTranscript: String? = nil
+    ) -> ChatMessage {
+        var text = handoffPrefix + " from a session run under "
             + harness.rawValue + ". Brief of the earlier work:\n\n" + brief
-            + "\n\nPick up from this handoff and the recent messages that follow."
-        )])
+        if let fullTranscript {
+            text += "\n\nThe complete earlier transcript is on disk at "
+                + fullTranscript
+                + " — read or grep it when the brief isn't enough."
+        }
+        text += "\n\nPick up from this handoff and the recent messages that follow."
+        return ChatMessage(role: .user, blocks: [.text(text)])
     }
 
     /// A message's blocks as one plain-text body for the target harness.
@@ -762,6 +987,9 @@ enum ChatArchive {
                     + "transcript for specifics when needed."
             case let .fragment(title, text):
                 "[Fragment \"\(title)\"]\n" + text + "\n[/Fragment]"
+            // The path IS the wire format — re-sends and transplants
+            // keep the image readable by the CLI.
+            case let .image(path): path
             }
         }.joined(separator: "\n\n")
     }
@@ -931,7 +1159,8 @@ enum ChatArchive {
         let hasCapsule = text.contains("[Capsule \"")
         let hasFragment = text.contains("[Fragment \"")
         guard hasCapsule || hasFragment else {
-            return splitMarkdown(text)
+            let (images, prose) = extractImages(text)
+            return images + splitMarkdown(prose)
         }
         var chips: [ChatMessage.Block] = []
         var rest: [String] = []
@@ -974,7 +1203,41 @@ enum ChatArchive {
                 title: title, text: fragmentBody.joined(separator: "\n")
             ))
         }
-        return chips + splitMarkdown(rest.joined(separator: "\n"))
+        // Images extracted from the non-fragment text only — a quoted
+        // fragment's body may legitimately mention image paths.
+        let (images, prose) = extractImages(rest.joined(separator: "\n"))
+        return chips + images + splitMarkdown(prose)
+    }
+
+    /// Matches an attached image's path in user text — absolute or
+    /// tilde'd, quoted (the composer quotes paths with spaces) or bare.
+    private static let imagePathRegex = try? NSRegularExpression(
+        pattern: #""[~/][^"\n]+\.(?:png|jpe?g|gif|webp|heic|tiff?|bmp)""#
+            + #"|(?<![\S"])[~/][^\s"]+\.(?:png|jpe?g|gif|webp|heic|tiff?|bmp)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    /// Pulls attached image paths out of a user message so they render as
+    /// thumbnails instead of URLs; returns the remaining prose.
+    private static func extractImages(
+        _ text: String
+    ) -> (images: [ChatMessage.Block], prose: String) {
+        guard let imagePathRegex, text.contains("/") else { return ([], text) }
+        let ns = text as NSString
+        let matches = imagePathRegex.matches(
+            in: text, range: NSRange(location: 0, length: ns.length)
+        )
+        guard !matches.isEmpty else { return ([], text) }
+        var images: [ChatMessage.Block] = []
+        var prose = text
+        for match in matches {
+            let raw = ns.substring(with: match.range)
+            var path = raw
+            if path.hasPrefix("\"") { path = String(path.dropFirst().dropLast()) }
+            images.append(.image(path: (path as NSString).expandingTildeInPath))
+            prose = prose.replacingOccurrences(of: raw, with: "")
+        }
+        return (images, prose.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Splits fenced code out of markdown so the view can render it as a
@@ -1040,11 +1303,19 @@ final class ChatMetaStore: ObservableObject {
     /// Chats forked off another chat: file → the file it branched from.
     /// Drives the branch glyph in the sidebar.
     @Published private(set) var branches: [String: String] = [:]
+    /// Context-rollover chains: new session file → the file it continued
+    /// from. The chain presents as ONE chat — the sidebar lists only the
+    /// head (superseded segments are hidden), and the transcript view
+    /// offers "Show earlier conversation" up the chain.
+    @Published private(set) var continuations: [String: String] = [:]
+    /// Files hidden because a continuation superseded them.
+    private(set) var supersededFiles: Set<String> = []
 
     private struct Blob: Codable {
         var pinned: [String] = []
         var archived: [String] = []
         var branches: [String: String]?
+        var continuations: [String: String]?
     }
 
     private static var fileURL: URL {
@@ -1058,13 +1329,15 @@ final class ChatMetaStore: ObservableObject {
             pinned = Set(blob.pinned)
             archived = Set(blob.archived)
             branches = blob.branches ?? [:]
+            continuations = blob.continuations ?? [:]
+            supersededFiles = Set(continuations.values)
         }
     }
 
     private func save() {
         let blob = Blob(
             pinned: Array(pinned), archived: Array(archived),
-            branches: branches
+            branches: branches, continuations: continuations
         )
         guard let data = try? JSONEncoder().encode(blob) else { return }
         try? FileManager.default.createDirectory(
@@ -1094,13 +1367,30 @@ final class ChatMetaStore: ObservableObject {
         save()
     }
 
-    /// A deleted chat's flags go with it.
+    /// Record a context rollover: `file` continues `parent`. The parent
+    /// leaves the sidebar (hidden as superseded), and the chat identity —
+    /// pin included — moves to the head.
+    func markContinuation(_ file: String, of parent: String) {
+        continuations[file] = parent
+        supersededFiles.insert(parent)
+        if pinned.remove(parent) != nil { pinned.insert(file) }
+        save()
+    }
+
+    /// A deleted chat's flags go with it. Deleting a chain head also
+    /// un-supersedes its parent, so the earlier conversation resurfaces
+    /// instead of orphaning invisibly.
     func forget(_ file: String) {
         guard pinned.contains(file) || archived.contains(file)
-            || branches[file] != nil else { return }
+            || branches[file] != nil || continuations[file] != nil
+            || supersededFiles.contains(file) else { return }
         pinned.remove(file)
         archived.remove(file)
         branches.removeValue(forKey: file)
+        if let parent = continuations.removeValue(forKey: file),
+           !continuations.values.contains(parent) {
+            supersededFiles.remove(parent)
+        }
         save()
     }
 
