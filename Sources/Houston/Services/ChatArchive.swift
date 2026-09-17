@@ -13,9 +13,19 @@ enum ChatHarness: String {
     /// also ACP, so it rides the exact same driver + Houston-owned
     /// transcript store as Gemini.
     case grok = "Grok"
+    /// Pi (`@earendil-works/pi-coding-agent`), a provider-agnostic coding
+    /// agent, driven through the `pi-acp` adapter (npm `pi-acp`) — ACP
+    /// over stdio, so it rides the shared driver + transcript store. One
+    /// harness, many providers: the model is NOT pinned on the spawn but
+    /// set after session open via `session/set_config_option`
+    /// (configId "model", value "provider/model-id" — set_model itself is
+    /// unregistered; both verified live 2026-09-16). Auth is pi's own
+    /// credential store (~/.pi) plus any provider keys Houston holds,
+    /// delivered as env vars on the spawn.
+    case pi = "Pi"
 
     /// Harnesses driven over ACP (shared driver + transcript store).
-    var isACP: Bool { self == .gemini || self == .grok }
+    var isACP: Bool { self == .gemini || self == .grok || self == .pi }
 }
 
 /// One session file on disk, indexed for the chat browser's list.
@@ -86,6 +96,7 @@ enum ChatArchive {
             + codexSessions(for: projectPath)
             + acpSessions(for: projectPath, harness: .gemini)
             + acpSessions(for: projectPath, harness: .grok)
+            + acpSessions(for: projectPath, harness: .pi)
         out.sort { $0.modified > $1.modified }
         return out
     }
@@ -606,7 +617,7 @@ enum ChatArchive {
                 default:
                     break
                 }
-            case .gemini, .grok:
+            case .gemini, .grok, .pi:
                 for message in acpTranscript(path: ref.filePath) {
                     let text = firstText(message)
                     if message.role == .user, user == nil { user = text }
@@ -670,7 +681,7 @@ enum ChatArchive {
         let parsed = switch ref.harness {
         case .claude: claudeTranscript(path: ref.filePath)
         case .codex: codexTranscript(path: ref.filePath)
-        case .gemini, .grok: acpTranscript(path: ref.filePath)
+        case .gemini, .grok, .pi: acpTranscript(path: ref.filePath)
         }
         transcriptCache.set(
             ref.filePath, mtime: stat.mtime, size: stat.size, messages: parsed

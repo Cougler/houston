@@ -45,6 +45,10 @@ enum PromptDelivery {
         switch harness {
         case .claude: command = "claude /login\n"
         case .grok: command = "grok login --oauth\n"
+        // Pi's auth setup is its own interactive TUI (API keys or
+        // provider OAuth via /login, stored under ~/.pi) — the same
+        // surface `pi-acp --terminal-login` opens.
+        case .pi: command = "pi\n"
         default: command = "codex login\n"
         }
         let running = manager.agents[path]

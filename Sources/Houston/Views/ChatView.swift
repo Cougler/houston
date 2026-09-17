@@ -74,9 +74,10 @@ struct ChatModelChoice: Hashable {
             ("Minimal", "minimal"), ("Low", "low"), ("Medium", "medium"),
             ("High", "high"), ("XHigh", "xhigh"),
         ]
-        // ACP harnesses (Gemini, Grok) choose model/effort by the model id
-        // itself (Pro vs Flash, Grok 4 vs Fast); no separate effort flag.
-        case .gemini, .grok: []
+        // ACP harnesses choose model/effort by the model id itself (Pro
+        // vs Flash, Grok 4 vs Fast); no separate effort flag. (Pi has
+        // thinking levels as ACP session modes — not wired yet.)
+        case .gemini, .grok, .pi: []
         }
     }
 
@@ -97,7 +98,72 @@ struct ChatModelChoice: Hashable {
         case .gemini: providerFallback(.gemini)
         case .grok: providerFallback(.grok)
         case .claude: claude[0]
+        case .pi: claude[0].piEquivalent ?? claude[0]
         }
+    }
+
+    /// Pi model ids (`provider/model-id`) for the models Houston already
+    /// lists, keyed by (native harness/provider, native arg). VERIFIED
+    /// against pi's live catalog (session/new options dump, 2026-09-16) —
+    /// only ids actually present are mapped, which is why Grok and
+    /// DeepSeek entries are absent (pi carries grok-4.3+ / deepseek-v4,
+    /// not Houston's grok-4 / deepseek-chat generation).
+    private static let piModelIDs: [String: String] = [
+        "claude:fable": "anthropic/claude-fable-5",
+        "claude:opus": "anthropic/claude-opus-5",
+        "claude:sonnet": "anthropic/claude-sonnet-5",
+        "claude:haiku": "anthropic/claude-haiku-4-5",
+        "codex:gpt-6-astra": "openai/gpt-6-astra",
+        "codex:gpt-5.6-sol": "openai/gpt-5.6-sol",
+        "codex:gpt-5.6-terra": "openai/gpt-5.6-terra",
+        "codex:gpt-5.6-luna": "openai/gpt-5.6-luna",
+        "codex:gpt-5.5": "openai/gpt-5.5",
+        "gemini:gemini-2.5-pro": "google/gemini-2.5-pro",
+        "gemini:gemini-2.5-flash": "google/gemini-2.5-flash",
+    ]
+
+    private var piMapKey: String? {
+        // Local-engine models never route through pi; cloud codex only.
+        guard provider == nil || harness.isACP else { return nil }
+        guard let arg else { return nil }
+        switch harness {
+        case .claude: return "claude:" + arg
+        case .codex: return provider == nil ? "codex:" + arg : nil
+        case .gemini: return "gemini:" + arg
+        case .grok: return "grok:" + arg
+        case .pi: return nil
+        }
+    }
+
+    /// This model, run through Pi instead of its native CLI — nil when
+    /// pi's catalog doesn't carry it (see `piModelIDs`).
+    var piEquivalent: ChatModelChoice? {
+        guard harness != .pi else { return self }
+        guard let key = piMapKey, let id = Self.piModelIDs[key] else { return nil }
+        return ChatModelChoice(
+            label: label, harness: .pi, arg: id,
+            effort: nil, permission: permission
+        )
+    }
+
+    /// A Pi-harness model, back on its native CLI — the reverse of
+    /// `piEquivalent`, matched through the same table.
+    var nativeEquivalent: ChatModelChoice? {
+        guard harness == .pi, let arg else { return nil }
+        let candidates = Self.claude + Self.openAI
+            + ChatProvider.cloud.flatMap { provider in
+                provider.models.map {
+                    ChatModelChoice(
+                        label: $0.label, harness: provider.harness,
+                        arg: $0.arg, provider: provider.id
+                    )
+                }
+            }
+        guard var native = candidates.first(where: {
+            $0.piMapKey.flatMap { Self.piModelIDs[$0] } == arg
+        }) else { return nil }
+        native.permission = permission
+        return native
     }
 
     private static func providerFallback(_ provider: ChatProvider) -> ChatModelChoice {
@@ -592,7 +658,7 @@ struct ChatBrowserView: View {
                         ChatArchive.sessions(for: project)
                             .first { $0.harness == .codex }?.filePath
                     }.value
-                case .gemini, .grok:
+                case .gemini, .grok, .pi:
                     // Houston names the file itself from the ACP session id.
                     file = session.sessionID.map {
                         ChatArchive.acpSessionFile(
@@ -614,6 +680,18 @@ struct ChatBrowserView: View {
             )
             selected = ref
             reloadThenClear(ref, session)
+            // The draft is a REAL chat now: retarget the window's
+            // chatTarget so the sidebar lists and highlights it under its
+            // project. `fromPath` covers project-less New Chats, whose
+            // chatTarget still points at the browser's original (home)
+            // path rather than the project the chip chose.
+            NotificationCenter.default.post(
+                name: .houstonChatRekeyed, object: nil,
+                userInfo: [
+                    "project": project, "file": file, "fromPath": projectPath,
+                ]
+            )
+            ChatIndexStore.shared.refresh(project, force: true)
         }
     }
 
@@ -663,7 +741,7 @@ struct ChatBrowserView: View {
                     guard let id = ChatArchive.exportToCodex(toExport, projectPath: project),
                           let file = ChatArchive.codexRolloutPath(id: id) else { return nil }
                     return (id, file)
-                case .gemini, .grok:
+                case .gemini, .grok, .pi:
                     // exportToACP returns the file path; the id is its
                     // basename (Houston names it <id>.jsonl).
                     guard let file = ChatArchive.exportToACP(
@@ -1004,7 +1082,7 @@ enum ChatRowActions {
                 ChatArchive.exportToCodex(
                     messages, projectPath: project, originator: "Houston-Fork"
                 ).flatMap { ChatArchive.codexRolloutPath(id: $0) }
-            case .gemini, .grok:
+            case .gemini, .grok, .pi:
                 ChatArchive.exportToACP(
                     messages, projectPath: project, harness: ref.harness)
             }
@@ -1459,7 +1537,7 @@ private struct ChatComposer: View {
                 }
                 // On the background, not the bar — a whole-view shadow
                 // would shadow the input text and chips too.
-                .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 6)
+                .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 3)
             )
             // A hairline catches the glass edge against whatever slides
             // under it; the drop-target rose replaces it during a drag.
@@ -1573,7 +1651,11 @@ private struct ChatComposer: View {
                     modelItem(choice)
                 }
                 Divider()
-                Button("Sign in to OpenAI…") { providerAuth.signInOpenAI() }
+                if providerAuth.codexSignedIn {
+                    Button("Sign out of OpenAI…") { providerAuth.signOutOpenAI() }
+                } else {
+                    Button("Sign in to OpenAI…") { providerAuth.signInOpenAI() }
+                }
             }
             ForEach(ChatProvider.cloud) { provider in
                 cloudProviderMenu(provider)
@@ -1654,14 +1736,22 @@ private struct ChatComposer: View {
         }
     }
 
-    /// Which CLI runs the send — decided by the model (each model runs on
-    /// exactly one CLI today), so the incompatible option is disabled.
+    /// Which CLI runs the send. Native CLIs are still 1:1 with their
+    /// models, but Pi is provider-agnostic: any model in its catalog can
+    /// hop to Pi and back, so those options enable instead of graying out.
     private var harnessMenu: some View {
         Menu {
             harnessItem("Claude Code", .claude)
             harnessItem("Codex", .codex)
             harnessItem("Gemini CLI", .gemini)
             harnessItem("Grok Build", .grok)
+            harnessItem("Pi", .pi)
+            Divider()
+            // Pi's auth is its own TUI (API keys or provider OAuth,
+            // stored in ~/.pi) — the setup runs in a terminal pane.
+            Button("Set up Pi…") {
+                PromptDelivery.login(.pi, project: effectiveProject)
+            }
         } label: {
             chip(harnessLabel(model.harness))
         }
@@ -1669,12 +1759,30 @@ private struct ChatComposer: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Which CLI runs this chat (follows the model)")
+        .help("Which CLI runs this chat (follows the model; Pi runs any model it carries)")
     }
 
     private func harnessItem(_ label: String, _ harness: ChatHarness) -> some View {
-        Toggle(label, isOn: .constant(model.harness == harness))
-            .disabled(harness != model.harness)
+        let converted = convert(model, to: harness)
+        return Toggle(label, isOn: Binding(
+            get: { model.harness == harness },
+            set: { _ in if let converted { picked = converted } }
+        ))
+        .disabled(converted == nil)
+    }
+
+    /// The same model on another harness, when it can make the hop: a
+    /// mapped model → Pi, and a Pi chat back to the model's native CLI.
+    private func convert(
+        _ model: ChatModelChoice, to harness: ChatHarness
+    ) -> ChatModelChoice? {
+        if model.harness == harness { return model }
+        if harness == .pi { return model.piEquivalent }
+        if model.harness == .pi, let native = model.nativeEquivalent,
+           native.harness == harness {
+            return native
+        }
+        return nil
     }
 
     private func harnessLabel(_ harness: ChatHarness) -> String {
@@ -1683,6 +1791,7 @@ private struct ChatComposer: View {
         case .codex: "Codex"
         case .gemini: "Gemini CLI"
         case .grok: "Grok Build"
+        case .pi: "Pi"
         }
     }
 
@@ -2173,18 +2282,41 @@ struct MessageView: View {
         }
     }
 
+    /// Index of the message's last tool block. In an agent turn, prose
+    /// at or before it is working narration ("let me look at…", notes
+    /// between tool runs); prose after it is the turn's actual statement.
+    /// Narration renders secondary so the final answer is the only text
+    /// at full contrast — the two were indistinguishable (2026-09-16).
+    /// Live turns get this for free: streamed text flushes into the
+    /// block list ahead of each arriving tool chip, so it dims the
+    /// moment the agent goes back to work.
+    private var lastToolIndex: Int? {
+        message.blocks.lastIndex {
+            if case .tool = $0 { return true }
+            return false
+        }
+    }
+
+    private func isNarration(_ index: Int) -> Bool {
+        guard message.role == .assistant, let lastToolIndex else { return false }
+        return index < lastToolIndex
+    }
+
     @ViewBuilder
     private var blocksView: some View {
-        ForEach(message.blocks) { block in
+        ForEach(Array(message.blocks.enumerated()), id: \.element.id) { index, block in
             switch block {
             case let .text(text):
                 MarkdownBlockView(
                     text: text,
-                    color: message.role == .user ? style.text : Theme.chatProse,
+                    color: message.role == .user
+                        ? style.text
+                        : (isNarration(index) ? Theme.textSecondary : Theme.chatProse),
                     accent: message.role == .user
                 )
             case let .code(code, lang):
                 CodeCard(code: code, lang: lang)
+                    .opacity(isNarration(index) ? 0.7 : 1)
             case let .tool(name, detail):
                 if showTools {
                     HStack(spacing: 6) {

@@ -184,6 +184,31 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   Responses wire) stay for OpenAI-compatible key-only providers; codex
   itself still 422s xAI's Responses tools, which is why Grok goes through
   Grok Build's ACP agent, not the codex rail.
+- **Pi chat harness — third ACP rider (`ChatHarness.pi`), 2026-09-16.**
+  Pi (`@earendil-works/pi-coding-agent`, binary `pi`) is provider-AGNOSTIC
+  — one harness, every provider it holds credentials for — driven through
+  the `pi-acp` adapter (npm `pi-acp`, spawns `pi --mode rpc` underneath;
+  pi itself doesn't speak ACP). Same shared driver as Gemini/Grok; the
+  ONE structural difference: pi's model is NOT a spawn flag. It's set
+  after session open via `session/set_config_option {configId:"model",
+  value:"provider/model-id"}` (`session/set_model` is unregistered —
+  probed), and `acpSessionReady` is deferred until that request answers
+  so the first prompt can't race onto pi's default model. Verified live
+  2026-09-16: initialize (protocol 1, loadSession true), session/new
+  (auth = presence of a provider env key or pi's own `~/.pi` creds),
+  set_config_option round trip, and the full model catalog dump. Model
+  mapping lives in `ChatModelChoice.piModelIDs` — Houston model → pi
+  catalog id, VERIFIED ids only (all Claude + all OpenAI models map;
+  Gemini 2.5 yes, 3-pro-preview no; Houston's Grok/DeepSeek generation
+  isn't in pi's catalog, so those show Pi grayed). The harness chip menu
+  is now a real switch: `convert(_:to:)` hops a mapped model → Pi and a
+  Pi chat back to its native CLI via `nativeEquivalent`. Auth: any keys
+  in `ProviderAuthStore` ride the spawn env (never the "oauth" markers);
+  "Set up Pi…" runs `pi`'s TUI in a terminal pane for the rest. A real
+  authed streaming turn is still unrun here (no pi credentials on this
+  machine) — stream shapes are the same session/update chunks the driver
+  already handles, and pi-acp's bundle emits no `usage_update`, so no
+  context meter (codex-style).
 - `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to

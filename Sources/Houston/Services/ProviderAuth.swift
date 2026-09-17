@@ -99,6 +99,11 @@ final class ProviderAuthStore: ObservableObject {
 
     @Published private(set) var keys: [String: String] = [:]
 
+    /// The provider whose API-key dialog is up — set by `beginSignIn`,
+    /// rendered by the main window's modal layer (the native NSAlert this
+    /// replaced looked nothing like Houston's dialogs).
+    @Published var keyPrompt: ChatProvider?
+
     private static var fileURL: URL {
         FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
@@ -155,39 +160,41 @@ final class ProviderAuthStore: ObservableObject {
     }
 
     /// API-key sign-in: the browser opens at the provider's console for
-    /// the actual login; the alert stays up so the minted key has a
-    /// place to land when the user comes back.
+    /// the actual login; the in-window dialog stays up so the minted key
+    /// has a place to land when the user comes back.
     func beginSignIn(_ provider: ChatProvider) {
+        openConsole(provider)
+        keyPrompt = provider
+    }
+
+    func openConsole(_ provider: ChatProvider) {
         if let url = URL(string: provider.consoleURL) {
             NSWorkspace.shared.open(url)
         }
-        let alert = NSAlert()
-        alert.messageText = "Sign in to \(provider.name)"
-        alert.informativeText = "Your browser is open at \(provider.name)'s "
-            + "console. Sign in there, create an API key, then paste it here."
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-        field.placeholderString = "API key"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Save Key")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        if alert.runModal() == .alertFirstButtonReturn {
-            let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty { setKey(key, for: provider.id) }
-        }
     }
 
-    /// OpenAI is codex's own OAuth: `codex login` opens the browser and a
-    /// localhost callback completes it — the process just exits when the
-    /// user is done.
+    /// OpenAI is codex's own OAuth. Run `codex login` in a Houston
+    /// terminal (NOT a headless Process): the terminal has the user's
+    /// full shell env — codex is a node shim that dies without it — and
+    /// the flow's output is visible instead of silently swallowed.
     func signInOpenAI() {
-        guard let binary = AgentTransport.resolveBinary("codex") else { return }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = ["login"]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try? process.run()
+        NotificationCenter.default.post(
+            name: .houstonRunLoginCommand, object: nil,
+            userInfo: ["command": "codex login"]
+        )
+    }
+
+    func signOutOpenAI() {
+        NotificationCenter.default.post(
+            name: .houstonRunLoginCommand, object: nil,
+            userInfo: ["command": "codex logout"]
+        )
+    }
+
+    /// Codex holds its own credential; its auth file is the truth.
+    var codexSignedIn: Bool {
+        FileManager.default.fileExists(
+            atPath: NSHomeDirectory() + "/.codex/auth.json")
     }
 
     /// Claude's /login flow needs the CLI's own TUI (browser OAuth with a

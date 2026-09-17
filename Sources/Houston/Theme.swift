@@ -16,9 +16,12 @@ enum Theme {
     static let sidebarFill = Color(light: 0xEDEDED, dark: 0x0E1015)
     /// The sidebar's top tiles: a raised fill (dark #1D1E22), hover and
     /// active a step DARKER than the resting fill.
-    static let tileFill = Color(light: 0xF7F7F7, dark: 0x1D1E22)
-    static let tileHovered = Color(light: 0xECECEC, dark: 0x17181B)
-    static let tileActive = Color(light: 0xE2E2E2, dark: 0x111114)
+    // Tiles sit a step DARKER than the sidebar at rest and lift to the
+    // lighter-than-sidebar fill while active (2026-09-16); hover is the
+    // sidebar rows' `rowHovered` wash over the rest fill, not a tile
+    // token of its own.
+    static let tileFill = Color(light: 0xE4E4E4, dark: 0x0A0C10)
+    static let tileActive = Color(light: 0xF7F7F7, dark: 0x1D1E22)
     /// The empty state's sky — follows the appearance (2026-09-14): a
     /// daylight gray matching the chat page in light mode, night black in
     /// dark. The star field's tokens (heading, orbitRing) already track.

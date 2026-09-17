@@ -65,6 +65,36 @@ final class AgentTransport: @unchecked Sendable {
         return path
     }
 
+    /// The user's real shell PATH, resolved once through an interactive
+    /// login zsh. Spawns must use THIS, not the app's inherited PATH: a
+    /// GUI (or nohup) launch carries a minimal PATH, and codex is a node
+    /// shim — `env: node: No such file or directory` killed every spawn
+    /// when node lived behind `.zshrc` (nvm).
+    nonisolated(unsafe) private static var cachedShellPATH: String?
+    static func userShellPATH() -> String? {
+        cacheLock.lock()
+        if let hit = cachedShellPATH { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        probe.arguments = ["-ilc", "printf %s \"$PATH\""]
+        let out = Pipe()
+        probe.standardOutput = out
+        probe.standardError = Pipe()
+        guard (try? probe.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        probe.waitUntilExit()
+        // Last line, in case a chatty .zshrc printed above the answer.
+        let path = (String(data: data, encoding: .utf8) ?? "")
+            .split(separator: "\n").map(String.init)
+            .last { $0.contains("/") }
+        guard let path, !path.isEmpty else { return nil }
+        cacheLock.lock()
+        cachedShellPATH = path
+        cacheLock.unlock()
+        return path
+    }
+
     func start(
         binary: String, arguments: [String], cwd: String,
         extraEnvironment: [String: String] = [:]
@@ -83,6 +113,11 @@ final class AgentTransport: @unchecked Sendable {
         // Provider API keys ride the spawn env (codex reads them via
         // `env_key`) — never written to any config file.
         env.merge(extraEnvironment) { _, new in new }
+        // The user's real shell PATH: node-shim CLIs (codex) die without
+        // it when the app was launched with a minimal environment.
+        if let shellPATH = Self.userShellPATH() {
+            env["PATH"] = shellPATH
+        }
         process.environment = env
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = stdin
@@ -243,6 +278,13 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     private var acpNewSessionID: Int?
     private var acpPromptID: Int?
     private var acpQueuedPrompts: [String] = []
+    /// Pi only: the model to select once the session is open. Pi's model
+    /// isn't a spawn flag — it's set per session via
+    /// `session/set_config_option`, and the session isn't "ready" (queued
+    /// prompts held) until that request answers, or the first turn could
+    /// race onto pi's default model.
+    private var acpPendingModelArg: String?
+    private var acpSetModelID: Int?
     /// The exchange being streamed — accumulated so the whole turn can be
     /// written to the Houston-owned transcript when it ends.
     private var acpTurnUser: String?
@@ -320,7 +362,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             // row click — only cloud codex warms ahead of the send.
             guard model.provider == nil else { return }
             ensureCodexTransport(model: model)
-        case .gemini, .grok:
+        case .gemini, .grok, .pi:
             ensureACPTransport(model: model)
         }
     }
@@ -354,7 +396,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             sendClaude(text: text, model: model)
         case .codex:
             sendCodex(text: text, model: model)
-        case .gemini, .grok:
+        case .gemini, .grok, .pi:
             sendACP(text: text, model: model)
         }
     }
@@ -377,7 +419,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 "jsonrpc": "2.0", "id": rpcCounter, "method": "turn/interrupt",
                 "params": ["threadId": sessionID, "turnId": currentTurnID],
             ])
-        case .gemini, .grok:
+        case .gemini, .grok, .pi:
             guard let sessionID else { return }
             // ACP cancel is a notification (no id); the in-flight
             // session/prompt then resolves with stopReason "cancelled".
@@ -415,7 +457,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             transport?.writeRaw(
                 #"{"jsonrpc":"2.0","id":\#(idRaw),"result":{"decision":"\#(decision)"}}"#
             )
-        case .gemini, .grok:
+        case .gemini, .grok, .pi:
             guard let idRaw = request.geminiIDRaw else { return }
             // ACP permission response: a "selected" outcome carrying the
             // chosen optionId, or "cancelled" for deny.
@@ -988,36 +1030,62 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             || acpModelKey != modelKey {
             transport?.terminate()
             acpSessionReady = false
-            // Both ACP harnesses spawn a stdio agent; only the command and
+            acpSetModelID = nil
+            // The ACP harnesses spawn a stdio agent; only the command and
             // its flags differ. Gemini: `gemini --acp -m <model>`. Grok
             // Build: `grok --model <model> agent stdio` (global flags lead
-            // the subcommand).
+            // the subcommand). Pi: `pi-acp`, no model flag — the model is
+            // set after session open (see `acpPendingModelArg`).
             let cli: String
             var arguments: [String]
+            var extraEnv: [String: String] = [:]
+            acpPendingModelArg = nil
             switch harness {
             case .grok:
                 cli = "grok"
                 arguments = []
                 if let arg = model.arg { arguments += ["--model", arg] }
                 arguments += ["agent", "stdio"]
+            case .pi:
+                cli = "pi-acp"
+                arguments = []
+                acpPendingModelArg = model.arg
+                // Any provider key the user pasted into Houston rides the
+                // spawn env (pi reads the standard per-provider vars);
+                // pi's own credential store (~/.pi) covers the rest.
+                // "oauth" is Houston's marker for CLI-held credentials,
+                // not a key — never exported.
+                for provider in ChatProvider.cloud {
+                    if let key = ProviderAuthStore.shared.key(for: provider.id),
+                       key != "oauth" {
+                        extraEnv[provider.envKey] = key
+                    }
+                }
             default:
                 cli = "gemini"
                 arguments = ["--acp"]
                 if let arg = model.arg { arguments += ["-m", arg] }
             }
             guard let binary = AgentTransport.resolveBinary(cli) else {
-                fail(harness == .grok
-                    ? "Grok CLI not found — install it with "
-                        + "`curl -fsSL https://x.ai/cli/install.sh | bash`."
-                    : "gemini CLI not found — install it with "
+                switch harness {
+                case .grok:
+                    fail("Grok CLI not found — install it with "
+                        + "`curl -fsSL https://x.ai/cli/install.sh | bash`.")
+                case .pi:
+                    fail("Pi not found — install it with `npm install -g "
+                        + "@earendil-works/pi-coding-agent pi-acp`.")
+                default:
+                    fail("gemini CLI not found — install it with "
                         + "`brew install gemini-cli`.")
+                }
                 return false
             }
             let transport = AgentTransport()
             wire(transport)
             do {
                 try transport.start(
-                    binary: binary, arguments: arguments, cwd: projectPath
+                    binary: binary, arguments: arguments, cwd: projectPath,
+                    extraEnvironment: extraEnv
                 )
             } catch {
                 fail(error.localizedDescription)
@@ -1056,6 +1124,13 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         return true
     }
 
+    private func markACPSessionReady() {
+        acpSessionReady = true
+        let queued = acpQueuedPrompts
+        acpQueuedPrompts = []
+        for text in queued { startACPTurn(text: text) }
+    }
+
     private func startACPTurn(text: String) {
         guard let sessionID else { return }
         rpcCounter += 1
@@ -1084,8 +1159,10 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     private func handleACPResponse(_ o: [String: Any]) {
         guard let id = o["id"] as? Int else { return }
         if let error = o["error"] as? [String: Any] {
-            let message = error["message"] as? String ?? "Gemini error"
-            if id == acpNewSessionID { fail(message) } else if running {
+            let message = error["message"] as? String ?? "Agent error"
+            if id == acpNewSessionID || id == acpSetModelID {
+                fail(message)
+            } else if running {
                 endTurn(error: message)
             } else {
                 lastError = message
@@ -1095,10 +1172,27 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         let result = o["result"] as? [String: Any]
         if id == acpNewSessionID {
             if let newID = result?["sessionId"] as? String { sessionID = newID }
-            acpSessionReady = true
-            let queued = acpQueuedPrompts
-            acpQueuedPrompts = []
-            for text in queued { startACPTurn(text: text) }
+            // Pi: pin the chosen model before any prompt runs. The queue
+            // stays held until set_config_option answers — a prompt sent
+            // alongside could race onto pi's default model.
+            if harness == .pi, let arg = acpPendingModelArg, let sessionID {
+                rpcCounter += 1
+                acpSetModelID = rpcCounter
+                transport?.write([
+                    "jsonrpc": "2.0", "id": rpcCounter,
+                    "method": "session/set_config_option",
+                    "params": [
+                        "sessionId": sessionID,
+                        "configId": "model",
+                        "value": arg,
+                    ],
+                ])
+                return
+            }
+            markACPSessionReady()
+        } else if id == acpSetModelID {
+            acpSetModelID = nil
+            markACPSessionReady()
         } else if id == acpPromptID {
             // The prompt request resolves once the whole turn is done; its
             // stopReason distinguishes a clean finish from a refusal.
@@ -1249,7 +1343,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 switch self.harness {
                 case .claude: self.handleClaude(box.value)
                 case .codex: self.handleCodex(box.value, raw: line)
-                case .gemini, .grok: self.handleACP(box.value)
+                case .gemini, .grok, .pi: self.handleACP(box.value)
                 }
             }
         }
@@ -1406,7 +1500,7 @@ final class ChatSessionHub: ObservableObject {
         // rollout-<timestamp>-<uuid>.jsonl — the id is the last 36 chars.
         case .codex: String((file as NSString).deletingPathExtension.suffix(36))
         // Houston names the file <acpSessionId>.jsonl.
-        case .gemini, .grok: (file as NSString).deletingPathExtension
+        case .gemini, .grok, .pi: (file as NSString).deletingPathExtension
         }
         let session = ChatAgentSession(
             harness: ref.harness, projectPath: project, resumeID: id

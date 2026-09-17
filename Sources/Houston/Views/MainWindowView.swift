@@ -84,6 +84,7 @@ struct MainWindowView: View {
     @ObservedObject private var notify = NotifyStore.shared
     // Re-renders chat-row badges on session phase changes (activityTick).
     @ObservedObject private var chatHub = ChatSessionHub.shared
+    @ObservedObject private var providerAuth = ProviderAuthStore.shared
     @StateObject private var tracked = TrackedStore()
     @ObservedObject private var feed = EventFeed.shared
     @State private var selection: SidebarSelection?
@@ -178,12 +179,40 @@ struct MainWindowView: View {
     @State private var sidebarRevealed = HoustonSettings.read().onboardingSeen
     /// Sidebar collapsed to the three-icon rail, persisted in settings.
     @State private var sidebarCollapsed = HoustonSettings.read().sidebarCollapsed
+    /// Whether the sidebar panel's top edge is tucked below the titlebar
+    /// strip. Expanded, the panel runs full height and slides UNDER the
+    /// strip's opaque cover; collapsing tucks the top edge down first,
+    /// then swaps to the rail — the two phases read as the panel's
+    /// top-right corner wrapping down around the traffic lights.
+    /// Tracks `sidebarCollapsed` at rest.
+    @State private var sidebarTopTucked = HoustonSettings.read().sidebarCollapsed
+    /// Cancels a staged collapse/expand phase still in flight when a newer
+    /// call lands (rapid toggling, a drag mid-choreography).
+    @State private var collapseStageSeq = 0
     /// The rail section whose popover is open, while collapsed.
     @State private var railPopover: RailSection?
+    /// The rail row under the pointer — drives the INSTANT tooltip beside
+    /// the rail (`railTipLayer`; the system `.help` delay made icon-only
+    /// buttons feel unlabeled). Rendered in the root overlay because the
+    /// rail column itself is clipped to its 52pt width.
+    @State private var railTip: RailTipItem?
 
     /// Clearance for the traffic lights, which float over the sidebar now that
     /// the title bar is transparent and full-size.
     private let trafficLightInset: CGFloat = 48
+    /// The titlebar strip cover: an opaque plate in the app-background color
+    /// under the traffic lights + collapse/gear/bell cluster, drawn over the
+    /// full-height sidebar. Its rounded bottom-trailing corner is what cuts
+    /// the "wraps around the traffic lights" notch into the panel.
+    private var stripCoverHeight: CGFloat { trafficLightInset - 16 }
+    /// Past the button cluster (ends at x≈152) with breathing room before
+    /// the corner; the 180pt sidebar minimum keeps the panel poking out.
+    private let stripCoverWidth: CGFloat = 166
+    /// Where the tucked panel's top edge rests: 1pt ABOVE the strip
+    /// cover's bottom, so the panel stays just behind the traffic-light
+    /// plate instead of landing flush — no seam, and the collapsed state
+    /// reads as emerging from under it.
+    private var sidebarTuckTop: CGFloat { stripCoverHeight - 1 }
 
     @Environment(\.colorScheme) private var systemScheme
 
@@ -286,6 +315,7 @@ struct MainWindowView: View {
             ZStack(alignment: .topLeading) {
                 collapseToggleLayer
                 railFlyoutLayer
+                railTipLayer
             }
         }
         .overlay(alignment: .bottomLeading) { themePickerLayer }
@@ -530,7 +560,7 @@ struct MainWindowView: View {
                                         sidebarWidth = sidebarRange.lowerBound
                                         sidebarDragStart =
                                             sidebarRange.lowerBound - value.translation.width
-                                        setSidebarCollapsed(false)
+                                        setSidebarCollapsed(false, staged: false)
                                     }
                                     return
                                 }
@@ -540,7 +570,7 @@ struct MainWindowView: View {
                                 if proposed < sidebarRange.lowerBound - 50 {
                                     sidebarWidth = sidebarRange.lowerBound
                                     sidebarDragStart = railWidth - value.translation.width
-                                    setSidebarCollapsed(true)
+                                    setSidebarCollapsed(true, staged: false)
                                     return
                                 }
                                 // Whole pixels only — drag translations are
@@ -573,22 +603,28 @@ struct MainWindowView: View {
 
     // MARK: - Sidebar column
 
-    /// The floating panel silhouette both sidebar states share: flush left,
-    /// rounded where it meets the content, stopped short of the traffic
-    /// lights above and the window edge below (see the paddings at use).
+    /// The panel silhouette both sidebar states share: flush left, and a
+    /// rounded top-trailing corner ONLY at full height — tucked (mid-
+    /// collapse, or the rail), the top edge hides behind the strip cover
+    /// and a curve there would poke out square-less. Driven by the same
+    /// tucked flag as the paddings, so the radius tweens inside the same
+    /// spring.
     private var sidebarPanelShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: 0, bottomLeadingRadius: 0,
-            bottomTrailingRadius: 0, topTrailingRadius: 24
+            bottomTrailingRadius: 0,
+            topTrailingRadius: sidebarTopTucked ? 0 : 24
         )
     }
 
     private var sidebarColumn: some View {
         VStack(spacing: 0) {
-            // No titlebar strip inside the panel — the panel itself starts
-            // below the traffic lights (outer top padding). The collapse
-            // control lives in the fixed `collapseToggleLayer`, up in the
-            // strip, and holds its spot when the column collapses.
+            // No titlebar strip inside the panel — expanded, the panel runs
+            // full height and slides under the strip's opaque cover (see
+            // `collapseToggleLayer`); tucked, it starts below the traffic
+            // lights. The collapse control lives in the fixed
+            // `collapseToggleLayer`, up in the strip, and holds its spot
+            // when the column collapses.
             // The Houston wordmark crowns the panel — template-tinted so
             // it follows the appearance like an SF Symbol.
             if let logo = SVGIcon.template(named: "houstonlogo") {
@@ -652,8 +688,12 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             sidebarFooter
         }
+        // The two paddings trade the same inset across the surface modifier,
+        // so content holds its absolute position while only the panel's top
+        // edge moves between full height (expanded) and tucked (collapsing).
+        .padding(.top, sidebarTopTucked ? 0 : sidebarTuckTop)
         .modifier(SidebarSurface(shape: sidebarPanelShape, seamless: inTerminalView))
-        .padding(.top, trafficLightInset - 16)
+        .padding(.top, sidebarTopTucked ? sidebarTuckTop : 0)
     }
 
     // MARK: - Collapsed rail
@@ -664,29 +704,70 @@ struct MainWindowView: View {
     /// corner on the empty state — accepted for the thin rail.
     private let railWidth: CGFloat = 52
 
-    /// The collapsed sidebar: three section icons whose popovers carry the
-    /// same rows the full sidebar shows, expand at the bottom above the gear.
+    /// The collapsed sidebar, mirroring the expanded layout (2026-09-16):
+    /// the top-tile trio (New Chat, Tasks, Servers — same actions, Servers
+    /// opens the right sheet, not a flyout) above the rule, then the
+    /// table's sections (Terminals, Projects) as flyout buttons below it.
     private var railColumn: some View {
         VStack(spacing: 6) {
             // Expand lives in the fixed `collapseToggleLayer` beside the
-            // traffic lights — the same spot as when the sidebar is out.
-            // Gear and bell live in the titlebar strip beside the collapse
-            // toggle now — the rail keeps just Tasks above the rule.
-            FooterLabeledButton(
-                systemName: "checklist",
-                dot: tracked.attentionCount > 0,
-                active: rightPanel == .tasks,
-                help: "Tasks and reminders across all projects",
-                action: { openAllTasks() }
-            )
+            // traffic lights — the same spot as when the sidebar is out;
+            // gear and bell ride the titlebar strip beside it.
+            // The trio's labels come from the INSTANT tip layer (help: ""
+            // so the delayed system tooltip doesn't double up beside it).
+            RailButton(
+                help: "",
+                active: chatTarget == ChatTarget(
+                    path: NSHomeDirectory(), sessionFile: nil),
+                action: {
+                    chatTarget = ChatTarget(
+                        path: NSHomeDirectory(), sessionFile: nil)
+                }
+            ) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .modifier(railTipHover(.newChat))
             .padding(.top, 14)
+            RailButton(
+                help: "",
+                active: rightPanel == .tasks,
+                action: { openAllTasks() }
+            ) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textSecondary)
+                    .overlay(alignment: .topTrailing) {
+                        if tracked.attentionCount > 0 {
+                            Circle()
+                                .fill(Theme.dotDegraded)
+                                .frame(width: 5, height: 5)
+                                .offset(x: 4, y: -3)
+                        }
+                    }
+            }
+            .modifier(railTipHover(.tasks))
+            RailButton(
+                help: "",
+                active: rightPanel == .servers,
+                action: { toggleRightPanel(.servers) }
+            ) {
+                // Same rule as the expanded tile: live servers show as
+                // the green count badge; idle shows the quiet glyph.
+                if servers.devServers.isEmpty {
+                    ServerGlyph(color: Theme.textSecondary, size: 15)
+                } else {
+                    ServerCountBadge(count: servers.devServers.count, diameter: 18)
+                }
+            }
+            .modifier(railTipHover(.servers))
             // Same short rule as the expanded footer, centered on the rail.
             Rectangle()
                 .fill(Theme.borderSidebar)
                 .frame(width: 24, height: 1)
                 .padding(.vertical, 2)
             railButton(.terminals)
-            railButton(.servers)
             railButton(.projects)
             Spacer(minLength: 0)
             if let update = updates.available {
@@ -708,17 +789,23 @@ struct MainWindowView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .modifier(SidebarSurface(shape: sidebarPanelShape, seamless: inTerminalView))
-        .padding(.top, trafficLightInset - 16)
+        .padding(.top, sidebarTuckTop)
     }
 
     private func railButton(_ section: RailSection) -> some View {
-        RailButton(
-            help: section.title,
+        let tip: RailTipItem = switch section {
+        case .terminals: .terminals
+        case .servers: .servers
+        case .projects: .projects
+        }
+        return RailButton(
+            help: "",
             active: railPopover == section,
             action: { setRailPopover(railPopover == section ? nil : section) }
         ) {
             railIcon(section)
         }
+        .modifier(railTipHover(tip))
     }
 
     /// The sidebar collapse/expand toggle, pinned to the titlebar strip
@@ -743,9 +830,28 @@ struct MainWindowView: View {
         // below the lights' line.
         .padding(.top, 5)
         .frame(height: trafficLightInset, alignment: .top)
-        // The strip is bare chromeBackground now (the sidebar panel starts
-        // below it) — over a dark surface (terminal theme, the empty-state
-        // sky) the glyph must resolve its dark-appearance color.
+        // The strip cover: an opaque app-background plate under the lights
+        // and buttons. The expanded sidebar runs full height beneath it, so
+        // the panel pokes out to its right and the cover's rounded corner
+        // cuts the wrap-around notch. Hit-testing off so clicks land where
+        // they always did (the cover is chrome, not a control).
+        .background(alignment: .topLeading) {
+            UnevenRoundedRectangle(bottomTrailingRadius: 14)
+                .fill(chromeBackground)
+                // Subtle edge on the plate's exposed run (bottom + the
+                // rounded corner + right); the mask trims the top and
+                // left, which sit flush to the window edges.
+                .overlay(
+                    UnevenRoundedRectangle(bottomTrailingRadius: 14)
+                        .inset(by: 0.5)
+                        .stroke(Theme.borderSidebar, lineWidth: 1)
+                        .mask(Rectangle().padding(.leading, 2).padding(.top, 2))
+                )
+                .frame(width: stripCoverWidth, height: stripCoverHeight)
+                .allowsHitTesting(false)
+        }
+        // Over a dark surface (terminal theme, the empty-state sky) the
+        // glyph must resolve its dark-appearance color.
         .colorScheme(chromeIsDark ? .dark : .light)
     }
 
@@ -1550,21 +1656,70 @@ struct MainWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Aligns the flyout's top edge with the rail button that opened it —
-    /// the buttons stack at `trafficLightInset` in 30pt + 6pt-spacing
-    /// steps, below the expand + cluster icons (4 rows) and the rule.
+    /// The instant tooltip beside the hovered rail icon — same second-layer
+    /// card language as the flyouts, suppressed while a flyout is open
+    /// (they share the slot beside the rail).
+    @ViewBuilder
+    private var railTipLayer: some View {
+        if sidebarCollapsed, railPopover == nil, let tip = railTip {
+            Text(tip.label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.panelFill)
+                        .shadow(
+                            color: Theme.floatShadowColor,
+                            radius: 4, x: 0, y: 1
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                )
+                .offset(x: railWidth + 8, y: railTipTop(tip))
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    /// Vertical center of a rail row's tooltip: the rows stack from the
+    /// panel top in 36pt steps (30pt button + 6 spacing), with the rule
+    /// block (5pt + 6 spacing) between the trio and the sections; the
+    /// ~23pt tip card centers on the 30pt button.
+    private func railTipTop(_ tip: RailTipItem) -> CGFloat {
+        let rowTop = sidebarTuckTop + 14 + tip.row * 36
+            + (tip.row >= 3 ? 11 : 0)
+        return rowTop + 3
+    }
+
+    /// Hover wiring for one rail row — entering sets the tip, leaving
+    /// clears it only if it's still ours (rows share one tip slot).
+    private func railTipHover(_ item: RailTipItem) -> some ViewModifier {
+        HoverAction { inside in
+            if inside {
+                railTip = item
+            } else if railTip == item {
+                railTip = nil
+            }
+        }
+    }
+
+    /// Aligns the flyout's top edge with the rail button that opened it.
     private func flyoutTop(for section: RailSection) -> CGFloat {
         let index: CGFloat = switch section {
         case .terminals: 0
-        case .servers: 1
-        case .projects: 2
+        // Servers opens the right sheet now, not a flyout — the case
+        // exists only for exhaustiveness.
+        case .servers: 0
+        case .projects: 1
         }
-        // Icons + the short rule, minus the expand button (22 + 6 spacing)
-        // that moved to the fixed titlebar toggle (2026-09-13); +4 for the
-        // floating panel's inner top padding (10) replacing the old
-        // titlebar strip's trailing 6pt spacing.
-        let clusterHeight: CGFloat = 4 * 36 + 11 - 28 + 4
-        return trafficLightInset + clusterHeight + index * 36
+        // Panel top + inner padding (14), then the top trio (three 30pt
+        // buttons + 6pt spacings) and the rule block (5pt + 6 spacing)
+        // sit above the first flyout button; each further row is 36pt.
+        return sidebarTuckTop + 14 + 3 * 36 + 11 + index * 36
     }
 
     @ViewBuilder
@@ -1583,15 +1738,61 @@ struct MainWindowView: View {
         }
     }
 
-    private func setSidebarCollapsed(_ collapsed: Bool) {
-        guard collapsed != sidebarCollapsed else { return }
+    /// Two-phase choreography (2026-09-16): collapsing tucks the panel's
+    /// top edge down under the strip cover FIRST, then after a beat swaps
+    /// to the rail — the top-right corner drops past the traffic lights,
+    /// then slides left, reading as the edge wrapping around them.
+    /// Expanding runs the phases in reverse. `staged: false` (the divider
+    /// drag) does both at once — a delayed width swap mid-drag would fight
+    /// the gesture's origin rebasing.
+    private func setSidebarCollapsed(_ collapsed: Bool, staged: Bool = true) {
+        guard collapsed != sidebarCollapsed || collapsed != sidebarTopTucked
+        else { return }
         railPopover = nil
-        withAnimation(.easeOut(duration: 0.15)) { sidebarCollapsed = collapsed }
+        collapseStageSeq += 1
+        let seq = collapseStageSeq
         updateSettings { $0.sidebarCollapsed = collapsed }
+        guard staged else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                sidebarTopTucked = collapsed
+                sidebarCollapsed = collapsed
+            }
+            return
+        }
+        if collapsed {
+            // Mirror of the expand sweep below: the top drop leads and
+            // the width joins while it's still moving — one diagonal
+            // down-and-in motion on the same overlapping springs.
+            withAnimation(.spring(duration: 0.34, bounce: 0.14)) {
+                sidebarTopTucked = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                guard seq == collapseStageSeq else { return }
+                withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
+                    sidebarCollapsed = true
+                }
+            }
+        } else {
+            // Expand sweeps: the width leads and the top joins while the
+            // width is still moving — overlapping springs read as one
+            // diagonal out-and-up motion. Waiting for the width to land
+            // before popping the top felt like two mechanical steps.
+            withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
+                sidebarCollapsed = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                guard seq == collapseStageSeq else { return }
+                withAnimation(.spring(duration: 0.34, bounce: 0.14)) {
+                    sidebarTopTucked = false
+                }
+            }
+        }
     }
 
     private func toggleSidebarCollapse() {
-        setSidebarCollapsed(!sidebarCollapsed)
+        // Both-at-rest is the only true "collapsed"; mid-choreography a
+        // second toggle re-runs the collapse rather than guessing intent.
+        setSidebarCollapsed(!(sidebarCollapsed && sidebarTopTucked))
     }
 
     /// Select from a rail popover: dismiss first, then route through the
@@ -1720,7 +1921,7 @@ struct MainWindowView: View {
                         hasTerminal: true,
                         gitStatus: git.rowStatuses[path] ?? .none,
                         hovered: hovered,
-                        selected: selection == .project(path),
+                        selected: highlightedSelection == .project(path),
                         onClose: { closeTerminal(path) }
                     )
                 }
@@ -1735,7 +1936,7 @@ struct MainWindowView: View {
                             hasTerminal: true,
                             gitStatus: git.rowStatuses[path] ?? .none,
                             hovered: hovered,
-                            selected: selection == .shell(path: path, tab: tab.id),
+                            selected: highlightedSelection == .shell(path: path, tab: tab.id),
                             onClose: { terminals.closeTab(path: path, tabID: tab.id) }
                         )
                     }
@@ -1934,7 +2135,31 @@ struct MainWindowView: View {
     private var modalLayer: some View {
         ZStack {
             capsuleDialogLayer
+            providerKeyDialogLayer
             onboardingLayer
+        }
+    }
+
+    /// The provider API-key dialog: same traditional modal chrome as the
+    /// capsule dialog — dimmed scrim, click-away or Esc cancels.
+    @ViewBuilder
+    private var providerKeyDialogLayer: some View {
+        if let provider = providerAuth.keyPrompt {
+            ZStack {
+                Color.black.opacity(0.25)
+                    .contentShape(Rectangle())
+                    .onTapGesture { providerAuth.keyPrompt = nil }
+                ProviderKeyDialog(
+                    provider: provider,
+                    onSave: { key in
+                        providerAuth.setKey(key, for: provider.id)
+                        providerAuth.keyPrompt = nil
+                    },
+                    onCancel: { providerAuth.keyPrompt = nil }
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .transition(.opacity)
         }
     }
 
@@ -2114,8 +2339,8 @@ struct MainWindowView: View {
             systemName: "server.rack",
             label: "Servers",
             active: rightPanel == .servers,
-            iconTint: servers.devServers.isEmpty ? nil : Theme.dotActive,
             serverIcon: true,
+            count: servers.devServers.count,
             rowLayout: rowLayout,
             help: "Dev servers",
             action: { toggleRightPanel(.servers) }
@@ -3379,7 +3604,7 @@ struct MainWindowView: View {
                         diffTooltipOnly: sidebarNarrow,
                         isProject: ProjectKindCache.isProject(path),
                         hovered: hovered,
-                        selected: selection == id
+                        selected: highlightedSelection == id
                     )
                 } else {
                     let mainTab = terminals.tabs[path]?.first?.id
@@ -3397,7 +3622,7 @@ struct MainWindowView: View {
                         gitStatus: git.rowStatuses[path] ?? .none,
                         needsAttention: notify.hasAttention(path: path),
                         hovered: hovered,
-                        selected: selection == id,
+                        selected: highlightedSelection == id,
                         onClose: { closeTerminal(path) },
                         renaming: renaming,
                         onRename: { result in
@@ -3418,7 +3643,7 @@ struct MainWindowView: View {
                     gitStatus: git.rowStatuses[path] ?? .none,
                     needsAttention: notify.hasAttention(path: path, tab: tabID),
                     hovered: hovered,
-                    selected: selection == id,
+                    selected: highlightedSelection == id,
                     onClose: { terminals.closeTab(path: path, tabID: tabID) },
                     renaming: renaming,
                     onRename: { result in
@@ -3480,7 +3705,7 @@ struct MainWindowView: View {
             let collapsed = collapsedProjects.contains(path)
             return "f:\(folderName)|\(collapsed ? "c" : "-")|\(hovered ? "h" : "-")"
         case let .row(id, title):
-            let selected = selection == id
+            let selected = highlightedSelection == id
             switch id {
             case let .project(path):
                 // Idle rows read the diff subtext and the narrow flag;
@@ -3761,6 +3986,11 @@ struct MainWindowView: View {
         if case let .project(path) = target {
             terminals.pane(for: path)
         }
+        // Leaving chat mode must not depend on `.onChange(of: selection)`:
+        // opening a chat never moves the selection, so clicking the
+        // still-selected terminal row fires no change and the chat stayed
+        // stuck on screen. Every select() means "show me that terminal".
+        if target != nil { chatTarget = nil }
         selection = target
         // Selecting a terminal row means "type here now": focus follows the
         // selection into the pane, so keys (including arrows) go to the
@@ -3773,6 +4003,15 @@ struct MainWindowView: View {
         default:
             break
         }
+    }
+
+    /// What the sidebar HIGHLIGHTS as selected: nothing while a chat is
+    /// on screen — the chat row wears the open state then, and a terminal
+    /// row lit at the same time read as two selections. `selection` itself
+    /// is untouched (git watch, status bar, and the return click's target
+    /// all still need it).
+    private var highlightedSelection: SidebarSelection? {
+        chatTarget == nil ? selection : nil
     }
 
     /// `$selection` for the table, routed through `select(_:)`.
@@ -3807,8 +4046,16 @@ struct MainWindowView: View {
                 NotificationCenter.default.publisher(for: .houstonChatRekeyed)
             ) { note in
                 guard let project = note.userInfo?["project"] as? String,
-                      let file = note.userInfo?["file"] as? String,
-                      chatTarget?.path == project else { return }
+                      let file = note.userInfo?["file"] as? String
+                else { return }
+                // Follow when the open chat is the one being rekeyed —
+                // matched by the new project, or by the path the browser
+                // was opened under (`fromPath`: a project-less New Chat
+                // promoted into its chosen project).
+                let fromPath = note.userInfo?["fromPath"] as? String
+                guard chatTarget?.path == project
+                    || (fromPath != nil && chatTarget?.path == fromPath)
+                else { return }
                 chatTarget = ChatTarget(path: project, sessionFile: file)
             }
             // The auto-seal sweep lives in CapsuleStore; the view's only
@@ -4000,6 +4247,42 @@ private enum RailSection: String, Identifiable {
     }
 }
 
+/// One rail row for the instant-tooltip layer: label + position in the
+/// rail's stack (the rule sits between rows 2 and 3).
+private enum RailTipItem: Equatable {
+    case newChat, tasks, servers, terminals, projects
+
+    var label: String {
+        switch self {
+        case .newChat: "New Chat"
+        case .tasks: "Tasks"
+        case .servers: "Servers"
+        case .terminals: "Terminals"
+        case .projects: "Projects"
+        }
+    }
+
+    var row: CGFloat {
+        switch self {
+        case .newChat: 0
+        case .tasks: 1
+        case .servers: 2
+        case .terminals: 3
+        case .projects: 4
+        }
+    }
+}
+
+/// `.onHover` as a passable modifier — lets a helper hand the same
+/// enter/leave wiring to several buttons.
+private struct HoverAction: ViewModifier {
+    let action: (Bool) -> Void
+
+    func body(content: Content) -> some View {
+        content.onHover(perform: action)
+    }
+}
+
 /// A rail icon button: quiet glyph, hover fill, selected fill while its
 /// popover is open.
 private struct RailButton<Icon: View>: View {
@@ -4010,18 +4293,30 @@ private struct RailButton<Icon: View>: View {
     @State private var hovered = false
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             icon()
                 .frame(width: 34, height: 30)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .fill(active ? Theme.rowSelected : (hovered ? Theme.rowHovered : .clear))
+                        .fill(active
+                            ? Theme.buttonActiveFill
+                            : (hovered ? Theme.rowHovered : .clear))
                 )
+                .overlay {
+                    if active {
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .strokeBorder(Theme.buttonActiveStroke, lineWidth: 1.5)
+                    }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help(help)
+        // Empty help = the caller labels the button itself (the rail's
+        // instant tip layer) — don't stack the delayed system tooltip.
+        return Group {
+            if help.isEmpty { button } else { button.help(help) }
+        }
     }
 }
 
@@ -4124,6 +4419,22 @@ private struct SidebarSurface: ViewModifier {
 
 /// One of the sidebar's three top tiles: icon over label in an even box,
 /// a step darker than the sidebar panel, hairline border, hover lift.
+/// The running-server tally as an icon: small green count inside a
+/// green ring — stroke only, no fill.
+private struct ServerCountBadge: View {
+    let count: Int
+    var diameter: CGFloat = 18
+
+    var body: some View {
+        Text(String(count))
+            .font(.system(size: 10, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(Theme.textPositive)
+            .frame(width: diameter, height: diameter)
+            .overlay(Circle().strokeBorder(Theme.dotActive, lineWidth: 1.5))
+    }
+}
+
 private struct TopTileButton: View {
     let systemName: String
     let label: String
@@ -4132,6 +4443,9 @@ private struct TopTileButton: View {
     var iconTint: Color? = nil
     /// Draw the hand-drawn server glyph instead of an SF Symbol.
     var serverIcon: Bool = false
+    /// Live tally (running dev servers) — when non-zero it REPLACES the
+    /// server glyph as the tile's icon, in signal green.
+    var count: Int = 0
     /// Narrow-sidebar mode: icon beside label in a short full-width row
     /// instead of icon over label in an even tile.
     var rowLayout: Bool = false
@@ -4142,7 +4456,13 @@ private struct TopTileButton: View {
     @ViewBuilder
     private func iconView(size: CGFloat) -> some View {
         if serverIcon {
-            ServerGlyph(color: iconTint ?? Theme.text.opacity(0.85), size: size + 2)
+            // Live servers: the COUNT is the icon — a green circle badge,
+            // one glance says "2 running". Idle: the quiet gray glyph.
+            if count > 0 {
+                ServerCountBadge(count: count, diameter: size + 4)
+            } else {
+                ServerGlyph(color: iconTint ?? Theme.text.opacity(0.85), size: size + 2)
+            }
         } else {
             Image(systemName: systemName)
                 .font(.system(size: size))
@@ -4177,12 +4497,20 @@ private struct TopTileButton: View {
                     .frame(height: 54)
                 }
             }
+            // Rest sits darker than the sidebar; active lifts to the
+            // lighter fill. Hover is the sidebar rows' own wash
+            // (`rowHovered`, translucent) layered over the rest fill, so
+            // tiles and rows read as one hover language.
             .background(
                 RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                    .fill(active
-                        ? Theme.tileActive
-                        : (hovered ? Theme.tileHovered : Theme.tileFill))
+                    .fill(active ? Theme.tileActive : Theme.tileFill)
             )
+            .overlay {
+                if hovered, !active {
+                    RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                        .fill(Theme.rowHovered)
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if dot {
                     Circle()
@@ -4256,9 +4584,15 @@ private struct FooterLabeledButton: View {
             .background(
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .fill(active
-                        ? Theme.rowSelected
+                        ? Theme.buttonActiveFill
                         : (hovered ? Theme.rowHovered : .clear))
             )
+            .overlay {
+                if active {
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.buttonActiveStroke, lineWidth: 1.5)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

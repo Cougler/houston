@@ -10,6 +10,10 @@ struct AnnotationRowView: View {
     /// Card styling for the tasks sheet. The web preview's list keeps the
     /// quiet hover-pill rows — it draws on `panelFill`, where cards vanish.
     var carded = false
+    /// The composed task prompt, set by the tasks sheet: the row's action
+    /// becomes COPY (paste it into any chat — Claude, Codex, Gemini,
+    /// Grok) instead of the web preview's send-to-session paperplane.
+    var copyText: String? = nil
     let onSend: () -> Void
     let onToggleDone: () -> Void
     let onDelete: () -> Void
@@ -73,7 +77,14 @@ struct AnnotationRowView: View {
             Spacer(minLength: 4)
             HStack(spacing: 2) {
                 if !item.done {
-                    AnnotationIconButton(symbol: "paperplane", help: "Send to Claude now", action: onSend)
+                    if let copyText {
+                        CopyIconButton(
+                            text: copyText,
+                            help: "Copy task — paste it into any chat"
+                        )
+                    } else {
+                        AnnotationIconButton(symbol: "paperplane", help: "Send to Claude now", action: onSend)
+                    }
                 }
                 AnnotationIconButton(symbol: "trash", help: "Delete", action: onDelete)
             }
@@ -115,7 +126,7 @@ struct AnnotationRowView: View {
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(.white)
                 } else {
-                    Circle().strokeBorder(Theme.buttonActiveStroke, lineWidth: 1.5)
+                    Circle().strokeBorder(Theme.heading, lineWidth: 1.5)
                 }
             }
             .frame(width: 16, height: 16)
@@ -243,15 +254,6 @@ struct AnnotationsSheetPanel: View {
                 .padding(.vertical, 4)
             }
             .frame(maxHeight: .infinity)
-            if !unsentOpen.isEmpty {
-                Rectangle()
-                    .fill(Theme.borderFooter)
-                    .frame(height: 1)
-                Button("Send all open (\(unsentOpen.count))") { sendAll() }
-                    .font(Theme.Fonts.body)
-                    .controlSize(.small)
-                    .padding(.vertical, 10)
-            }
             chatInput
         }
     }
@@ -288,10 +290,6 @@ struct AnnotationsSheetPanel: View {
         newChange.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var unsentOpen: [Annotation] {
-        store.open.filter { !$0.sent }
-    }
-
     private func addManual() {
         let trimmed = newChange.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -304,13 +302,10 @@ struct AnnotationsSheetPanel: View {
             item: item,
             projectPath: projectPath,
             carded: true,
-            onSend: {
-                PromptDelivery.send(
-                    AnnotationPrompts.compose(item, projectRoot: projectPath),
-                    toProject: projectPath
-                )
-                store.markSent(item.id)
-            },
+            // Copy, not send-to-Claude: the prompt pastes into ANY chat
+            // (Claude, Codex, Gemini, Grok) or terminal.
+            copyText: AnnotationPrompts.compose(item, projectRoot: projectPath),
+            onSend: {},
             onToggleDone: {
                 item.done ? store.markUndone(item.id) : store.markDone(item.id)
             },
@@ -319,15 +314,6 @@ struct AnnotationsSheetPanel: View {
         )
     }
 
-    private func sendAll() {
-        let pending = unsentOpen
-        guard !pending.isEmpty else { return }
-        PromptDelivery.send(
-            AnnotationPrompts.composeBatch(pending, projectRoot: projectPath),
-            toProject: projectPath
-        )
-        for item in pending { store.markSent(item.id) }
-    }
 }
 
 /// The tasks sheet's navigation shell: All Tasks is the root; a project's
