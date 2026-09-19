@@ -223,10 +223,16 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   Anchors can be ANY selected text, not just whole paragraphs:
   right-click a reply paragraph → "Ask About Selected Text" (falls back
   to the whole paragraph when no selection captures — the item never
-  dead-ends), or Edit ▸ Ask About Selection (⇧⌘A). The custom context
-  menu REPLACES the system text menu, so it carries its own Copy. A
-  drag-detection pill (NSEvent monitor) was tried first and REMOVED —
-  gesture-sniffing selection was unreliable; don't re-add it. Capture is via
+  dead-ends), or Edit ▸ Ask About Selection (⇧⌘A). Right-clicks over
+  SELECTED text never reach SwiftUI's .contextMenu — the selection's
+  AppKit layer shows the system text menu instead — so a rightMouseDown
+  monitor steps in front: valid selection → Houston's own NSMenu (Ask
+  About "…" + Copy), event swallowed; otherwise pass-through. The
+  paragraph .contextMenu still REPLACES the system menu on unselected
+  text, so it carries its own Copy. A drag-detection pill was tried
+  first and REMOVED — gesture-sniffing selection was unreliable; don't
+  re-add it. Capture reads the first responder NSTextView's selected
+  range directly (the selection layer IS one), falling back to
   `ChatThread.capturedSelection()` — a responder-chain copy: with the
   pasteboard deep-copied and restored around it, because SwiftUI's
   selectable Text exposes no selected-range API — validates the quote
@@ -304,6 +310,15 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   `server.allowedHosts: ['.local']` in their own vite config.
 
 ## Gotchas — all of these were bugs, not theory
+
+- **NSItemProvider completion closures MUST be explicitly `@Sendable`.**
+  Several of its completion params (loadDataRepresentation, loadItem)
+  carry no @Sendable annotation in the SDK, so a bare closure literal
+  inside a MainActor view INHERITS MainActor isolation — and the
+  provider invokes it on a background queue, tripping the Swift runtime
+  isolation assertion (SIGTRAP in dispatch_assert_queue). Crashed on
+  image-DATA drops into the composer (screenshot thumbnails, browser
+  drags) while Finder fileURL drops worked; three identical crash logs.
 
 - **A refused backend connect surfaces as `.waiting`, not `.failed`.**
   Network.framework retries a refused localhost connection forever, so

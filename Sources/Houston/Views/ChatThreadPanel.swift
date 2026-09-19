@@ -89,13 +89,30 @@ enum ChatThread {
         return out
     }
 
-    /// The window's current text selection, captured without disturbing
-    /// the user's clipboard: deep-copy the pasteboard, drive the focused
-    /// responder's copy:, read the result, put the original back.
-    /// SwiftUI exposes no selected-range API for selectable Text — this
-    /// responder-chain route is the only public path to the selection.
+    /// The window's current text selection. SwiftUI's selectable Text is
+    /// backed by an AppKit text layer — when that layer is the first
+    /// responder, its selected range is readable DIRECTLY, which is the
+    /// reliable path. The pasteboard round-trip below stays as fallback.
     @MainActor
     static func capturedSelection() -> String? {
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView {
+            let range = textView.selectedRange()
+            if range.length > 0,
+               range.location + range.length <= (textView.string as NSString).length {
+                let text = (textView.string as NSString).substring(with: range)
+                if !text.trimmingCharacters(in: .whitespaces).isEmpty {
+                    return text
+                }
+            }
+        }
+        return pasteboardCapturedSelection()
+    }
+
+    /// Fallback capture without disturbing the user's clipboard:
+    /// deep-copy the pasteboard, drive the focused responder's copy:,
+    /// read the result, put the original back.
+    @MainActor
+    private static func pasteboardCapturedSelection() -> String? {
         let pasteboard = NSPasteboard.general
         let saved: [NSPasteboardItem] = (pasteboard.pasteboardItems ?? []).map { item in
             let copy = NSPasteboardItem()

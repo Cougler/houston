@@ -218,6 +218,15 @@ struct ChatBrowserView: View {
     /// The earliest rollover segment currently expanded into the
     /// transcript (nil = only the chain head is shown).
     @State private var chainEarliest: String?
+    /// Right-click interceptor for the transcript: right-clicks over
+    /// SELECTED text are handled by the selection's own AppKit layer,
+    /// which shows the system text menu — SwiftUI's .contextMenu never
+    /// fires there. The monitor steps in front: with a valid selection
+    /// it pops Houston's menu and swallows the event; without one it
+    /// passes through untouched (paragraph menu, composer, code cards).
+    @State private var contextMonitor: Any?
+    /// The transcript's frame in global coords, gating the interceptor.
+    @State private var transcriptFrame: CGRect = .zero
     /// Whether the transcript follows the stream. Latching with hysteresis
     /// (not a bare "is the sentinel visible" recompute): a chunky append
     /// briefly shoves the sentinel far below the fold, and the old
@@ -533,6 +542,14 @@ struct ChatBrowserView: View {
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
                     }
+                    .onAppear {
+                        transcriptFrame = geo.frame(in: .global)
+                        installContextMonitor()
+                    }
+                    .onChange(of: geo.size) { _, _ in
+                        transcriptFrame = geo.frame(in: .global)
+                    }
+                    .onDisappear { removeContextMonitor() }
                 }
             } else {
                 ProgressView()
@@ -726,6 +743,54 @@ struct ChatBrowserView: View {
             )
             ChatIndexStore.shared.refresh(project, force: true)
         }
+    }
+
+    // MARK: - Selection right-click
+
+    private func installContextMonitor() {
+        removeContextMonitor()
+        contextMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.rightMouseDown]
+        ) { event in
+            guard let content = event.window?.contentView else { return event }
+            // Window coords (bottom-left, y up) → SwiftUI global
+            // (top-left, y down).
+            let location = event.locationInWindow
+            let global = CGPoint(
+                x: location.x, y: content.bounds.height - location.y
+            )
+            guard transcriptFrame.contains(global),
+                  let selection = ChatThread.capturedSelection(),
+                  let messages,
+                  ChatThread.blockKey(
+                      containing: ChatThread.anchorKey(for: selection),
+                      in: messages
+                  ) != nil,
+                  let ref = selected
+            else { return event }
+            let anchor = ChatThread.anchorKey(for: selection)
+            let menu = NSMenu()
+            let excerpt = String(anchor.prefix(28))
+            menu.addItem(ClosureMenuItem(
+                "Ask About \u{201C}\(excerpt)\(anchor.count > 28 ? "…" : "")\u{201D}"
+            ) {
+                openThread(ref: ref, anchor: anchor)
+            })
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(selection, forType: .string)
+            })
+            NSMenu.popUpContextMenu(menu, with: event, for: content)
+            // Swallowed: the selection layer would have shown the system
+            // text menu over ours.
+            return nil
+        }
+    }
+
+    private func removeContextMonitor() {
+        if let contextMonitor { NSEvent.removeMonitor(contextMonitor) }
+        contextMonitor = nil
     }
 
     // MARK: - Sends
@@ -2201,7 +2266,7 @@ private struct ChatComposer: View {
                 handled = true
                 provider.loadItem(
                     forTypeIdentifier: UTType.fileURL.identifier, options: nil
-                ) { item, _ in
+                ) { @Sendable item, _ in
                     let url: URL? = switch item {
                     case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
                     case let url as URL: url
@@ -2212,9 +2277,15 @@ private struct ChatComposer: View {
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 handled = true
+                // Explicitly @Sendable: this SDK's completionHandler
+                // param carries no @Sendable annotation, so a bare
+                // closure literal INHERITS the composer's MainActor
+                // isolation — and NSItemProvider then invokes it on a
+                // background queue, tripping the runtime isolation
+                // assertion (SIGTRAP; three crash logs, all this frame).
                 provider.loadDataRepresentation(
                     forTypeIdentifier: UTType.image.identifier
-                ) { data, _ in
+                ) { @Sendable data, _ in
                     guard let data, let saved = Self.saveDroppedImage(data) else { return }
                     DispatchQueue.main.async { stage(URL(fileURLWithPath: saved)) }
                 }
