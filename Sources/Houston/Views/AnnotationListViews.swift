@@ -105,8 +105,10 @@ struct AnnotationRowView: View {
         )
         .overlay(alignment: .bottom) {
             if carded {
+                // Faded like the sheet lists' rows — the full-strength
+                // hairline read as a heavy rule between tasks.
                 Rectangle()
-                    .fill(Theme.borderSidebar)
+                    .fill(Theme.borderSidebar.opacity(0.45))
                     .frame(height: 1)
                     .opacity(hovered ? 0 : 1)
             }

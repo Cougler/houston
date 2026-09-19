@@ -68,6 +68,17 @@ enum MainMenu {
             action: #selector(NSText.selectAll(_:)),
             keyEquivalent: "a"
         )
+        editMenu.addItem(.separator())
+        // Thread the selected run of a chat reply — the transcript view
+        // validates the selection and opens the thread panel.
+        let askSelection = ClosureMenuItem("Ask About Selection") {
+            NotificationCenter.default.post(
+                name: .houstonAskSelection, object: nil
+            )
+        }
+        askSelection.keyEquivalent = "a"
+        askSelection.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(askSelection)
         editItem.submenu = editMenu
         main.addItem(editItem)
 

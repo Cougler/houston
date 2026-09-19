@@ -209,6 +209,37 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   machine) — stream shapes are the same session/update chunks the driver
   already handles, and pi-acp's bundle emits no `usage_update`, so no
   context meter (codex-style).
+- **Inline chat threads (2026-09-19).** Ask about ONE paragraph of a reply
+  without losing your place: hover a reply paragraph → "ask about this" →
+  a thread panel in the right sheet (`RightPanel.chatThread`,
+  `ChatThreadPanel.swift`). A thread turn is a normal turn into the SAME
+  session prefixed `[Re: "<anchor>"] question` (`ChatThread.compose`) —
+  the model sees the reference, the transcript keeps the exchange on disk
+  (no sidecar), and the UI routes marker-prefixed exchanges into the
+  panel: `ChatThread.strippingExchanges` filters them from the main flow
+  (transcript, carried turns, live stream — `LiveTurnView.threadTurn`),
+  `ChatThread.exchanges(in:anchor:)` collects one anchor's pairs, and
+  reply-count chips ride the anchored paragraphs (`ThreadableBlock`).
+  Anchors can be ANY selected text, not just whole paragraphs:
+  right-click a reply paragraph → "Ask About Selected Text" (falls back
+  to the whole paragraph when no selection captures — the item never
+  dead-ends), or Edit ▸ Ask About Selection (⇧⌘A). The custom context
+  menu REPLACES the system text menu, so it carries its own Copy. A
+  drag-detection pill (NSEvent monitor) was tried first and REMOVED —
+  gesture-sniffing selection was unreliable; don't re-add it. Capture is via
+  `ChatThread.capturedSelection()` — a responder-chain copy: with the
+  pasteboard deep-copied and restored around it, because SwiftUI's
+  selectable Text exposes no selected-range API — validates the quote
+  lives inside ONE assistant paragraph, and threads it. Chips hang off
+  whichever paragraph CONTAINS each quote (`blockThreads`, containment
+  over normalized text; several on one paragraph each lead with a
+  sliver of their quote). Anchor key = the quote's first 90 chars,
+  quotes flattened to singles so the marker's `"]` terminator parses
+  unambiguously. Same
+  hide-from-view-keep-for-model contract as the handoff prefix-collapse.
+  One session = one turn at a time: a thread question mid-turn queues
+  like any held message; the tangent stays in the model's context by
+  design.
 - `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to

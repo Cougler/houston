@@ -2,6 +2,30 @@
 
 ---
 
+## 2026-09-19 — Inline chat threads; sidebar/chat polish; 1.0.31 shipped
+
+Inline threads are live: any reply paragraph (or any selected run of text via right-click or ⇧⌘A) opens a Slack-style thread in the right sheet, running through the same session with marker-prefixed turns that the main flow hides. Version 1.0.31 shipped earlier this session with the Pi harness, the wrap-around sidebar collapse, and the provider key dialog; the thread work since then is built and running locally but unreleased. Next: exercise threads against a live agent turn and ship them.
+
+**Done this session:**
+- Pi as a provider-agnostic ACP harness (pi-acp adapter, model via session/set_config_option, harness-menu hops)
+- Sidebar wrap-around collapse: full-height panel under the traffic-light plate, overlapping-spring choreography, rail mirroring the expanded layout, instant rail tooltips
+- Provider API key dialog in-window (replaces NSAlert); tile rest/active/hover restyle; server count badge; chat rows icon-less with project favicons
+- Chat: narration before the last tool call dims; consecutive tool chips fold into a "N steps" disclosure; composer image drops always become thumbnails
+- Inline chat threads: right-sheet panel, same-session marker-prefixed turns, reply-count chips, right-click "Ask About Selected Text" + ⇧⌘A
+- Released 1.0.31 (GitHub + tryhoustonapp.com in sync)
+
+**Up next:**
+- Smoke-test threads end-to-end against a live agent turn, then release
+- First authed Pi streaming turn (needs pi credentials)
+
+**Handoff:**
+- The thread feature is UNVERIFIED against a live turn: marker parsing, main-flow stripping, and the panel's live stream all built to the transcript shapes but no real exchange has run through them yet.
+- Selection capture (ChatThread.capturedSelection, responder-chain copy with pasteboard restore) may still be flaky — the user reported the drag-pill version failing before it was replaced with the right-click menu; if "Ask About Selected Text" falls back to whole-paragraph threads, the capture is the remaining suspect.
+- A drag-detection pill for selections was tried and deliberately removed; don't re-add it (CLAUDE.md records this).
+- Working tree has the thread work + polish uncommitted at log time; 1.0.31's tag sits at commit 3e764b1.
+
+---
+
 ## 2026-09-10 — Local MLX models land; chat polish pass; 1.0.25 + 1.0.26 shipped
 
 Local models work end-to-end: MLX Core (mlx-serve) is detected, its chat models list in the composer, and Codex runs them through a custom provider against the local /v1 endpoint — a real local turn was verified from the UI. The chat surface got a full polish pass (composer control row with harness/model/permissions chips, Stop in the send slot, contextual on-device titles, hugging bubbles, unified lighter chrome) and everything is committed, pushed, and released as 1.0.25 then 1.0.26 with the site in sync. Next: Ollama/LM Studio engines, and exercising the Codex permission-mode mappings live.

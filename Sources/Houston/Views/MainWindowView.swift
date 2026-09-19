@@ -42,6 +42,10 @@ enum RightPanel: Equatable {
     /// A project's capsule shelf — its sealed chats. `focus` (a capsule
     /// id) lands straight in that capsule's transcript view.
     case capsules(project: String)
+    /// An inline chat thread hanging off one reply paragraph — the
+    /// target is self-contained (project, file, harness, anchor), so the
+    /// panel works even if the chat behind it navigates away.
+    case chatThread(ChatThreadTarget)
 }
 
 /// Which terminal row the rename card is editing.
@@ -753,12 +757,21 @@ struct MainWindowView: View {
                 active: rightPanel == .servers,
                 action: { toggleRightPanel(.servers) }
             ) {
-                // Same rule as the expanded tile: live servers show as
-                // the green count badge; idle shows the quiet glyph.
-                if servers.devServers.isEmpty {
-                    ServerGlyph(color: Theme.textSecondary, size: 15)
-                } else {
-                    ServerCountBadge(count: servers.devServers.count, diameter: 18)
+                // Same language as the expanded tile: green glyph while
+                // servers run, with the count riding its corner.
+                ServerGlyph(
+                    color: servers.devServers.isEmpty
+                        ? Theme.textSecondary : Theme.dotActive,
+                    size: 15
+                )
+                .overlay(alignment: .topTrailing) {
+                    if !servers.devServers.isEmpty {
+                        Text(String(servers.devServers.count))
+                            .font(.system(size: 8, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textPositive)
+                            .offset(x: 7, y: -4)
+                    }
                 }
             }
             .modifier(railTipHover(.servers))
@@ -1087,7 +1100,7 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
-        case .git, .servers, .server, .tasks, .capsules:
+        case .git, .servers, .server, .tasks, .capsules, .chatThread:
             break
         }
     }
@@ -1316,6 +1329,7 @@ struct MainWindowView: View {
         case .server: "SERVER"
         case .tasks: "ALL TASKS"
         case .capsules: "CAPSULES"
+        case .chatThread: "THREAD"
         case nil: ""
         }
     }
@@ -1445,6 +1459,9 @@ struct MainWindowView: View {
         case .servers:
             ScrollView { serversListPanel }
                 .transition(Self.pageParent)
+        case let .chatThread(target):
+            ChatThreadPanel(target: target)
+                .transition(Self.pageChild)
         case let .server(sid):
             // Resolve by live id first, then through the recent entry the id
             // maps to — so the sheet morphs live↔off in place as the server
@@ -3437,24 +3454,14 @@ struct MainWindowView: View {
             let open = !file.isEmpty && chatTarget?.path == project
                 && chatTarget?.sessionFile == file
             let pinned = !file.isEmpty && chatMeta.pinned.contains(file)
-            let isBranch = !file.isEmpty && chatMeta.branches[file] != nil
-            // The agent's state, worn on the row: filled + accent while
-            // a turn runs or settles, plain once it's genuinely done.
+            // The agent's state, worn on the row: a trailing accent dot
+            // while a turn runs or settles, gone once it's genuinely done.
+            // (Chat rows carry no leading icon, 2026-09-17 — the title
+            // sits on the project name's line.)
             let busy = !file.isEmpty
                 && ChatSessionHub.shared.sessions[file]?.phase != nil
                 && ChatSessionHub.shared.sessions[file]?.phase != .idle
             HStack(spacing: 6) {
-                if !file.isEmpty {
-                    // Chats carry a bubble; a chat forked off another
-                    // carries the branch glyph instead.
-                    Image(systemName: isBranch
-                        ? "arrow.triangle.branch"
-                        : busy ? "bubble.left.fill" : "bubble.left")
-                        .font(.system(size: 10))
-                        .foregroundStyle(busy
-                            ? Theme.dotActive : Theme.textSecondary)
-                        .frame(width: 14)
-                }
                 Text(title)
                     .font(.system(size: 13))
                     // A step dimmer than the project header; the
@@ -3469,6 +3476,11 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
+                if busy {
+                    Circle()
+                        .fill(Theme.dotActive)
+                        .frame(width: 6, height: 6)
+                }
                 // ✕ archives (standard concept, reversible from the
                 // Archived fold) — the transcript is never touched.
                 if hovered, !file.isEmpty {
@@ -3480,9 +3492,9 @@ struct MainWindowView: View {
                 }
             }
             // The chat TITLE lands on the project header's name line
-            // (18pt icon + 9 gap = 27): icon rows offset by the bubble's
-            // 14pt + 6 gap, the icon-less "Show more" pads the full 27.
-            .padding(.leading, file.isEmpty ? 27 : 7)
+            // (18pt icon + 9 gap = 27) — no leading icon, the padding
+            // carries the full offset.
+            .padding(.leading, 27)
             .modifier(RowChrome(hovered: hovered, selected: open))
             .help(harness.isEmpty ? "" : harness)
             .onTapGesture {
@@ -3542,10 +3554,15 @@ struct MainWindowView: View {
             // the terminal glyph adds an instance up in Terminals.
             let collapsed = collapsedProjects.contains(path)
             HStack(spacing: 9) {
-                // The project's own logo when it ships one; the chevron
-                // takes over on hover (and everywhere for logo-less rows).
+                // Every project wears an icon (2026-09-17): its own
+                // favicon/app icon when it ships one, the generic project
+                // glyph otherwise. The chevron takes over on hover.
                 ZStack {
-                    if !hovered, let logo = ProjectLogoCache.logo(for: path) {
+                    if hovered {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Theme.heading)
+                    } else if let logo = ProjectLogoCache.logo(for: path) {
                         Image(nsImage: logo)
                             .resizable()
                             .interpolation(.high)
@@ -3555,10 +3572,9 @@ struct MainWindowView: View {
                             // with the appearance; full-color ones ignore it.
                             .foregroundStyle(Theme.text)
                     } else {
-                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(Theme.heading)
-                            .opacity(hovered ? 1 : 0.55)
+                        Image(systemName: "shippingbox")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }
                 .frame(width: 18, height: 18)
@@ -4038,6 +4054,21 @@ struct MainWindowView: View {
 
     private var chatListeners: some View {
         Color.clear
+            // A reply paragraph's "ask about this" — open (or toggle) the
+            // thread panel in the right sheet.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonOpenChatThread)
+            ) { note in
+                guard let info = note.userInfo,
+                      let project = info["project"] as? String,
+                      let file = info["file"] as? String,
+                      let harness = info["harness"] as? String,
+                      let anchor = info["anchor"] as? String else { return }
+                toggleRightPanel(.chatThread(ChatThreadTarget(
+                    project: project, file: file,
+                    harnessRaw: harness, anchor: anchor
+                )))
+            }
             // A chat continued under a new transcript file (context
             // rollover, cross-harness transplant): follow it, so the
             // sidebar highlight and the seal-protection don't point at
@@ -4419,19 +4450,19 @@ private struct SidebarSurface: ViewModifier {
 
 /// One of the sidebar's three top tiles: icon over label in an even box,
 /// a step darker than the sidebar panel, hairline border, hover lift.
-/// The running-server tally as an icon: small green count inside a
-/// green ring — stroke only, no fill.
+/// The running-server tally: a soft green capsule badge — tinted fill,
+/// text-grade green count, no stroke chrome.
 private struct ServerCountBadge: View {
     let count: Int
-    var diameter: CGFloat = 18
 
     var body: some View {
         Text(String(count))
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 9, weight: .semibold))
             .monospacedDigit()
             .foregroundStyle(Theme.textPositive)
-            .frame(width: diameter, height: diameter)
-            .overlay(Circle().strokeBorder(Theme.dotActive, lineWidth: 1.5))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1.5)
+            .background(Capsule().fill(Theme.dotActive.opacity(0.16)))
     }
 }
 
@@ -4456,13 +4487,14 @@ private struct TopTileButton: View {
     @ViewBuilder
     private func iconView(size: CGFloat) -> some View {
         if serverIcon {
-            // Live servers: the COUNT is the icon — a green circle badge,
-            // one glance says "2 running". Idle: the quiet gray glyph.
-            if count > 0 {
-                ServerCountBadge(count: count, diameter: size + 4)
-            } else {
-                ServerGlyph(color: iconTint ?? Theme.text.opacity(0.85), size: size + 2)
-            }
+            // The glyph goes signal-green while servers run; the count
+            // rides separately as the soft capsule badge.
+            ServerGlyph(
+                color: count > 0
+                    ? Theme.dotActive
+                    : (iconTint ?? Theme.text.opacity(0.85)),
+                size: size + 2
+            )
         } else {
             Image(systemName: systemName)
                 .font(.system(size: size))
@@ -4482,6 +4514,9 @@ private struct TopTileButton: View {
                             .foregroundStyle(Theme.textSecondary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
+                        if count > 0 {
+                            ServerCountBadge(count: count)
+                        }
                     }
                     .padding(.horizontal, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -4517,6 +4552,11 @@ private struct TopTileButton: View {
                         .fill(Theme.dotDegraded)
                         .frame(width: 5, height: 5)
                         .padding(6)
+                } else if count > 0, !rowLayout {
+                    // The live tally in the tile's corner — the row
+                    // layout carries it inline instead.
+                    ServerCountBadge(count: count)
+                        .padding(5)
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))

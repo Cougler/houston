@@ -475,10 +475,11 @@ struct SheetListRow<Icon: View>: View {
                     .fill(hovered ? Theme.rowHovered : .clear)
             )
             // The divider hides under the hover pill instead of cutting
-            // through it.
+            // through it. Faded well back — full-strength hairlines read
+            // as heavy rules between rows.
             .overlay(alignment: .bottom) {
                 Rectangle()
-                    .fill(Theme.borderSidebar)
+                    .fill(Theme.borderSidebar.opacity(0.45))
                     .frame(height: 1)
                     .opacity(hovered ? 0 : 1)
             }

@@ -400,7 +400,16 @@ struct ChatBrowserView: View {
                 // transcripts from eagerly building thousands of views.
                 // Tool-only messages would render as a bare role label
                 // with the chips hidden — skip them entirely.
-                let visible = Array(messages.suffix(historyShown)).filter { message in
+                // Thread exchanges live in the right-sheet panel, not the
+                // main flow (same hide-from-view-keep-for-model contract
+                // as the handoff prefix-collapse); their reply counts
+                // surface as chips on whichever paragraph CONTAINS each
+                // quote (anchors can be any selected run of text).
+                let flow = ChatThread.strippingExchanges(messages)
+                let blockThreads = ChatThread.blockThreads(
+                    counts: ChatThread.counts(in: messages), in: flow
+                )
+                let visible = Array(flow.suffix(historyShown)).filter { message in
                     message.blocks.contains { block in
                         if case .tool = block { return false }
                         return true
@@ -423,7 +432,7 @@ struct ChatBrowserView: View {
                                     .foregroundStyle(Theme.link)
                                     .frame(maxWidth: .infinity)
                                 }
-                                if messages.count > historyShown {
+                                if flow.count > historyShown {
                                     Button("Show earlier messages") {
                                         historyShown += 200
                                     }
@@ -435,7 +444,11 @@ struct ChatBrowserView: View {
                                 ForEach(visible) { message in
                                     MessageView(
                                         message: message, harness: ref.harness,
-                                        showTools: false
+                                        showTools: false,
+                                        blockThreads: blockThreads,
+                                        onThread: { anchor in
+                                            openThread(ref: ref, anchor: anchor)
+                                        }
                                     )
                                     .id(message.id)
                                 }
@@ -527,6 +540,26 @@ struct ChatBrowserView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 transcriptComposer(ref)
             }
+        }
+        // Edit ▸ Ask About Selection (⇧⌘A): thread whatever text is
+        // selected in this reply. The quote must live inside ONE
+        // assistant paragraph — the chip needs a home, and the model
+        // needs a coherent reference — else beep.
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonAskSelection)
+        ) { _ in
+            guard let selection = ChatThread.capturedSelection() else {
+                NSSound.beep()
+                return
+            }
+            let anchor = ChatThread.anchorKey(for: selection)
+            guard let messages,
+                  ChatThread.blockKey(containing: anchor, in: messages) != nil
+            else {
+                NSSound.beep()
+                return
+            }
+            openThread(ref: ref, anchor: anchor)
         }
     }
 
@@ -696,6 +729,20 @@ struct ChatBrowserView: View {
     }
 
     // MARK: - Sends
+
+    /// "Ask about this" on a reply paragraph — the right-sheet thread
+    /// panel opens anchored to it (MainWindowView owns the sheet).
+    private func openThread(ref: ChatSessionRef, anchor: String) {
+        NotificationCenter.default.post(
+            name: .houstonOpenChatThread, object: nil,
+            userInfo: [
+                "project": activeProject,
+                "file": ref.filePath,
+                "harness": ref.harness.rawValue,
+                "anchor": anchor,
+            ]
+        )
+    }
 
     /// Same harness resumes in place; the other harness transplants the
     /// transcript into a fresh native session first, then continues there.
@@ -1139,14 +1186,23 @@ private struct LiveTurnView: View {
     /// Fired when a turn completes — the owner re-reads the transcript.
     let onTurnEnd: () -> Void
 
+    /// The in-flight turn belongs to a thread — its stream renders in the
+    /// thread panel, not the main flow (the Working… row stays as the
+    /// only main-view hint).
+    private var threadTurn: Bool {
+        session.pendingUserText
+            .map { ChatThread.anchor(ofUserText: $0) != nil } ?? false
+    }
+
     var body: some View {
         Group {
             // Exchanges a newer send superseded before the transcript
             // caught up — without these, the earlier message vanished.
-            ForEach(session.carriedTurns) { message in
+            // Thread exchanges stay out of the main flow here too.
+            ForEach(ChatThread.strippingExchanges(session.carriedTurns)) { message in
                 MessageView(message: message, harness: harness)
             }
-            if let pending = session.pendingUserText {
+            if let pending = session.pendingUserText, !threadTurn {
                 // Through userBlocks so an attached capsule shows as its
                 // chip while the turn streams, same as it will on disk.
                 MessageView(
@@ -1156,13 +1212,13 @@ private struct LiveTurnView: View {
                     harness: harness
                 )
             }
-            if !session.liveBlocks.isEmpty {
+            if !session.liveBlocks.isEmpty, !threadTurn {
                 MessageView(
                     message: ChatMessage(role: .assistant, blocks: session.liveBlocks),
                     harness: harness
                 )
             }
-            if !session.streamText.isEmpty {
+            if !session.streamText.isEmpty, !threadTurn {
                 MessageView(
                     message: ChatMessage(role: .assistant, blocks: [.text(session.streamText)]),
                     harness: harness
@@ -1912,7 +1968,10 @@ private struct ChatComposer: View {
                     suggestion = ""
                     return .handled
                 }
-                .onChange(of: draft) { _, text in refreshGhost(text) }
+                .onChange(of: draft) { _, text in
+                    promoteDroppedImagePaths(text)
+                    refreshGhost(text)
+                }
                 // A finished turn changes the tail (a question appears or
                 // the old one clears) — re-derive the empty-field ghost.
                 .onChange(of: ghostContext) { _, _ in refreshGhost(draft) }
@@ -2023,6 +2082,42 @@ private struct ChatComposer: View {
     private func stage(_ url: URL) {
         guard !attachments.contains(url) else { return }
         attachments.append(url)
+    }
+
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
+        "tiff", "tif", "bmp", "svg",
+    ]
+
+    /// A file dropped ON the text field itself bypasses the composer's
+    /// onDrop: AppKit's field editor accepts the drag and inserts the raw
+    /// path as text. Sweep the draft for lines that are existing image
+    /// files and promote them to attachment thumbnails, so a drop reads
+    /// the same no matter where on the composer it lands.
+    private func promoteDroppedImagePaths(_ text: String) {
+        guard text.contains("/") else { return }
+        var kept: [String] = []
+        var promoted = false
+        for line in text.components(separatedBy: .newlines) {
+            var path = line.trimmingCharacters(in: .whitespaces)
+            if path.hasPrefix("file://"), let url = URL(string: path) {
+                path = url.path
+            }
+            path = (path as NSString).expandingTildeInPath
+            if path.hasPrefix("/"),
+               Self.imageExtensions.contains(
+                   (path as NSString).pathExtension.lowercased()),
+               FileManager.default.fileExists(atPath: path) {
+                stage(URL(fileURLWithPath: path))
+                promoted = true
+            } else {
+                kept.append(line)
+            }
+        }
+        if promoted {
+            draft = kept.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     /// Staged capsule/fragment chips and file thumbnails, each removable
@@ -2252,6 +2347,13 @@ struct MessageView: View {
     /// and drop out of finished transcripts — prose only, like the
     /// desktop apps.
     var showTools = true
+    /// Threads per paragraph, keyed by the paragraph's block key — each
+    /// entry is one anchor (whole paragraph or a selected run inside it)
+    /// with its reply count.
+    var blockThreads: [String: [(anchor: String, count: Int)]] = [:]
+    /// Present = reply paragraphs are threadable: hover shows "ask about
+    /// this", and existing threads wear their reply-count chips.
+    var onThread: ((String) -> Void)? = nil
 
     @ObservedObject var style = ChatStyleStore.shared
 
@@ -2270,8 +2372,10 @@ struct MessageView: View {
                 .frame(maxWidth: 500, alignment: .trailing)
             }
         } else {
-            // The agent's turn: plain rich text on the page.
-            VStack(alignment: .leading, spacing: 8) {
+            // The agent's turn: plain rich text on the page. 12pt between
+            // blocks — thoughts, tool folds, and prose need air to read
+            // as separate beats (8 packed them into one column of lines).
+            VStack(alignment: .leading, spacing: 12) {
                 Text(harness.rawValue.uppercased())
                     .font(Theme.Fonts.label)
                     .kerning(0.5)
@@ -2302,45 +2406,272 @@ struct MessageView: View {
         return index < lastToolIndex
     }
 
-    @ViewBuilder
-    private var blocksView: some View {
-        ForEach(Array(message.blocks.enumerated()), id: \.element.id) { index, block in
-            switch block {
-            case let .text(text):
-                MarkdownBlockView(
-                    text: text,
-                    color: message.role == .user
-                        ? style.text
-                        : (isNarration(index) ? Theme.textSecondary : Theme.chatProse),
-                    accent: message.role == .user
-                )
-            case let .code(code, lang):
-                CodeCard(code: code, lang: lang)
-                    .opacity(isNarration(index) ? 0.7 : 1)
-            case let .tool(name, detail):
-                if showTools {
-                    HStack(spacing: 6) {
-                        Image(systemName: "wrench.and.screwdriver")
-                            .font(.system(size: 10, weight: .medium))
-                        Text(detail.isEmpty ? name : "\(name) · \(detail)")
-                            .font(Theme.Fonts.mono)
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(Theme.textSecondary)
-                }
-            case let .capsule(title, file):
-                CapsuleChip(
-                    title: title, file: file,
-                    accent: message.role == .user
-                )
-            case let .fragment(title, _):
-                FragmentChip(title: title, accent: message.role == .user)
-            case let .image(path):
-                ChatImageBlock(path: path)
+    /// Blocks with consecutive tool chips folded into a single run — a
+    /// long stretch of Bash/Read/Edit rows buried the prose between them
+    /// (2026-09-17), so a run of 2+ renders as a collapsed "N steps"
+    /// disclosure the user can expand; a lone tool stays a plain chip.
+    private enum Piece: Identifiable {
+        case block(Int, ChatMessage.Block)
+        case toolRun(Int, [(name: String, detail: String)])
+
+        var id: String {
+            switch self {
+            case let .block(_, block): block.id
+            // Count is in the id so a live run re-renders as chips
+            // stream in; expansion state is keyed by start index.
+            case let .toolRun(start, run): "run:\(start):\(run.count)"
             }
         }
     }
 
+    private var pieces: [Piece] {
+        var out: [Piece] = []
+        var run: [(name: String, detail: String)] = []
+        var runStart = 0
+        func flush() {
+            guard !run.isEmpty else { return }
+            out.append(.toolRun(runStart, run))
+            run = []
+        }
+        for (index, block) in message.blocks.enumerated() {
+            if case let .tool(name, detail) = block {
+                guard showTools else { continue }
+                if run.isEmpty { runStart = index }
+                run.append((name, detail))
+            } else {
+                flush()
+                out.append(.block(index, block))
+            }
+        }
+        flush()
+        return out
+    }
+
+    @State private var expandedRuns: Set<Int> = []
+
+    @ViewBuilder
+    private var blocksView: some View {
+        ForEach(pieces) { piece in
+            switch piece {
+            case let .block(index, block):
+                blockView(index: index, block: block)
+            case let .toolRun(start, run):
+                toolRunView(start: start, run: run)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func toolRunView(
+        start: Int, run: [(name: String, detail: String)]
+    ) -> some View {
+        if run.count == 1 {
+            toolChip(run[0])
+        } else {
+            let expanded = expandedRuns.contains(start)
+            VStack(alignment: .leading, spacing: 5) {
+                Button {
+                    if expanded {
+                        expandedRuns.remove(start)
+                    } else {
+                        expandedRuns.insert(start)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("\(run.count) steps")
+                            .font(Theme.Fonts.mono)
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "Hide the steps" : "Show the steps")
+                if expanded {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(run.enumerated()), id: \.offset) { _, tool in
+                            toolChip(tool)
+                        }
+                    }
+                    .padding(.leading, 14)
+                }
+            }
+        }
+    }
+
+    private func toolChip(_ tool: (name: String, detail: String)) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wrench.and.screwdriver")
+                .font(.system(size: 10, weight: .medium))
+            Text(tool.detail.isEmpty ? tool.name : "\(tool.name) · \(tool.detail)")
+                .font(Theme.Fonts.mono)
+                .lineLimit(1)
+        }
+        .foregroundStyle(Theme.textSecondary)
+    }
+
+    /// "Ask About Selected Text": thread the highlighted run when it can
+    /// be captured and belongs to this paragraph; fall back to the whole
+    /// paragraph so the menu item never dead-ends.
+    private func askAboutSelection(
+        blockText: String, blockAnchor: String, onThread: (String) -> Void
+    ) {
+        if let selection = ChatThread.capturedSelection() {
+            let anchor = ChatThread.anchorKey(for: selection)
+            if !anchor.isEmpty,
+               ChatThread.matchable(blockText)
+                   .contains(ChatThread.matchable(anchor)) {
+                onThread(anchor)
+                return
+            }
+        }
+        onThread(blockAnchor)
+    }
+
+    @ViewBuilder
+    private func blockView(index: Int, block: ChatMessage.Block) -> some View {
+        switch block {
+        case let .text(text):
+            let prose = MarkdownBlockView(
+                text: text,
+                color: message.role == .user
+                    ? style.text
+                    : (isNarration(index) ? Theme.textSecondary : Theme.chatProse),
+                accent: message.role == .user
+            )
+            if message.role == .assistant, let onThread {
+                let anchor = ChatThread.anchorKey(for: text)
+                ThreadableBlock(
+                    anchor: anchor,
+                    threads: blockThreads[anchor] ?? [],
+                    onOpen: onThread
+                ) { prose }
+                // Right-click is the reliable route to selection threads:
+                // the selection survives into the menu action, where the
+                // responder-chain capture reads it. (A custom menu does
+                // replace the system text menu, so Copy rides along.)
+                .contextMenu {
+                    Button("Ask About Selected Text") {
+                        askAboutSelection(
+                            blockText: text, blockAnchor: anchor,
+                            onThread: onThread
+                        )
+                    }
+                    Button("Ask About This Paragraph") { onThread(anchor) }
+                    Divider()
+                    Button("Copy") {
+                        let copied = ChatThread.capturedSelection() ?? text
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(copied, forType: .string)
+                    }
+                }
+            } else {
+                prose
+            }
+        case let .code(code, lang):
+            CodeCard(code: code, lang: lang)
+                .opacity(isNarration(index) ? 0.7 : 1)
+        case .tool:
+            // Folded into a run above; never reaches here.
+            EmptyView()
+        case let .capsule(title, file):
+            CapsuleChip(
+                title: title, file: file,
+                accent: message.role == .user
+            )
+        case let .fragment(title, _):
+            FragmentChip(title: title, accent: message.role == .user)
+        case let .image(path):
+            ChatImageBlock(path: path)
+        }
+    }
+
+}
+
+/// One threadable reply paragraph: hover shows the "ask about this"
+/// affordance; a paragraph that already has a thread wears its
+/// reply-count chip instead (click opens the panel either way).
+/// Per-block hover state — a message-level flag re-diffed every block.
+private struct ThreadableBlock<Content: View>: View {
+    /// The whole-paragraph anchor the hover button asks about; selection
+    /// anchors arrive through `threads` (chips) instead.
+    let anchor: String
+    let threads: [(anchor: String, count: Int)]
+    let onOpen: (String) -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var hovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            content()
+                .overlay(alignment: .topTrailing) {
+                    if hovered {
+                        Button {
+                            onOpen(anchor)
+                        } label: {
+                            Image(systemName: "arrowshape.turn.up.left")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: 22, height: 22)
+                                .background(
+                                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                        .fill(Theme.buttonFill)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                        .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+                                )
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Ask about this paragraph in a thread — or "
+                            + "select any text and right-click to ask "
+                            + "about just that part")
+                        // Floats off the text's edge instead of covering
+                        // the last words of the line.
+                        .offset(x: 4, y: -4)
+                    }
+                }
+            if !threads.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(threads, id: \.anchor) { thread in
+                        chip(thread)
+                    }
+                }
+            }
+        }
+        .onHover { hovered = $0 }
+    }
+
+    /// One thread's chip. A lone thread reads as its reply count; when
+    /// several hang off the same paragraph, each leads with a sliver of
+    /// its quote so they're tellable apart.
+    private func chip(_ thread: (anchor: String, count: Int)) -> some View {
+        Button {
+            onOpen(thread.anchor)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "text.bubble")
+                    .font(.system(size: 9, weight: .medium))
+                if threads.count > 1 {
+                    Text("\u{201C}\(String(thread.anchor.prefix(22)))…\u{201D}")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                }
+                Text("\(thread.count) \(thread.count == 1 ? "reply" : "replies")")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(Theme.link)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open this thread")
+    }
 }
 
 /// An attached image in a transcript bubble: a real thumbnail (the path
