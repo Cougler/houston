@@ -311,14 +311,19 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 
 ## Gotchas — all of these were bugs, not theory
 
-- **NSItemProvider completion closures MUST be explicitly `@Sendable`.**
-  Several of its completion params (loadDataRepresentation, loadItem)
-  carry no @Sendable annotation in the SDK, so a bare closure literal
-  inside a MainActor view INHERITS MainActor isolation — and the
-  provider invokes it on a background queue, tripping the Swift runtime
-  isolation assertion (SIGTRAP in dispatch_assert_queue). Crashed on
-  image-DATA drops into the composer (screenshot thumbnails, browser
-  drags) while Finder fileURL drops worked; three identical crash logs.
+- **NSItemProvider completion closures must capture NOTHING
+  MainActor-isolated — `@Sendable` alone does NOT save you.** A closure
+  that touches the view (even just `DispatchQueue.main.async {
+  stage(...) }`, which captures self) is silently inferred @MainActor;
+  the provider invokes it on a background queue and the runtime
+  isolation assertion SIGTRAPs (dispatch_assert_queue). Shipping the
+  closures with an explicit `@Sendable` (1.0.33) crashed on the SAME
+  frame — the capture, not the annotation, drives the inference. The
+  working shape: completions do only nonisolated work and hand results
+  to a `nonisolated static` that posts `.houstonComposerStageDrop`;
+  the composer stages on receive. Crashed on image-DATA drops
+  (screenshot thumbnails, browser drags) while Finder fileURL drops
+  worked; six identical crash logs across 1.0.31–1.0.33.
 
 - **A refused backend connect surfaces as `.waiting`, not `.failed`.**
   Network.framework retries a refused localhost connection forever, so

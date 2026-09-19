@@ -1682,6 +1682,17 @@ private struct ChatComposer: View {
             guard let text = note.object as? String else { return }
             stageText(text)
         }
+        // Drop results resolved off-main come back here (the provider
+        // completions can't touch the composer — see handleDrop).
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonComposerStageDrop)
+        ) { note in
+            if let path = note.userInfo?["path"] as? String {
+                stage(URL(fileURLWithPath: path))
+            } else if let text = note.userInfo?["text"] as? String {
+                stageText(text)
+            }
+        }
         // Clicking a capsule on the shelf stages it as a chip here.
         .onReceive(
             NotificationCenter.default.publisher(for: .houstonComposerAttachCapsule)
@@ -2261,6 +2272,14 @@ private struct ChatComposer: View {
     /// the draft.
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         var handled = false
+        // These completions run on NSItemProvider's background queue and
+        // must capture NOTHING MainActor-isolated: a closure that touches
+        // the composer (stage/stageText capture self) is silently
+        // inferred @MainActor — @Sendable does NOT prevent it, verified
+        // by 1.0.33 crashing on the same frame WITH the annotation — and
+        // the runtime isolation assertion then SIGTRAPs off-main. So
+        // results route back through a notification posted by a
+        // nonisolated static, and the composer stages on receive.
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 handled = true
@@ -2273,33 +2292,42 @@ private struct ChatComposer: View {
                     default: nil
                     }
                     guard let url else { return }
-                    DispatchQueue.main.async { stage(url) }
+                    Self.postDropResult(path: url.path)
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 handled = true
-                // Explicitly @Sendable: this SDK's completionHandler
-                // param carries no @Sendable annotation, so a bare
-                // closure literal INHERITS the composer's MainActor
-                // isolation — and NSItemProvider then invokes it on a
-                // background queue, tripping the runtime isolation
-                // assertion (SIGTRAP; three crash logs, all this frame).
                 provider.loadDataRepresentation(
                     forTypeIdentifier: UTType.image.identifier
                 ) { @Sendable data, _ in
                     guard let data, let saved = Self.saveDroppedImage(data) else { return }
-                    DispatchQueue.main.async { stage(URL(fileURLWithPath: saved)) }
+                    Self.postDropResult(path: saved)
                 }
             } else if provider.hasItemConformingToTypeIdentifier(
                 UTType.plainText.identifier
             ) {
                 handled = true
-                _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                _ = provider.loadObject(ofClass: NSString.self) { @Sendable object, _ in
                     guard let text = object as? String, !text.isEmpty else { return }
-                    DispatchQueue.main.async { stageText(text) }
+                    Self.postDropResult(text: text)
                 }
             }
         }
         return handled
+    }
+
+    /// Nonisolated on purpose: callable from the provider's queue with
+    /// no isolated captures; the hop to main happens here.
+    private nonisolated static func postDropResult(
+        path: String? = nil, text: String? = nil
+    ) {
+        var userInfo: [String: String] = [:]
+        if let path { userInfo["path"] = path }
+        if let text { userInfo["text"] = text }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .houstonComposerStageDrop, object: nil, userInfo: userInfo
+            )
+        }
     }
 
     /// One staged attachment: the image itself when it decodes, else the

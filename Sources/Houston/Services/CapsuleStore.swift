@@ -37,6 +37,11 @@ extension Notification.Name {
     /// posted by the capsule view's insert buttons (`object` is the
     /// String). Drags land directly via onDrop instead.
     static let houstonComposerInsert = Notification.Name("houstonComposerInsert")
+    /// A drop resolved off-main stages into the composer. userInfo:
+    /// "path" (file to attach) or "text" (to stage). The completion
+    /// closures must not touch the composer directly — see the
+    /// NSItemProvider gotcha in CLAUDE.md.
+    static let houstonComposerStageDrop = Notification.Name("houstonComposerStageDrop")
     /// Stage a capsule as a composer attachment chip (`object` is the
     /// `ChatCapsule`).
     static let houstonComposerAttachCapsule = Notification.Name("houstonComposerAttachCapsule")
