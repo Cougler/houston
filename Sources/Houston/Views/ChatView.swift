@@ -1601,6 +1601,11 @@ private struct ChatComposer: View {
         ChatModelChoice.efforts(for: model.harness).first { $0.arg == effort }
     }
 
+    /// A drop that couldn't become an attachment (unreadable image data)
+    /// — shown inline above the input for a few seconds instead of
+    /// failing silently.
+    @State private var dropError: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Staged capsules/fragments/images float ABOVE the input,
@@ -1609,6 +1614,17 @@ private struct ChatComposer: View {
             if !attachments.isEmpty || !stagedCapsules.isEmpty
                 || !stagedFragments.isEmpty {
                 attachmentRow
+            }
+            if let dropError {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                    Text(dropError)
+                        .font(Theme.Fonts.secondary)
+                        .lineLimit(2)
+                }
+                .foregroundStyle(Theme.textDanger)
+                .transition(.opacity)
             }
             VStack(alignment: .leading, spacing: 4) {
                 inputField
@@ -1683,7 +1699,7 @@ private struct ChatComposer: View {
             stageText(text)
         }
         // Drop results resolved off-main come back here (the provider
-        // completions can't touch the composer — see handleDrop).
+        // completions can't touch the composer — see ComposerDropLoader).
         .onReceive(
             NotificationCenter.default.publisher(for: .houstonComposerStageDrop)
         ) { note in
@@ -1691,6 +1707,11 @@ private struct ChatComposer: View {
                 stage(URL(fileURLWithPath: path))
             } else if let text = note.userInfo?["text"] as? String {
                 stageText(text)
+            } else if let error = note.userInfo?["error"] as? String {
+                withAnimation(.easeOut(duration: 0.15)) { dropError = error }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    withAnimation(.easeOut(duration: 0.3)) { dropError = nil }
+                }
             }
         }
         // Clicking a capsule on the shelf stages it as a chip here.
@@ -2271,63 +2292,13 @@ private struct ChatComposer: View {
     /// dropped text stages capsules/fragments as chips, else appends to
     /// the draft.
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        var handled = false
-        // These completions run on NSItemProvider's background queue and
-        // must capture NOTHING MainActor-isolated: a closure that touches
-        // the composer (stage/stageText capture self) is silently
-        // inferred @MainActor — @Sendable does NOT prevent it, verified
-        // by 1.0.33 crashing on the same frame WITH the annotation — and
-        // the runtime isolation assertion then SIGTRAPs off-main. So
-        // results route back through a notification posted by a
-        // nonisolated static, and the composer stages on receive.
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                handled = true
-                provider.loadItem(
-                    forTypeIdentifier: UTType.fileURL.identifier, options: nil
-                ) { @Sendable item, _ in
-                    let url: URL? = switch item {
-                    case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
-                    case let url as URL: url
-                    default: nil
-                    }
-                    guard let url else { return }
-                    Self.postDropResult(path: url.path)
-                }
-            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                handled = true
-                provider.loadDataRepresentation(
-                    forTypeIdentifier: UTType.image.identifier
-                ) { @Sendable data, _ in
-                    guard let data, let saved = Self.saveDroppedImage(data) else { return }
-                    Self.postDropResult(path: saved)
-                }
-            } else if provider.hasItemConformingToTypeIdentifier(
-                UTType.plainText.identifier
-            ) {
-                handled = true
-                _ = provider.loadObject(ofClass: NSString.self) { @Sendable object, _ in
-                    guard let text = object as? String, !text.isEmpty else { return }
-                    Self.postDropResult(text: text)
-                }
-            }
-        }
-        return handled
-    }
-
-    /// Nonisolated on purpose: callable from the provider's queue with
-    /// no isolated captures; the hop to main happens here.
-    private nonisolated static func postDropResult(
-        path: String? = nil, text: String? = nil
-    ) {
-        var userInfo: [String: String] = [:]
-        if let path { userInfo["path"] = path }
-        if let text { userInfo["text"] = text }
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: .houstonComposerStageDrop, object: nil, userInfo: userInfo
-            )
-        }
+        // Delegated to a FILE-SCOPE nonisolated type on purpose: closure
+        // literals born anywhere inside this MainActor view keep getting
+        // MainActor-inferred regardless of annotations or bodies —
+        // 1.0.33 shipped them @Sendable, 1.0.34 shipped statics-only
+        // bodies, and BOTH still trapped on the provider's queue. See
+        // ComposerDropLoader.
+        ComposerDropLoader.load(providers)
     }
 
     /// One staged attachment: the image itself when it decodes, else the
@@ -2358,19 +2329,101 @@ private struct ChatComposer: View {
         }
     }
 
-    private nonisolated static func saveDroppedImage(_ data: Data) -> String? {
-        guard let rep = NSBitmapImageRep(data: data),
-              let png = rep.representation(using: .png, properties: [:])
-        else { return nil }
+}
+
+// MARK: - Drop loading (deliberately OUTSIDE any MainActor type)
+
+/// Resolves composer drops on NSItemProvider's own queue and posts the
+/// result back as `.houstonComposerStageDrop`. File-scope and fully
+/// nonisolated ON PURPOSE: closure literals created inside the MainActor
+/// composer kept getting MainActor-inferred no matter what (explicit
+/// @Sendable, statics-only bodies — every variant trapped the runtime
+/// isolation assertion when the provider invoked them off-main; six
+/// crash logs across 1.0.31–1.0.34). Here there is no enclosing
+/// isolation to inherit, so the closures are genuinely nonisolated.
+private enum ComposerDropLoader {
+    @discardableResult
+    static func load(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                handled = true
+                provider.loadItem(
+                    forTypeIdentifier: UTType.fileURL.identifier, options: nil
+                ) { item, _ in
+                    let url: URL? = switch item {
+                    case let data as Data: URL(dataRepresentation: data, relativeTo: nil)
+                    case let url as URL: url
+                    default: nil
+                    }
+                    guard let url else { return }
+                    post(["path": url.path])
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                handled = true
+                provider.loadDataRepresentation(
+                    forTypeIdentifier: UTType.image.identifier
+                ) { data, _ in
+                    guard let data else {
+                        post(["error": "Couldn't read the dropped image."])
+                        return
+                    }
+                    if let saved = save(data) {
+                        post(["path": saved])
+                    } else {
+                        post(["error": "That file isn't a readable image. "
+                            + "Try dragging it from Finder, or convert it first."])
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(
+                UTType.plainText.identifier
+            ) {
+                handled = true
+                _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                    guard let text = object as? String, !text.isEmpty else { return }
+                    post(["text": text])
+                }
+            }
+        }
+        return handled
+    }
+
+    private static func post(_ userInfo: [String: String]) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .houstonComposerStageDrop, object: nil, userInfo: userInfo
+            )
+        }
+    }
+
+    /// Dropped image DATA saved to a temp file. Bitmap formats re-encode
+    /// to PNG; data NSBitmapImageRep can't read but NSImage can (SVG)
+    /// saves raw with a sniffed extension — the thumbnail and the CLIs
+    /// both read it off disk. nil = not decodable as an image at all
+    /// (a mislabeled or corrupt file), which surfaces as the inline
+    /// composer error instead of silence.
+    private static func save(_ data: Data) -> String? {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HoustonDrops", isDirectory: true)
         try? FileManager.default.createDirectory(
             at: dir, withIntermediateDirectories: true
         )
+        if let rep = NSBitmapImageRep(data: data),
+           let png = rep.representation(using: .png, properties: [:]) {
+            let file = dir.appendingPathComponent(
+                "drop-\(UUID().uuidString.prefix(8)).png"
+            )
+            guard (try? png.write(to: file)) != nil else { return nil }
+            return file.path
+        }
+        // Non-bitmap image data (SVG and friends) — NSImage decodes it.
+        guard NSImage(data: data)?.isValid == true else { return nil }
+        let head = String(decoding: data.prefix(256), as: UTF8.self).lowercased()
+        let ext = (head.contains("<svg") || head.contains("<?xml")) ? "svg" : "img"
         let file = dir.appendingPathComponent(
-            "drop-\(UUID().uuidString.prefix(8)).png"
+            "drop-\(UUID().uuidString.prefix(8)).\(ext)"
         )
-        guard (try? png.write(to: file)) != nil else { return nil }
+        guard (try? data.write(to: file)) != nil else { return nil }
         return file.path
     }
 }
