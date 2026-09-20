@@ -2361,9 +2361,24 @@ private enum ComposerDropLoader {
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                 handled = true
-                provider.loadDataRepresentation(
-                    forTypeIdentifier: UTType.image.identifier
-                ) { data, _ in
+                // loadItem, NEVER loadDataRepresentation: the multi-arch
+                // release pipeline (package.sh's `swift build --arch …`,
+                // XCBuild) imports loadDataRepresentation's completion as
+                // @MainActor @Sendable — the debug build does NOT — so
+                // every closure passed to it trapped off-main in RELEASE
+                // builds only (mangling `YbScMYc` in the shipped binary,
+                // `Ybc` in debug; that's why 1.0.31–1.0.35 all crashed
+                // while every dev build worked). loadItem's completion
+                // imports clean in both.
+                provider.loadItem(
+                    forTypeIdentifier: UTType.image.identifier, options: nil
+                ) { item, _ in
+                    let data: Data? = switch item {
+                    case let data as Data: data
+                    case let url as URL: try? Data(contentsOf: url)
+                    case let image as NSImage: image.tiffRepresentation
+                    default: nil
+                    }
                     guard let data else {
                         post(["error": "Couldn't read the dropped image."])
                         return

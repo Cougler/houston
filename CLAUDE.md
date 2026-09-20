@@ -311,20 +311,24 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 
 ## Gotchas — all of these were bugs, not theory
 
-- **NSItemProvider completions must be created OUTSIDE any MainActor
-  type — annotations and body shape do NOT save you.** A closure
-  literal born inside a MainActor view gets MainActor-inferred and the
-  runtime isolation assertion SIGTRAPs when the provider invokes it on
-  a background queue (dispatch_assert_queue). Every in-place variant
-  shipped and CRASHED on the same frame: bare closures (≤1.0.32),
-  explicit `@Sendable` (1.0.33), statics-only bodies with zero isolated
-  captures (1.0.34) — verified by matching each crash log's binary UUID
-  to the release. The working shape is `ComposerDropLoader`, a
-  file-scope nonisolated enum: with no enclosing isolation there is
-  nothing to inherit; it posts `.houstonComposerStageDrop` and the
-  composer stages on receive (undecodable image data posts "error",
-  shown inline). Crashed on image-DATA drops (screenshot thumbnails,
-  browser drags, SVGs) while Finder fileURL drops worked.
+- **`loadDataRepresentation` is BANNED — the release pipeline imports
+  its completion as `@MainActor`.** The real root cause of the composer
+  drop crash (1.0.31–1.0.35, six+ crash logs): the multi-arch release
+  build (`swift build -c release --arch arm64 --arch x86_64`, XCBuild)
+  imports that API's completionHandler as `@MainActor @Sendable` while
+  the plain debug build imports it nonisolated — PROVEN by the closure
+  mangling (`YbScMYc` in every shipped binary vs `Ybc` in debug) — and
+  Foundation invokes it on a background queue, so the isolation
+  assertion SIGTRAPs in RELEASE ONLY. That's why every dev build
+  "verified" fine and every release crashed, and why no closure-side
+  fix (file-scope enum, @Sendable, statics-only bodies) could ever
+  work. Use `loadItem`/`loadObject` instead — their completions import
+  clean in both configs (checked via `nm | grep ScM` on the release
+  binary; do this check for any new provider callback). Drop plumbing
+  lives in `ComposerDropLoader` (file-scope enum) and posts
+  `.houstonComposerStageDrop`; undecodable image data posts "error",
+  shown inline in the composer. Crashed on image-DATA drops (screenshot
+  thumbnails, browser drags) while Finder fileURL drops worked.
 
 - **A refused backend connect surfaces as `.waiting`, not `.failed`.**
   Network.framework retries a refused localhost connection forever, so
