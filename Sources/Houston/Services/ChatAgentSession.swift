@@ -19,6 +19,9 @@ import Foundation
 /// hops to the main actor itself.
 final class AgentTransport: @unchecked Sendable {
     private let queue = DispatchQueue(label: "houston.chat.transport")
+    /// Queue-confined, like `buffer`/`stderrTail`: `write`/`writeRaw`
+    /// read these on `queue` while `start`/`terminate` assign them from
+    /// the caller — every access goes through `queue` or it's a race.
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var buffer = Data()
@@ -27,7 +30,9 @@ final class AgentTransport: @unchecked Sendable {
     var onLine: (@Sendable (Data) -> Void)?
     var onExit: (@Sendable (Int32, String) -> Void)?
 
-    var isRunning: Bool { process?.isRunning ?? false }
+    var isRunning: Bool {
+        queue.sync { process?.isRunning ?? false }
+    }
 
     /// Resolved through a login shell once — the CLIs are npm globals that
     /// aren't on a GUI app's default PATH.
@@ -149,8 +154,10 @@ final class AgentTransport: @unchecked Sendable {
             }
         }
         try process.run()
-        self.process = process
-        self.stdinHandle = stdin.fileHandleForWriting
+        queue.sync {
+            self.process = process
+            self.stdinHandle = stdin.fileHandleForWriting
+        }
     }
 
     private func consume(_ data: Data) {
@@ -181,13 +188,15 @@ final class AgentTransport: @unchecked Sendable {
     }
 
     func terminate() {
-        let process = process
-        let stdin = stdinHandle
-        self.process = nil
-        self.stdinHandle = nil
-        queue.async {
+        var detached: Process?
+        queue.sync {
+            detached = self.process
+            let stdin = self.stdinHandle
+            self.process = nil
+            self.stdinHandle = nil
             try? stdin?.close()
         }
+        let process = detached
         // Give a closing stdin a moment, then make sure.
         DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
             if process?.isRunning == true { process?.terminate() }
@@ -391,6 +400,17 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         streamText = ""
         running = true
         ChatSessionHub.shared.noteActivity()
+        // The sidebar lists chats from the on-disk index, and its only
+        // unthrottled refreshes used to live in the chat view — navigate
+        // away and a new message didn't surface for up to 30s. A turn
+        // starting is exactly when this chat's recency changes (and when
+        // a brand-new chat's file is created), so re-index shortly after
+        // the CLI's first transcript flush, no view required.
+        let project = projectPath
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            ChatIndexStore.shared.refresh(project, force: true)
+        }
         switch harness {
         case .claude:
             sendClaude(text: text, model: model)
@@ -1050,16 +1070,25 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 cli = "pi-acp"
                 arguments = []
                 acpPendingModelArg = model.arg
-                // Any provider key the user pasted into Houston rides the
-                // spawn env (pi reads the standard per-provider vars);
-                // pi's own credential store (~/.pi) covers the rest.
+                // Only the SELECTED model's provider key rides the spawn
+                // (the pi id's prefix names it) — handing a third-party
+                // CLI every stored key at once was over-sharing. Pi's own
+                // credential store (~/.pi) covers everything else.
                 // "oauth" is Houston's marker for CLI-held credentials,
                 // not a key — never exported.
-                for provider in ChatProvider.cloud {
-                    if let key = ProviderAuthStore.shared.key(for: provider.id),
-                       key != "oauth" {
-                        extraEnv[provider.envKey] = key
-                    }
+                let piPrefix = model.arg?.split(separator: "/").first
+                    .map(String.init)
+                let providerID: String? = switch piPrefix {
+                case "xai": "xai"
+                case "google": "gemini"
+                case "deepseek": "deepseek"
+                default: nil
+                }
+                if let providerID,
+                   let provider = ChatProvider.by(id: providerID),
+                   let key = ProviderAuthStore.shared.key(for: provider.id),
+                   key != "oauth" {
+                    extraEnv[provider.envKey] = key
                 }
             default:
                 cli = "gemini"
@@ -1376,6 +1405,9 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         if let error { lastError = error }
         completedTurns += 1
         ChatSessionHub.shared.noteActivity()
+        // The transcript now holds the finished exchange — put it in the
+        // sidebar immediately, even when no chat view is mounted.
+        ChatIndexStore.shared.refresh(projectPath, force: true)
         // Only a cleanly finished turn auto-fires the next held message.
         // Stop means "halt, await me" (the queue holds, visibly, until
         // the user's next send resumes it), and an errored turn must not

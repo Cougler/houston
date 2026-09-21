@@ -301,7 +301,11 @@ private enum ProxyWire {
             "<li><a href=\"http://\(label).localhost\(suffix)/\">\(label).localhost\(suffix)</a>"
                 + " <small>&rarr; port \(port)</small></li>"
         }
-        let title = missing.map { "No dev server named &ldquo;\($0)&rdquo; is running" }
+        // The label comes off the Host header — keep it to hostname
+        // characters so a hand-crafted request can't reflect markup.
+        let title = missing
+            .map { $0.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." } }
+            .map { "No dev server named &ldquo;\($0)&rdquo; is running" }
             ?? "Houston dev servers"
         let list = items.isEmpty ? "<p>No dev servers are running right now.</p>"
             : "<ul>\(items.joined())</ul>"

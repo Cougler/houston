@@ -20,7 +20,10 @@ enum AgentDetect {
         let procs = ProcScan.table(withStartTimes: false)
         let me = ProcessInfo.processInfo.processIdentifier
 
-        var result: [String: CodingAgent] = [:]
+        // Filter down to real pane agents first, then resolve every
+        // survivor's cwd in ONE lsof spawn — one fork per candidate per
+        // 2s tick added up.
+        var candidates: [(pid: Int32, agent: CodingAgent)] = []
         for proc in procs.values {
             guard let agent = agentFor(command: proc.command) else { continue }
             guard ProcScan.isDescendant(proc.pid, of: me, in: procs) else { continue }
@@ -30,8 +33,13 @@ enum AgentDetect {
             // this check every MCP refresh read as a running claude session
             // and flashed the header's Mission menu for its duration.
             guard hasLoginAncestor(proc.pid, in: procs) else { continue }
-            guard let cwd = ProcScan.cwd(ofPid: proc.pid), paths.contains(cwd) else { continue }
-            result[cwd] = agent
+            candidates.append((proc.pid, agent))
+        }
+        let cwds = ProcScan.cwds(ofPids: candidates.map(\.pid))
+        var result: [String: CodingAgent] = [:]
+        for candidate in candidates {
+            guard let cwd = cwds[candidate.pid], paths.contains(cwd) else { continue }
+            result[cwd] = candidate.agent
         }
         return result
     }

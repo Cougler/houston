@@ -102,7 +102,7 @@ enum StatusLineFeed {
             return false
         }
 
-        var settings = readClaudeSettings() ?? [:]
+        guard var settings = settingsForEdit() else { return false }
         // Back up only a foreign value — re-installing over our own config
         // must not clobber the user's real statusline with ours.
         if state != .houston {
@@ -125,7 +125,7 @@ enum StatusLineFeed {
     /// never had one).
     @discardableResult
     static func restore() -> Bool {
-        var settings = readClaudeSettings() ?? [:]
+        guard var settings = settingsForEdit() else { return false }
         if let data = try? Data(contentsOf: backupURL),
            let backup = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let original = backup["statusLine"], !(original is NSNull) {
@@ -140,6 +140,16 @@ enum StatusLineFeed {
 
     private static func readClaudeSettings() -> [String: Any]? {
         guard let data = try? Data(contentsOf: claudeSettingsURL) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Settings safe to MODIFY and write back. An absent file edits as
+    /// empty; a file that exists but doesn't parse (comment, trailing
+    /// comma, unreadable) aborts the edit — the old `?? [:]` fallback
+    /// replaced the user's whole settings.json (permissions, hooks, env)
+    /// with only our key.
+    private static func settingsForEdit() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: claudeSettingsURL) else { return [:] }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 

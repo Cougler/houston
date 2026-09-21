@@ -81,6 +81,12 @@ final class ChatTitler: ObservableObject {
 
     private func save() {
         guard let data = try? JSONEncoder().encode(titles) else { return }
+        // A fresh install has no Application Support/Houston yet — without
+        // this, titles are silently dropped until another store creates it.
+        try? FileManager.default.createDirectory(
+            at: Self.cacheURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try? data.write(to: Self.cacheURL, options: .atomic)
     }
 

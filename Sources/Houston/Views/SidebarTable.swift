@@ -17,28 +17,16 @@ enum SidebarEntry: Identifiable, Hashable {
     /// A clickable affordance inside a section (e.g. "New Terminal" while no
     /// terminal is open) — like a folder, tappable but never *selected*.
     case action(key: String, title: String)
-    /// A quiet hairline — separates the active block from the idle library.
-    case divider
-    /// A past chat session nested under its project row. `file` is the
-    /// transcript path; empty = the "Show more" row.
-    case chat(project: String, file: String, title: String, harness: String)
-    /// A sealed chat (capsule) nested under its project row — click opens
-    /// its transcript in the right sheet, drag carries it into a composer.
-    case capsuleChat(project: String, capsuleID: String, title: String)
 
     var id: String {
         switch self {
         case let .header(title): "header:\(title)"
         case let .folder(path, _): "folder:\(path)"
         case let .action(key, _): "action:\(key)"
-        case .divider: "divider"
-        case let .chat(project, file, _, _): "chat:\(project):\(file)"
-        case let .capsuleChat(_, capsuleID, _): "capchat:\(capsuleID)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"
             case let .shell(_, tab): "shell:\(tab)"
-            case let .server(sid): "server:\(sid)"
             }
         }
     }
@@ -56,16 +44,10 @@ enum SidebarEntry: Identifiable, Hashable {
     }
 
     /// Only real rows can hold the selection — headers and actions can't,
-    /// which also keeps arrow-key navigation from parking on them. Server
-    /// rows opted out too: clicking one pops a detail popover instead of
-    /// changing what the detail pane shows.
+    /// which also keeps arrow-key navigation from parking on them.
     var isSelectable: Bool {
-        switch self {
-        case let .row(id, _):
-            if case .server = id { return false }
-            return true
-        default: return false
-        }
+        if case .row = self { return true }
+        return false
     }
 }
 
@@ -207,11 +189,11 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
             guard entries.indices.contains(row) else { return nil }
             let entry = entries[row]
             let id = NSUserInterfaceItemIdentifier("row")
-            let host: HostingRowView
-            if let reused = tableView.makeView(withIdentifier: id, owner: self) as? HostingRowView {
+            let host: HostingRowView<Row>
+            if let reused = tableView.makeView(withIdentifier: id, owner: self) as? HostingRowView<Row> {
                 host = reused
             } else {
-                host = HostingRowView()
+                host = HostingRowView<Row>()
                 host.identifier = id
             }
             // A reused view still holds another row's content, so always set.
@@ -221,7 +203,7 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
 
         /// Re-hosts a row's SwiftUI content only when its key changed.
         private func render(
-            _ host: HostingRowView,
+            _ host: HostingRowView<Row>,
             entry: SidebarEntry,
             row: Int,
             force: Bool
@@ -346,7 +328,7 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
             for row in visible.lowerBound..<visible.upperBound {
                 guard entries.indices.contains(row) else { continue }
                 guard let host = table.view(atColumn: 0, row: row, makeIfNecessary: false)
-                    as? HostingRowView else { continue }
+                    as? HostingRowView<Row> else { continue }
                 render(host, entry: entries[row], row: row, force: false)
             }
         }
@@ -378,7 +360,7 @@ struct SidebarTable<Row: View>: NSViewRepresentable {
             for candidate in [previous, row].compactMap({ $0 }) {
                 guard let table, entries.indices.contains(candidate) else { continue }
                 if let host = table.view(atColumn: 0, row: candidate, makeIfNecessary: false)
-                    as? HostingRowView {
+                    as? HostingRowView<Row> {
                     render(host, entry: entries[candidate], row: candidate, force: false)
                 }
             }
@@ -470,17 +452,19 @@ private final class HoverTableView: NSTableView {
     }
 }
 
-/// A table cell that hosts arbitrary SwiftUI content.
-private final class HostingRowView: NSTableCellView {
-    private var hosting: NSHostingView<AnyView>?
+/// A table cell that hosts the table's SwiftUI row content. Generic over
+/// the concrete row type — erasing to `AnyView` defeated SwiftUI's
+/// structural diffing inside the row, turning every contentKey change
+/// (hover, selection, badge) into a full re-layout instead of a diff.
+private final class HostingRowView<Row: View>: NSTableCellView {
+    private var hosting: NSHostingView<Row>?
 
-    func set(_ view: some View) {
-        let erased = AnyView(view)
+    func set(_ view: Row) {
         if let hosting {
-            hosting.rootView = erased
+            hosting.rootView = view
             return
         }
-        let host = NSHostingView(rootView: erased)
+        let host = NSHostingView(rootView: view)
         host.translatesAutoresizingMaskIntoConstraints = false
         addSubview(host)
         NSLayoutConstraint.activate([

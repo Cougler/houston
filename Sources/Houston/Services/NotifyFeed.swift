@@ -58,12 +58,34 @@ enum NotifyFeed {
     // MARK: - Claude settings state
 
     /// Installed = our command appears under every hook event we need.
+    /// Cached behind settings.json's mtime — the store polls this every
+    /// 2s on the main thread, and re-parsing the whole file each tick
+    /// was 30 JSON parses a minute for an answer that almost never
+    /// changes.
+    nonisolated(unsafe) private static var installedCache: (mtime: Date, value: Bool)?
+    private static let installedLock = NSLock()
     static var isInstalled: Bool {
-        guard let settings = readClaudeSettings(),
-              let hooks = settings["hooks"] as? [String: Any] else { return false }
-        return hookEvents.allSatisfy { event in
-            groups(of: hooks, event: event).contains { groupHasOurCommand($0) }
+        let mtime = (try? FileManager.default.attributesOfItem(
+            atPath: StatusLineFeed.claudeSettingsURL.path
+        ))?[.modificationDate] as? Date ?? .distantPast
+        installedLock.lock()
+        if let hit = installedCache, hit.mtime == mtime {
+            let value = hit.value
+            installedLock.unlock()
+            return value
         }
+        installedLock.unlock()
+        let value: Bool = {
+            guard let settings = readClaudeSettings(),
+                  let hooks = settings["hooks"] as? [String: Any] else { return false }
+            return hookEvents.allSatisfy { event in
+                groups(of: hooks, event: event).contains { groupHasOurCommand($0) }
+            }
+        }()
+        installedLock.lock()
+        installedCache = (mtime, value)
+        installedLock.unlock()
+        return value
     }
 
     /// Installed for some events but not all — an older install predating a
@@ -91,7 +113,7 @@ enum NotifyFeed {
             return false
         }
 
-        var settings = readClaudeSettings() ?? [:]
+        guard var settings = settingsForEdit() else { return false }
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
         for event in hookEvents {
             var eventGroups = groups(of: hooks, event: event)
@@ -109,7 +131,7 @@ enum NotifyFeed {
     /// Removes exactly our entries; the user's own hooks stay.
     @discardableResult
     static func restore() -> Bool {
-        var settings = readClaudeSettings() ?? [:]
+        guard var settings = settingsForEdit() else { return false }
         guard var hooks = settings["hooks"] as? [String: Any] else { return true }
         for event in hookEvents {
             let remaining = groups(of: hooks, event: event)
@@ -145,6 +167,16 @@ enum NotifyFeed {
     private static func readClaudeSettings() -> [String: Any]? {
         guard let data = try? Data(contentsOf: StatusLineFeed.claudeSettingsURL)
         else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Settings safe to MODIFY and write back: an absent file edits as
+    /// empty, a present-but-unparseable one aborts — writing on the old
+    /// `?? [:]` fallback replaced the user's whole settings.json with
+    /// only our hooks.
+    private static func settingsForEdit() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: StatusLineFeed.claudeSettingsURL)
+        else { return [:] }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
@@ -291,14 +323,28 @@ final class NotifyStore: ObservableObject {
         if remaining.count != attention.count { attention = remaining }
     }
 
+    /// Single-flight, like the detector stores — a slow disk pass must
+    /// not stack onto the next tick.
+    private var pollInFlight = false
+
     private func poll() {
-        guard NotifyFeed.isInstalled else { return }
-        for event in NotifyFeed.drainEvents() {
-            handle(event)
+        guard !pollInFlight, NotifyFeed.isInstalled else { return }
+        pollInFlight = true
+        // The drain is directory listing + per-file read/parse/delete —
+        // disk work that has no business on the 2s main-thread timer.
+        Task.detached(priority: .utility) {
+            let events = NotifyFeed.drainEvents()
+            await MainActor.run {
+                let store = NotifyStore.shared
+                store.pollInFlight = false
+                for event in events { store.handle(event) }
+                // A pane that closed mid-turn never fires Stop — drop
+                // its pulse.
+                let stale = store.working.keys
+                    .filter { store.locate(paneID: $0) == nil }
+                for key in stale { store.working.removeValue(forKey: key) }
+            }
         }
-        // A pane that closed mid-turn never fires Stop — drop its pulse.
-        let stale = working.keys.filter { locate(paneID: $0) == nil }
-        for key in stale { working.removeValue(forKey: key) }
     }
 
     private func handle(_ event: NotifyFeed.Event) {

@@ -947,7 +947,7 @@ enum ChatArchive {
         }
         var chunks: [String] = []
         var current = ""
-        for message in messages[0...max(index, 0)] where index >= 0 {
+        for message in messages[0..<max(index + 1, 0)] {
             let role = message.role == .user ? "User" : "Assistant"
             current += role + ": " + flatten(message) + "\n\n"
             if current.count > 2_800 {
@@ -1456,6 +1456,57 @@ final class ChatIndexStore: ObservableObject {
                     for ref in refs.prefix(8) { ChatTitler.shared.ensure(ref) }
                 }
             }
+        }
+    }
+
+    /// One-line previews for the chats panel: the latest message's text,
+    /// parsed off-main and cached by file mtime, so a row renders its
+    /// snippet synchronously once loaded.
+    @MainActor
+    final class Snippets: ObservableObject {
+        static let shared = Snippets()
+
+        @Published private(set) var snippets: [String: String] = [:]
+        private var loadedMtime: [String: Date] = [:]
+        private var inFlight: Set<String> = []
+
+        func snippet(for file: String) -> String? { snippets[file] }
+
+        func ensure(_ ref: ChatSessionRef) {
+            let file = ref.filePath
+            // The index already stamped the ref's mtime — re-statting
+            // here ran on the main thread from every row's onAppear,
+            // including scroll recycling.
+            let mtime = ref.modified
+            if loadedMtime[file] == mtime, snippets[file] != nil { return }
+            guard !inFlight.contains(file) else { return }
+            inFlight.insert(file)
+            Task.detached(priority: .utility) {
+                let text = Self.extract(ref)
+                await MainActor.run {
+                    let store = Snippets.shared
+                    store.inFlight.remove(file)
+                    store.loadedMtime[file] = mtime
+                    if store.snippets[file] != text {
+                        store.snippets[file] = text
+                    }
+                }
+            }
+        }
+
+        /// The last message's first run of real text, flattened to one
+        /// line — what the conversation most recently said.
+        nonisolated private static func extract(_ ref: ChatSessionRef) -> String {
+            for message in ChatArchive.transcript(ref).reversed() {
+                for block in message.blocks {
+                    guard case let .text(text) = block else { continue }
+                    let flat = text
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !flat.isEmpty { return String(flat.prefix(140)) }
+                }
+            }
+            return ""
         }
     }
 

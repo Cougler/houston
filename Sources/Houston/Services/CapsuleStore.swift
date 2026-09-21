@@ -130,7 +130,14 @@ final class CapsuleStore: ObservableObject {
     /// under a new mtime, and a dismissed file that grows is un-dismissed
     /// by the next sweep's re-check below.
     private var checkedFiles: Set<String> = []
+    private var sweepInFlight = false
     private func autoDismissSweep() {
+        guard !sweepInFlight else { return }
+        // Candidate selection is cheap metadata; the substance check is
+        // disk I/O (a stat, plus a full parse for small files) and runs
+        // DETACHED — the first launch sweeps every chat of every
+        // project, and doing that synchronously froze the main thread.
+        var fresh: [ChatSessionRef] = []
         for (_, refs) in ChatIndexStore.shared.chats {
             for ref in refs {
                 guard !checkedFiles.contains(ref.filePath),
@@ -140,23 +147,36 @@ final class CapsuleStore: ObservableObject {
                       ChatSessionHub.shared.sessions[ref.filePath] == nil
                 else { continue }
                 checkedFiles.insert(ref.filePath)
-                if Self.isNegligibleOnDisk(ref) {
-                    dismiss(file: ref.filePath)
-                }
+                fresh.append(ref)
             }
         }
         // A dismissed chat that grew back into a conversation (resumed
         // from the terminal, say) returns to the list.
+        var regrown: [ChatSessionRef] = []
         for file in dismissedFiles {
             guard let refs = ChatIndexStore.shared.chats.values
                 .first(where: { $0.contains { $0.filePath == file } }),
                   let ref = refs.first(where: { $0.filePath == file }),
                   Date().timeIntervalSince(ref.modified) < Self.dismissAfterQuiet
             else { continue }
-            if !Self.isNegligibleOnDisk(ref) {
-                dismissedFiles.remove(file)
-                checkedFiles.remove(file)
-                scheduleSave()
+            regrown.append(ref)
+        }
+        guard !fresh.isEmpty || !regrown.isEmpty else { return }
+        sweepInFlight = true
+        Task.detached(priority: .utility) {
+            let toDismiss = fresh
+                .filter { Self.isNegligibleOnDisk($0) }.map(\.filePath)
+            let toRestore = regrown
+                .filter { !Self.isNegligibleOnDisk($0) }.map(\.filePath)
+            await MainActor.run {
+                let store = CapsuleStore.shared
+                store.sweepInFlight = false
+                for file in toDismiss { store.dismiss(file: file) }
+                for file in toRestore {
+                    store.dismissedFiles.remove(file)
+                    store.checkedFiles.remove(file)
+                    store.scheduleSave()
+                }
             }
         }
     }

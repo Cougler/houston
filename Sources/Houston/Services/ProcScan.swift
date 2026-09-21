@@ -74,13 +74,29 @@ enum ProcScan {
     }
 
     static func cwd(ofPid pid: Int32) -> String? {
-        guard let out = run("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]) else {
-            return nil
+        cwds(ofPids: [pid])[pid]
+    }
+
+    /// One `lsof` spawn for the whole batch — the agent scan used to fork
+    /// it once per candidate pid, every 2s tick. `-p` takes a
+    /// comma-separated list; `-Fpn` interleaves `p<pid>` and `n<path>`
+    /// records so each cwd attributes to its pid.
+    static func cwds(ofPids pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let list = pids.map(String.init).joined(separator: ",")
+        guard let out = run(
+            "/usr/sbin/lsof", ["-a", "-p", list, "-d", "cwd", "-Fpn"]
+        ) else { return [:] }
+        var result: [Int32: String] = [:]
+        var current: Int32?
+        for line in out.split(separator: "\n") {
+            if line.hasPrefix("p") {
+                current = Int32(line.dropFirst())
+            } else if line.hasPrefix("n"), let pid = current {
+                result[pid] = String(line.dropFirst())
+            }
         }
-        for line in out.split(separator: "\n") where line.hasPrefix("n") {
-            return String(line.dropFirst())
-        }
-        return nil
+        return result
     }
 
     /// Runs a tool and captures stdout. Synchronous.

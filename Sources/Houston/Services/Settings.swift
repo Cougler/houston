@@ -48,8 +48,6 @@ struct HoustonSettings {
     /// Individual project folders added directly — shown as their own rows,
     /// never expanded into their subdirectories.
     var pinnedProjects: [String]
-    /// Project folders currently collapsed in the sidebar.
-    var collapsedFolders: [String]
     /// "system" | "light" | "dark".
     var appearance: String
     /// A ghostty theme name for the terminal, or "" for Houston's default
@@ -93,6 +91,9 @@ struct HoustonSettings {
     var sidebarWidth: Double
     /// Right sheet (Git/Capsules/etc.) width in points (user-dragged).
     var rightSheetWidth: Double
+    /// The right sheet's last pin choice — a sheet opens pinned (docked)
+    /// or floating based on how the user last left it.
+    var rightPanelDocked: Bool
     /// Last window frame as [x, y, w, h]; empty until first saved. Lives
     /// here (not just NSWindow frame autosave) because settings.json is the
     /// store that survives updates AND is shared by debug and packaged
@@ -119,9 +120,11 @@ struct HoustonSettings {
 
     static var defaults: HoustonSettings {
         HoustonSettings(
-            projectsDirs: ["~/Apps".expandingTildePath],
+            // Empty, deliberately: folder groups are gone (2026-09-09) and
+            // a ~/Apps default made every fresh install auto-pin the
+            // user's whole Apps folder as a "project" via the migration.
+            projectsDirs: [],
             pinnedProjects: [],
-            collapsedFolders: [],
             appearance: "system",
             terminalTheme: "",
             recentTerminalThemes: [],
@@ -138,6 +141,7 @@ struct HoustonSettings {
             sidebarCollapsed: false,
             sidebarWidth: Double(Theme.sidebarWidth),
             rightSheetWidth: 364,
+            rightPanelDocked: false,
             windowFrame: [],
             previewWindowFrame: [],
             recentServers: [],
@@ -162,7 +166,32 @@ struct HoustonSettings {
         return URL(fileURLWithPath: dir).appendingPathComponent("settings.json")
     }
 
+    /// Parsed-settings cache behind the file's mtime. `read()` runs on 4s
+    /// and 5s store timers and ~10× per MainWindowView init, all on the
+    /// main thread — a stat is microseconds, the read+parse it replaces
+    /// is not. Guarded: `read()`/`write()` are called from the main
+    /// thread and detached store tasks alike.
+    nonisolated(unsafe) private static var cached: (mtime: Date, value: HoustonSettings)?
+    private static let cacheLock = NSLock()
+
     static func read() -> HoustonSettings {
+        let mtime = (try? FileManager.default
+            .attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
+        cacheLock.lock()
+        if let cached, cached.mtime == mtime ?? .distantPast {
+            let hit = cached.value
+            cacheLock.unlock()
+            return hit
+        }
+        cacheLock.unlock()
+        let value = parse()
+        cacheLock.lock()
+        cached = (mtime ?? .distantPast, value)
+        cacheLock.unlock()
+        return value
+    }
+
+    private static func parse() -> HoustonSettings {
         guard let data = try? Data(contentsOf: fileURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return defaults
@@ -182,9 +211,6 @@ struct HoustonSettings {
             s.pinnedProjects = pinned
                 .map(\.expandingTildePath)
                 .filter { ($0 as NSString).isAbsolutePath }
-        }
-        if let collapsed = json["collapsedFolders"] as? [String] {
-            s.collapsedFolders = collapsed
         }
         if let a = json["appearance"] as? String, ["system", "light", "dark"].contains(a) {
             s.appearance = a
@@ -223,7 +249,12 @@ struct HoustonSettings {
             s.relayEnabled = enabled
         }
         if let pins = json["relayPins"] as? [String: String] {
-            s.relayPins = pins
+            // Digits only, mirroring setPin — a hand-edited pin with
+            // CR/LF would otherwise split the relay handshake request.
+            s.relayPins = pins.filter {
+                !$0.value.isEmpty && $0.value.count <= 8
+                    && $0.value.allSatisfy(\.isNumber)
+            }
         }
         if let railed = json["sidebarCollapsed"] as? Bool {
             s.sidebarCollapsed = railed
@@ -236,6 +267,9 @@ struct HoustonSettings {
         // Bounds mirror MainWindowView.rightSheetRange.
         if let w = json["rightSheetWidth"] as? Double, (300...600).contains(w) {
             s.rightSheetWidth = w
+        }
+        if let docked = json["rightPanelDocked"] as? Bool {
+            s.rightPanelDocked = docked
         }
         if let f = json["windowFrame"] as? [Double], f.count == 4,
            f[2] >= 400, f[3] >= 300 {
@@ -271,7 +305,6 @@ struct HoustonSettings {
         }()
         obj["projectsDirs"] = s.projectsDirs
         obj["pinnedProjects"] = s.pinnedProjects
-        obj["collapsedFolders"] = s.collapsedFolders
         obj["appearance"] = s.appearance
         obj["terminalTheme"] = s.terminalTheme
         obj["recentTerminalThemes"] = s.recentTerminalThemes
@@ -288,6 +321,7 @@ struct HoustonSettings {
         obj["sidebarCollapsed"] = s.sidebarCollapsed
         obj["sidebarWidth"] = s.sidebarWidth
         obj["rightSheetWidth"] = s.rightSheetWidth
+        obj["rightPanelDocked"] = s.rightPanelDocked
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
         obj["chatBubbleColor"] = s.chatBubbleColor
@@ -304,6 +338,16 @@ struct HoustonSettings {
             withJSONObject: obj,
             options: [.prettyPrinted, .sortedKeys]
         ) else { return false }
-        return (try? data.write(to: fileURL, options: .atomic)) != nil
+        guard (try? data.write(to: fileURL, options: .atomic)) != nil else {
+            return false
+        }
+        // The relay bearer token lives here — keep the file user-only.
+        try? fm.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
+        )
+        cacheLock.lock()
+        cached = nil
+        cacheLock.unlock()
+        return true
     }
 }

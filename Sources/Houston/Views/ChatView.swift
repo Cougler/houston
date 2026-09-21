@@ -81,6 +81,17 @@ struct ChatModelChoice: Hashable {
         }
     }
 
+    /// The level in force when the user hasn't picked one — each CLI's own
+    /// default, named explicitly so the chip always shows a real level
+    /// (there is no "Default" entry; what's displayed is what's sent).
+    static func defaultEffort(for harness: ChatHarness) -> String? {
+        switch harness {
+        case .claude: "high"
+        case .codex: "medium"
+        case .gemini, .grok, .pi: nil
+        }
+    }
+
     /// Same model, one harness's effort levels only carry to that harness.
     /// Local models take no effort level — the local server decides.
     func applying(effort chosen: String?, permission mode: ChatPermissionMode) -> ChatModelChoice {
@@ -1571,8 +1582,9 @@ private struct ChatComposer: View {
     @ObservedObject private var providerAuth = ProviderAuthStore.shared
     @State private var draft = ""
     @State private var picked: ChatModelChoice?
-    /// Chosen effort level (flag value); nil = the model's default. Only
-    /// applied when the current model's harness supports the level.
+    /// Explicitly chosen effort level (flag value); nil = no pick yet, in
+    /// which case `activeEffort` falls back to the session's last-used
+    /// level, then the harness default — the chip never reads "Default".
     @State private var effort: String?
     /// nil = follow the initial model's mode (the session's last send).
     @State private var permission: ChatPermissionMode?
@@ -1596,9 +1608,20 @@ private struct ChatComposer: View {
         permission ?? initialModel.permission
     }
 
-    /// The effort actually in force for the current model's harness.
+    /// The effort actually in force for the current model's harness —
+    /// never nil while the harness has levels: an explicit pick wins, then
+    /// the session's last-used level, then the harness default. The chip
+    /// always names a real level, and that resolved level is what rides
+    /// the send.
     private var activeEffort: (label: String, arg: String)? {
-        ChatModelChoice.efforts(for: model.harness).first { $0.arg == effort }
+        let levels = ChatModelChoice.efforts(for: model.harness)
+        guard !levels.isEmpty else { return nil }
+        let chosen = effort ?? initialModel.effort
+        return levels.first { $0.arg == chosen }
+            ?? levels.first {
+                $0.arg == ChatModelChoice.defaultEffort(for: model.harness)
+            }
+            ?? levels[0]
     }
 
     /// A drop that couldn't become an attachment (unreadable image data)
@@ -1643,7 +1666,13 @@ private struct ChatComposer: View {
                     .help("Attach an image (inserts its path)")
                     modelMenu
                     harnessMenu
-                    if model.provider == nil { effortMenu }
+                    // Hidden for local models (the local server decides)
+                    // and ACP harnesses (no effort flag — the menu would
+                    // be empty).
+                    if model.provider == nil,
+                       !ChatModelChoice.efforts(for: model.harness).isEmpty {
+                        effortMenu
+                    }
                     Spacer(minLength: 0)
                     if let runningSession {
                         ContextMeter(session: runningSession)
@@ -1952,10 +1981,9 @@ private struct ChatComposer: View {
     /// local server decides).
     private var effortMenu: some View {
         Menu {
-            Toggle("Default", isOn: Binding(
-                get: { activeEffort == nil },
-                set: { _ in effort = nil }
-            ))
+            // No "Default" entry — the chip always names a real level
+            // (activeEffort resolves the CLI's default), so an opaque
+            // "whatever the CLI decides" option would only hide it.
             ForEach(ChatModelChoice.efforts(for: model.harness), id: \.arg) { level in
                 Toggle(level.label, isOn: Binding(
                     get: { activeEffort?.arg == level.arg },
@@ -2165,7 +2193,11 @@ private struct ChatComposer: View {
         attachments = []
         stagedCapsules = []
         stagedFragments = []
-        onSend(text, model.applying(effort: effort, permission: activePermission))
+        // The resolved level, not the raw pick — the send carries exactly
+        // what the chip shows, so an explicit flag always reaches the CLI.
+        onSend(text, model.applying(
+            effort: activeEffort?.arg, permission: activePermission
+        ))
     }
 
     private func attachImage() {

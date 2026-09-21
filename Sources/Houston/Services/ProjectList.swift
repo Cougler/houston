@@ -5,12 +5,19 @@ import Foundation
 /// sidebar re-derives row keys on every 2s tick — cache the verdict per path.
 @MainActor
 enum ProjectKindCache {
-    private static var cache: [String: Bool] = [:]
+    private static var cache: [String: (mtime: Date, value: Bool)] = [:]
 
+    /// Keyed by the folder's mtime, not cached forever — a folder that
+    /// gains a `package.json` mid-session should start reading as a
+    /// project without a relaunch. Adding a file changes the directory's
+    /// own mtime, so the re-check costs one stat until then.
     static func isProject(_ path: String) -> Bool {
-        if let hit = cache[path] { return hit }
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[
+            .modificationDate
+        ] as? Date ?? .distantPast
+        if let hit = cache[path], hit.mtime == mtime { return hit.value }
         let result = ProjectList.isProject(path)
-        cache[path] = result
+        cache[path] = (mtime, result)
         return result
     }
 }

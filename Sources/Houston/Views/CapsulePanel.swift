@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The capsule shelf, in the right sheet like Git and Skills. It lists a
 /// project's sealed chats; clicking one opens the capsule DIALOG — a

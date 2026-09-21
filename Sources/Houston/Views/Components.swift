@@ -331,10 +331,6 @@ struct InlineNotice: View {
     }
 }
 
-/// The old name for the error notice; call sites migrate to `InlineNotice`.
-func AlertBanner(title: String, message: String) -> InlineNotice {
-    InlineNotice(kind: .error, title: title, message: message)
-}
 
 /// QR code for a share URL, shown from the Wi-Fi row's "View QR Code"
 /// button so a phone can jump straight to the link.

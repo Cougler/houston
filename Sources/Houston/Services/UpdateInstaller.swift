@@ -117,10 +117,17 @@ final class UpdateInstaller: ObservableObject {
         let newApp = mount.appendingPathComponent(appName)
 
         // Not an update unless it's OUR app: intact signature, our team,
-        // and Gatekeeper-accepted (i.e. still notarized).
+        // and Gatekeeper-accepted (i.e. still notarized). The team check
+        // is an EXACT line match — codesign's output echoes the bundle
+        // path, so a substring `contains` could be satisfied by an app
+        // literally named "TeamIdentifier=….app" signed by anyone.
         try run("/usr/bin/codesign", "--verify", "--deep", "--strict", newApp.path)
         let signInfo = try run("/usr/bin/codesign", "-dv", "--verbose=2", newApp.path)
-        guard signInfo.contains("TeamIdentifier=\(teamID)") else {
+        let signedByUs = signInfo
+            .split(whereSeparator: \.isNewline)
+            .contains { $0.trimmingCharacters(in: .whitespaces)
+                == "TeamIdentifier=\(teamID)" }
+        guard signedByUs else {
             throw failure("The update isn't signed by Houston's developer.")
         }
         try run("/usr/sbin/spctl", "--assess", "--type", "execute", newApp.path)
@@ -150,11 +157,13 @@ final class UpdateInstaller: ObservableObject {
     /// `NSApp.terminate`.
     private nonisolated static func relaunch(_ path: String) {
         let pid = ProcessInfo.processInfo.processIdentifier
+        // The path rides as $0, never interpolated into the script — a
+        // bundle path containing `"` or `$(…)` must not become shell.
         let script = "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done; "
-            + "/usr/bin/open \"\(path)\""
+            + "/usr/bin/open \"$0\""
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script]
+        p.arguments = ["-c", script, path]
         try? p.run()
     }
 

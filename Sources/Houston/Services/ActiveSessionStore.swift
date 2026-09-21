@@ -5,7 +5,6 @@ import Foundation
 @MainActor
 final class ActiveSessionStore: ObservableObject {
     @Published private(set) var sessions: [ActiveSession] = []
-    @Published private(set) var projectGroups: [ProjectGroup] = []
     @Published private(set) var projectsDirs: [String] = HoustonSettings.defaults.projectsDirs
     /// Single projects added directly to the sidebar (never expanded).
     @Published private(set) var pinnedProjects: [String] = []
@@ -39,20 +38,11 @@ final class ActiveSessionStore: ObservableObject {
     func refresh() {
         guard !refreshInFlight else { return }
         refreshInFlight = true
-        let dirs = projectsDirs
         Task.detached(priority: .utility) {
             let snapshot = ProcessDetect.snapshot()
-            let groups = dirs.map { dir in
-                ProjectGroup(
-                    path: dir,
-                    name: (dir as NSString).lastPathComponent,
-                    projects: ProjectList.scan(projectsDir: dir)
-                )
-            }
             await MainActor.run {
                 self.refreshInFlight = false
                 self.sessions = snapshot
-                self.projectGroups = groups
             }
         }
     }
@@ -64,9 +54,17 @@ final class ActiveSessionStore: ObservableObject {
     /// works: pinned matching is prefix-based, so a dev server inside a
     /// former group attributes to the group's row.
     private func migrateFoldersToProjects() {
+        // Only folders the user actually persisted migrate — the raw JSON
+        // must carry the key. `read()`'s defaults include ~/Apps, and
+        // folding those in auto-pinned a fresh install's whole Apps
+        // folder as a "project" before the user ever added one.
+        guard let data = try? Data(contentsOf: HoustonSettings.fileURL),
+              let json = try? JSONSerialization.jsonObject(with: data)
+                  as? [String: Any],
+              let dirs = json["projectsDirs"] as? [String], !dirs.isEmpty
+        else { return }
         var s = HoustonSettings.read()
-        guard !s.projectsDirs.isEmpty else { return }
-        for dir in s.projectsDirs where !s.pinnedProjects.contains(dir) {
+        for dir in dirs where !s.pinnedProjects.contains(dir) {
             s.pinnedProjects.append(dir)
         }
         s.projectsDirs = []

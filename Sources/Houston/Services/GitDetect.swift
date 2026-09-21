@@ -82,11 +82,37 @@ enum GitDetect {
         )
     }
 
+    /// Repo-ness per path, without a spawn on the hot path: a `.git`
+    /// entry at the root answers instantly (file or dir — worktrees use
+    /// a file), and anything else falls back to one rev-parse cached for
+    /// five minutes. Every watched row was paying a `git` spawn per 3s
+    /// tick just to re-learn "still not a repo".
+    nonisolated(unsafe) private static var repoVerdicts:
+        [String: (at: Date, isRepo: Bool)] = [:]
+    private static let verdictLock = NSLock()
+
+    private static func isRepo(_ projectPath: String) -> Bool {
+        if FileManager.default.fileExists(atPath: projectPath + "/.git") {
+            return true
+        }
+        let now = Date()
+        verdictLock.lock()
+        if let hit = repoVerdicts[projectPath],
+           now.timeIntervalSince(hit.at) < 300 {
+            verdictLock.unlock()
+            return hit.isRepo
+        }
+        verdictLock.unlock()
+        let verdict = git(["rev-parse", "--is-inside-work-tree"], in: projectPath) == "true"
+        verdictLock.lock()
+        repoVerdicts[projectPath] = (now, verdict)
+        verdictLock.unlock()
+        return verdict
+    }
+
     /// Cheap per-row status for the sidebar dot.
     static func rowStatus(projectPath: String) -> GitRowStatus {
-        guard git(["rev-parse", "--is-inside-work-tree"], in: projectPath) == "true" else {
-            return .none
-        }
+        guard isRepo(projectPath) else { return .none }
         let porcelain = git(["status", "--porcelain"], in: projectPath) ?? ""
         guard !porcelain.isEmpty else { return .clean }
         // Line counts vs HEAD (staged + unstaged; binary rows are "-\t-").

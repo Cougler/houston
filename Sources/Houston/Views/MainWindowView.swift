@@ -13,14 +13,11 @@ enum SidebarSelection: Hashable {
     case project(String)
     /// An extra terminal tab of a project, shown nested under its row.
     case shell(path: String, tab: UUID)
-    /// A running dev server, by `DevServer.id`.
-    case server(String)
 
     var projectPath: String? {
         switch self {
         case let .project(path): path
         case let .shell(path, _): path
-        case .server: nil
         }
     }
 
@@ -42,10 +39,23 @@ enum RightPanel: Equatable {
     /// A project's capsule shelf — its sealed chats. `focus` (a capsule
     /// id) lands straight in that capsule's transcript view.
     case capsules(project: String)
+    /// A project's chat list — the layout's chat navigator (2026-09-20):
+    /// clicking a project in the sidebar opens its chats HERE, not nested
+    /// under the project row. The sidebar carries projects; this carries
+    /// their conversations.
+    case chats(project: String)
     /// An inline chat thread hanging off one reply paragraph — the
     /// target is self-contained (project, file, harness, anchor), so the
     /// panel works even if the chat behind it navigates away.
     case chatThread(ChatThreadTarget)
+}
+
+/// The project panel's segmented pages — Chat / Terminal / Server
+/// (2026-09-20 design: one panel per project, three views of it).
+enum ProjectPanelTab: String, CaseIterable {
+    case chat = "Chat"
+    case terminal = "Terminal"
+    case server = "Server"
 }
 
 /// Which terminal row the rename card is editing.
@@ -96,8 +106,9 @@ struct MainWindowView: View {
     /// Tracked, and the notification feed are mutually exclusive by type.
     @State private var rightPanel: RightPanel?
     /// Docked: the sheet joins the layout and pushes the detail column.
-    /// Floating (default): it overlays the content, click-away dismisses.
-    @State private var rightPanelDocked = false
+    /// Floating: it overlays the content. Seeded from the last pin choice
+    /// (settings.json) so a sheet opens the way the user last left one.
+    @State private var rightPanelDocked = HoustonSettings.read().rightPanelDocked
     /// The tasks sheet's navigation: nil shows All Tasks (the root), a path
     /// shows that project's page nested under it (Back pops to nil).
     @State private var taskSheetProject: String? = nil
@@ -105,19 +116,6 @@ struct MainWindowView: View {
     @State private var taskSheetTab: TaskSheetTab = .tasks
     /// Hover for the breadcrumb's "All Tasks" button in the sheet title bar.
     @State private var crumbHovered = false
-    /// Project headers whose chat list is folded away (persisted under the
-    /// old `collapsedFolders` settings key).
-    @State private var collapsedProjects = Set(HoustonSettings.read().collapsedFolders)
-    /// Chat rows disclosed per project beyond the base few ("Show more") —
-    /// cleared when the project collapses, so reopening shows the short list.
-    @State private var chatRowsShown: [String: Int] = [:]
-    /// The Servers item's flyout is open — stopped (recent) servers in a
-    /// second-layer card beside the sidebar, same chrome as the rail's
-    /// flyouts. Session-only, like hover state.
-    /// Capsule rows shown per project — starts at 5, "Show more" steps by
-    /// 5 (mirroring the chats' disclosure). Resets when the project
-    /// header folds.
-    @State private var capsuleRowsShown: [String: Int] = [:]
     /// The centered capsule dialog (transcript + fragment selection).
     /// Clicking a capsule anywhere opens this; the right sheet only ever
     /// shows the shelf.
@@ -138,6 +136,9 @@ struct MainWindowView: View {
         var sessionFile: String?
     }
     @State private var chatTarget: ChatTarget?
+    /// The project panel's active page — reset to Chat on every project
+    /// click (that's the click's intent); Terminal/Server are one tap away.
+    @State private var projectPanelTab: ProjectPanelTab = .chat
     @StateObject private var chatIndex = ChatIndexStore.shared
     @StateObject private var chatTitler = ChatTitler.shared
     @StateObject private var chatMeta = ChatMetaStore.shared
@@ -170,8 +171,6 @@ struct MainWindowView: View {
     @State private var showNotifyPrompt = false
     /// The automatic offer fires at most once per launch.
     @State private var statusPromptOffered = false
-    /// Project folders currently collapsed, persisted in settings.
-    @State private var collapsedFolders = Set(HoustonSettings.read().collapsedFolders)
     /// First-launch onboarding: a full-window takeover on the empty-state
     /// sky (sidebar hidden underneath), until dismissed once.
     @State private var showOnboarding = !HoustonSettings.read().onboardingSeen
@@ -259,10 +258,6 @@ struct MainWindowView: View {
     // which isn't available in a property initializer.
     @State private var sidebarWidth: CGFloat =
         min(max(CGFloat(HoustonSettings.read().sidebarWidth), 180), 420)
-    /// Below this width the library rows' inline diff counts come off and
-    /// move into hover tooltips — squeezed against a long name they were
-    /// the first thing to look broken.
-    private var sidebarNarrow: Bool { sidebarWidth < 210 }
     private let sidebarRange: ClosedRange<CGFloat> = 180...420
     /// Width when the divider drag began — translation is cumulative from the
     /// gesture's start, so it must be applied to the start width, not the
@@ -303,13 +298,13 @@ struct MainWindowView: View {
                 .opacity(sidebarRevealed ? 1 : 0)
             detailColumn
                 .frame(maxWidth: .infinity)
-            // Docked: reserve the sheet's width in the layout. The sheet
-            // itself always draws in the overlay flush with the right edge,
-            // so pin/unpin animates nothing but this width (and the scrim) —
-            // no re-parenting, no jump.
+            // Reserve the sheet's width in the layout. The sheet itself
+            // always draws in the overlay flush with the right edge, so
+            // pin/unpin animates nothing but this width (and the scrim) —
+            // no re-parenting, no jump. The project sidebar reserves even
+            // unpinned: chat content centers between the two sidebars.
             Color.clear
-                .frame(width: rightPanelDocked && rightPanel != nil
-                    ? rightSheetWidth : 0)
+                .frame(width: rightPanelReservedWidth)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(chromeBackground)
@@ -676,8 +671,6 @@ struct MainWindowView: View {
                             .map { RenameTarget(path: path, tabID: $0) }
                     case let .shell(path, tabID):
                         RenameTarget(path: path, tabID: tabID)
-                    case .server:
-                        nil
                     }
                     guard let target else { return }
                     DispatchQueue.main.async {
@@ -1086,6 +1079,19 @@ struct MainWindowView: View {
         .spring(response: 0.35, dampingFraction: 0.86)
     }
 
+    /// Layout width the right sheet takes. The project sidebar ALWAYS
+    /// reserves its width — pinned or floating, the chat content pushes
+    /// left and centers between the two sidebars (a floating card keeps
+    /// its 32pt edge inset, hence the extra). Other panels reserve only
+    /// when docked; floating ones overlay the content.
+    private var rightPanelReservedWidth: CGFloat {
+        guard let rightPanel else { return 0 }
+        if case .chats = rightPanel {
+            return rightSheetWidth + (rightPanelDocked ? 0 : 32)
+        }
+        return rightPanelDocked ? rightSheetWidth : 0
+    }
+
     private func toggleRightPanel(_ panel: RightPanel) {
         let opening = rightPanel != panel
         // The render fallback: the close animation slides out still showing
@@ -1100,6 +1106,8 @@ struct MainWindowView: View {
             if let path = selection?.projectPath {
                 skills = SkillsCatalog.load(projectPath: path)
             }
+        case let .chats(project):
+            chatIndex.refresh(project, force: true)
         case .git, .servers, .server, .tasks, .capsules, .chatThread:
             break
         }
@@ -1107,6 +1115,14 @@ struct MainWindowView: View {
 
     private func closeRightPanel() {
         withAnimation(sheetSpring) { rightPanel = nil }
+    }
+
+    /// Every pin toggle goes through here so the choice persists — the
+    /// next sheet (this launch or the next) opens pinned or floating
+    /// based on how the user last left one.
+    private func toggleRightPanelPinned() {
+        withAnimation(sheetSpring) { rightPanelDocked.toggle() }
+        updateSettings { $0.rightPanelDocked = rightPanelDocked }
     }
 
     /// Open the tasks sheet at its All Tasks root (the footer checklist),
@@ -1166,11 +1182,51 @@ struct MainWindowView: View {
         }
         .offset(x: open ? 0 : rightSheetWidth + 40)
         .allowsHitTesting(open)
+        // The project sidebar tracks the project view: entering one (any
+        // chatTarget — home or a chat) summons it, wherever the target
+        // was set from (row click, rekey, banner route); leaving closes
+        // it. Attached here, not the root body — the sheet layer is
+        // always mounted, and one more root modifier tips the
+        // type-checker's expression limit.
+        .onChange(of: chatTarget) { _, target in
+            if let target {
+                if rightPanel != .chats(project: target.path) {
+                    // A different project's panel: land on Chat — that's
+                    // the open's intent, whatever tab the last project
+                    // was showing.
+                    projectPanelTab = .chat
+                    lastRightPanel = .chats(project: target.path)
+                    withAnimation(sheetSpring) {
+                        rightPanel = .chats(project: target.path)
+                    }
+                }
+            } else if case let .chats(project) = rightPanel,
+                      selection?.projectPath != project {
+                // Leaving the project closes its panel — but selecting one
+                // of the SAME project's terminals (the panel's Terminal
+                // tab does exactly this) is still "in the project", so the
+                // panel must not dismiss the page the click came from.
+                closeRightPanel()
+            }
+        }
+        // Once the close animation lands, drop the sheet's render
+        // fallback — a closed sheet keeps building `lastRightPanel`'s
+        // content on every body evaluation otherwise.
+        .onChange(of: rightPanel) { _, panel in
+            guard panel == nil else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                if rightPanel == nil { lastRightPanel = nil }
+            }
+        }
     }
 
     /// Click on dead chrome: dismiss a floating sheet, never a docked one.
+    /// The project sidebar is exempt while a project view is up — it's
+    /// part of that view (no ✕ either); leaving the project closes it.
     private func closeFloatingSheet() {
         guard rightPanel != nil, !rightPanelDocked else { return }
+        if case .chats = rightPanel, chatTarget != nil { return }
         closeRightPanel()
     }
 
@@ -1193,11 +1249,7 @@ struct MainWindowView: View {
                             : "Dock beside the content",
                         bare: true,
                         circleSize: 32,
-                        action: {
-                            withAnimation(sheetSpring) {
-                                rightPanelDocked.toggle()
-                            }
-                        }
+                        action: { toggleRightPanelPinned() }
                     )
                     ControlIconButton(
                         systemName: "xmark",
@@ -1316,9 +1368,14 @@ struct MainWindowView: View {
         return servers.devServers.first { $0.cwd == path }
     }
 
+    /// Panels that draw their own header (per the Figma/mock designs), so
+    /// the shared controls bar stands down: the server page and the
+    /// project panel.
     private var serverChromeHidden: Bool {
-        if case .server = effectiveRightPanel { return true }
-        return false
+        switch effectiveRightPanel {
+        case .server, .chats: return true
+        default: return false
+        }
     }
 
     private var rightSheetTitle: String {
@@ -1329,6 +1386,7 @@ struct MainWindowView: View {
         case .server: "SERVER"
         case .tasks: "ALL TASKS"
         case .capsules: "CAPSULES"
+        case let .chats(project): name(of: project).uppercased()
         case .chatThread: "THREAD"
         case nil: ""
         }
@@ -1420,11 +1478,17 @@ struct MainWindowView: View {
                 SkillsPanel(
                     skills: skills,
                     onRun: { skill in
-                        terminals.send("/\(skill.name)\n", to: path)
+                        terminals.send(
+                            "/\(skill.name.strippingTerminalControls)\n",
+                            to: path
+                        )
                         if !rightPanelDocked { closeRightPanel() }
                     },
                     onInsert: { skill in
-                        terminals.send("/\(skill.name) ", to: path)
+                        terminals.send(
+                            "/\(skill.name.strippingTerminalControls) ",
+                            to: path
+                        )
                         if !rightPanelDocked { closeRightPanel() }
                     }
                 )
@@ -1479,9 +1543,7 @@ struct MainWindowView: View {
                         if !rightPanelDocked { closeRightPanel() }
                     },
                     docked: rightPanelDocked,
-                    onTogglePin: {
-                        withAnimation(sheetSpring) { rightPanelDocked.toggle() }
-                    },
+                    onTogglePin: { toggleRightPanelPinned() },
                     onClose: closeRightPanel,
                     onBack: {
                         withAnimation(sheetSpring) { rightPanel = .servers }
@@ -1495,9 +1557,7 @@ struct MainWindowView: View {
                         uniquingKeysWith: { a, _ in a }
                     ),
                     docked: rightPanelDocked,
-                    onTogglePin: {
-                        withAnimation(sheetSpring) { rightPanelDocked.toggle() }
-                    },
+                    onTogglePin: { toggleRightPanelPinned() },
                     onClose: closeRightPanel,
                     onBack: {
                         withAnimation(sheetSpring) { rightPanel = .servers }
@@ -1513,6 +1573,9 @@ struct MainWindowView: View {
             }
             }
             .transition(Self.pageChild)
+        case let .chats(project):
+            chatListPanel(for: project)
+                .transition(Self.pageParent)
         case let .capsules(path):
             CapsulePanel(
                 projectPath: path,
@@ -1635,7 +1698,11 @@ struct MainWindowView: View {
                 git.refresh()
             },
             onSwitchBranch: { branch in
-                terminals.send("git switch \"\(branch)\"\n", to: path)
+                // Single-quoted + control-stripped: git allows `$`, `` ` ``
+                // and parens in ref names, so a hostile repo's branch
+                // list must never reach the shell double-quoted.
+                let safe = branch.strippingTerminalControls.shellQuoted
+                terminals.send("git switch \(safe)\n", to: path)
                 git.refresh()
             },
             onNewBranch: {
@@ -1644,7 +1711,8 @@ struct MainWindowView: View {
                     message: "Created from the current branch and switched to.",
                     placeholder: "feature/thing"
                 ), !name.isEmpty else { return }
-                terminals.send("git switch -c \"\(name)\"\n", to: path)
+                let safe = name.strippingTerminalControls.shellQuoted
+                terminals.send("git switch -c \(safe)\n", to: path)
                 git.refresh()
             },
             onCommand: { command, execute in
@@ -1934,9 +2002,7 @@ struct MainWindowView: View {
                 PopoverRow(height: 32, action: { railSelect(.project(path)) }) { hovered in
                     SidebarRow(
                         name: list.first?.customName ?? name(of: path),
-                        agent: primaryAgent(path: path),
                         hasTerminal: true,
-                        gitStatus: git.rowStatuses[path] ?? .none,
                         hovered: hovered,
                         selected: highlightedSelection == .project(path),
                         onClose: { closeTerminal(path) }
@@ -1949,9 +2015,7 @@ struct MainWindowView: View {
                     ) { hovered in
                         SidebarRow(
                             name: tab.customName ?? name(of: path),
-                            agent: shellAgent(path: path, tab: tab.id),
                             hasTerminal: true,
-                            gitStatus: git.rowStatuses[path] ?? .none,
                             hovered: hovered,
                             selected: highlightedSelection == .shell(path: path, tab: tab.id),
                             onClose: { terminals.closeTab(path: path, tabID: tab.id) }
@@ -2016,8 +2080,10 @@ struct MainWindowView: View {
     private var projectsPopover: some View {
         let pinned = store.pinnedProjects
         let empty = pinned.isEmpty
+        // Same filter as the project panel — dismissed husks, superseded
+        // segments and archived chats stay hidden here too.
         let chatCount = pinned.reduce(0) {
-            $0 + min(chatIndex.chats[$1]?.count ?? 0, 3)
+            $0 + min(listedChats(for: $1).count, 3)
         }
         let rowsHeight = empty
             ? railEmptyStateHeight
@@ -2040,7 +2106,7 @@ struct MainWindowView: View {
             ForEach(pinned, id: \.self) { path in
                 projectPopoverRow(path)
                 ForEach(
-                    Array((chatIndex.chats[path] ?? []).prefix(3)),
+                    Array(listedChats(for: path).prefix(3)),
                     id: \.filePath
                 ) { ref in
                     chatPopoverRow(project: path, ref: ref)
@@ -2054,19 +2120,18 @@ struct MainWindowView: View {
         }
     }
 
-    /// Clicking a project starts a chat there — same as the expanded
-    /// header's "+"; the terminal lives one hover-icon away.
+    /// Clicking a project opens its chats panel + chat home — same as the
+    /// expanded sidebar's project row; the terminal lives one hover-icon
+    /// away.
     private func projectPopoverRow(_ path: String) -> some View {
         PopoverRow(height: 28, action: {
             setRailPopover(nil)
-            newChat(in: path)
+            openProjectChats(path)
         }) { hovered in
             HStack(spacing: 0) {
                 SidebarRow(
                     name: name(of: path),
                     diff: libraryDiff(path),
-                    isProject: ProjectKindCache.isProject(path),
-                    live: terminals.hasPane(for: path),
                     hovered: hovered
                 )
                 if hovered {
@@ -2217,7 +2282,11 @@ struct MainWindowView: View {
         )
         let dest = parent + "/" + name
         select(.project(NSHomeDirectory()))
-        terminals.send("git clone \"\(url)\" \"\(dest)\"\n", to: NSHomeDirectory())
+        // Single-quoted, not double — a pasted URL with `$(…)` must not
+        // execute when the line lands in the shell.
+        let safeURL = url.strippingTerminalControls.shellQuoted
+        let safeDest = dest.strippingTerminalControls.shellQuoted
+        terminals.send("git clone \(safeURL) \(safeDest)\n", to: NSHomeDirectory())
         Task {
             for _ in 0..<90 {
                 try? await Task.sleep(for: .seconds(2))
@@ -2268,34 +2337,16 @@ struct MainWindowView: View {
         return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Sidebar action rows ("New", "Add").
+    /// The sidebar's one action row — "New" (a home-folder shell) while
+    /// no terminal is open. Every click opens another shell: the first
+    /// becomes the home terminal, the rest nest under it as "~ · N" tabs.
     private func runAction(_ key: String) {
-        switch key {
-        case "new-terminal":
-            // Every click opens another shell: the first becomes the home
-            // terminal, the rest nest under it as "~ · N" tabs.
-            let home = NSHomeDirectory()
-            if terminals.hasPane(for: home), let tab = terminals.newTab(in: home) {
-                select(.shell(path: home, tab: tab.id))
-            } else {
-                select(.project(home))
-            }
-        case "open-folder": addFolder()
-        default:
-            if key.hasPrefix("archived:") {
-                let path = String(key.dropFirst("archived:".count))
-                if archivedShown.contains(path) {
-                    archivedShown.remove(path)
-                } else {
-                    archivedShown.insert(path)
-                }
-            } else if key.hasPrefix("capsules-more:") {
-                let path = String(key.dropFirst("capsules-more:".count))
-                capsuleRowsShown[path] = (capsuleRowsShown[path] ?? 5) + 5
-            } else if key.hasPrefix("capsules:") {
-                let path = String(key.dropFirst("capsules:".count))
-                toggleRightPanel(.capsules(project: path))
-            }
+        guard key == "new-terminal" else { return }
+        let home = NSHomeDirectory()
+        if terminals.hasPane(for: home), let tab = terminals.newTab(in: home) {
+            select(.shell(path: home, tab: tab.id))
+        } else {
+            select(.project(home))
         }
     }
 
@@ -2968,9 +3019,6 @@ struct MainWindowView: View {
             terminals.tabs[path]?.first?.customName ?? name(of: path)
         case let .shell(path, tab):
             terminals.tabs[path]?.first { $0.id == tab }?.customName ?? name(of: path)
-        case let .server(id):
-            servers.devServers.first { $0.id == id }
-                .map { $0.project ?? $0.command } ?? "Server"
         case .none: "Houston"
         }
     }
@@ -2978,9 +3026,6 @@ struct MainWindowView: View {
     private var headerSubtitle: String? {
         switch selection {
         case let .project(path), let .shell(path, _): path
-        case let .server(id):
-            servers.devServers.first { $0.id == id }
-                .map { "localhost:" + String($0.port) }
         case .none: nil
         }
     }
@@ -3034,29 +3079,6 @@ struct MainWindowView: View {
                 // selection. Same sky either way.
                 emptyState
             }
-        case let .server(id):
-            // Unreachable today — server rows aren't selectable (they open
-            // the right-sheet panel) — but kept sensible: same view, centered.
-            if let server = servers.devServers.first(where: { $0.id == id }) {
-                ServerPanel(
-                    server: server,
-                    share: share,
-                    relay: relay,
-                    health: servers.health[id],
-                    onOpenTerminal: {
-                        guard let cwd = server.cwd else { return }
-                        select(.project(cwd))
-                    }
-                )
-                .frame(maxWidth: 400)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ContentUnavailableView(
-                    "Server stopped",
-                    systemImage: "bolt.slash",
-                    description: Text("This server is no longer listening.")
-                )
-            }
         case .none:
             emptyState
         }
@@ -3098,15 +3120,6 @@ struct MainWindowView: View {
         Set(terminals.tabs.values.flatMap { $0.map(\.id) })
     }
 
-    /// Projects that already have a shell or agent live in Active, not under
-    /// their folder — and a pinned project keeps its own row rather than
-    /// doubling up inside a group that happens to contain it.
-    /// A group's rows in the Folders library. Running state doesn't matter —
-    /// only pinned projects are excluded, since they have their own rows.
-    private func libraryPaths(in group: ProjectGroup) -> [String] {
-        group.projects.map(\.path).filter { !store.pinnedProjects.contains($0) }
-    }
-
     /// Uncommitted line counts for a library row; nil when clean, not a
     /// repo, or the first scan is still out.
     private func libraryDiff(_ path: String) -> (added: Int, removed: Int)? {
@@ -3119,9 +3132,7 @@ struct MainWindowView: View {
     /// Everything the sidebar shows a git dot or subtext for: open terminals
     /// plus the whole Projects library.
     private var gitWatchSet: Set<String> {
-        Set(terminalPaths)
-            .union(store.pinnedProjects)
-            .union(store.projectGroups.flatMap { $0.projects.map(\.path) })
+        Set(terminalPaths).union(store.pinnedProjects)
     }
 
 
@@ -3161,91 +3172,389 @@ struct MainWindowView: View {
         // Servers moved out of the table (2026-09-12): they live in the
         // top cluster now, beside Settings/Tasks/Notifications — live ones
         // always nested under the item, stopped ones on disclosure.
-        // Each project is a collapsible header (no dot) with its chats
-        // nested underneath; the hover buttons add a chat or a terminal.
+        // Projects are plain rows (2026-09-20): chats no longer nest
+        // beneath them — clicking a project opens its chat list in the
+        // right sheet (`openProjectChats`), so the sidebar stays a short
+        // project index however many conversations pile up.
         out.append(.header("Projects"))
         for path in store.pinnedProjects {
             out.append(.folder(path: path, name: name(of: path)))
-            if !collapsedProjects.contains(path) {
-                out += chatEntries(under: path)
-            }
         }
         return out
-    }
-
-    private func toggleProjectCollapsed(_ path: String) {
-        if collapsedProjects.contains(path) {
-            collapsedProjects.remove(path)
-        } else {
-            collapsedProjects.insert(path)
-            chatRowsShown[path] = nil
-            archivedShown.remove(path)
-            capsuleRowsShown[path] = nil
-        }
-        updateSettings { $0.collapsedFolders = Array(collapsedProjects) }
     }
 
     private func name(of path: String) -> String {
         path == NSHomeDirectory() ? "~" : (path as NSString).lastPathComponent
     }
 
-    /// Chat rows first shown under a project — "Show more" steps by this.
-    private static let chatRowsBase = 6
+    /// Open a chat from the chats panel — never moves the terminal
+    /// selection. The panel stays put: it's part of the project view.
+    private func openChat(project: String, file: String) {
+        chatTarget = ChatTarget(path: project, sessionFile: file.isEmpty ? nil : file)
+    }
 
-    /// Recent chats nested under a project header. An empty `file` marks
-    /// the "Show more" tail row, which discloses another step of rows.
-    private func chatEntries(under path: String) -> [SidebarEntry] {
-        // Chats are FOREVER (the ChatGPT mental model — a chat, once
-        // started, exists in the list until the user removes it). Hidden
-        // here: negligible sessions (dismissed husks/one-liners) and
-        // rolled-over segments (superseded — the chain's head carries
-        // the chat's identity).
-        let all = (chatIndex.chats[path] ?? [])
-            .filter {
-                !capsuleStore.isDismissed($0.filePath)
-                    && !chatMeta.supersededFiles.contains($0.filePath)
-            }
-        let refs = chatMeta.arrangeSidebar(all)
-        let shown = chatRowsShown[path] ?? Self.chatRowsBase
-        var rows: [SidebarEntry] = refs.prefix(shown).map {
-            .chat(
-                project: path, file: $0.filePath,
-                title: chatTitler.displayTitle($0), harness: $0.harness.rawValue
-            )
+    /// A project click: its chat home in the center, its chat list in the
+    /// right sheet (2026-09-20 layout — chats live in the right sidebar,
+    /// not nested under the project row).
+    private func openProjectChats(_ path: String) {
+        // Already inside one of this project's chats: keep it; the click
+        // just summons the list.
+        if chatTarget?.path != path {
+            chatTarget = ChatTarget(path: path, sessionFile: nil)
         }
-        if refs.count > shown {
-            rows.append(.chat(project: path, file: "", title: "Show more", harness: ""))
+        if rightPanel != .chats(project: path) {
+            lastRightPanel = .chats(project: path)
+            withAnimation(sheetSpring) { rightPanel = .chats(project: path) }
         }
-        // Archived chats fold under their own toggle — this is their only
-        // home now that the transcript view has no list.
-        let archived = all.filter { chatMeta.archived.contains($0.filePath) }
-        if !archived.isEmpty {
-            rows.append(.action(
-                key: "archived:\(path)",
-                title: archivedShown.contains(path)
-                    ? "Hide archived" : "Archived (\(archived.count))"
-            ))
-            if archivedShown.contains(path) {
-                rows += archived.map {
-                    SidebarEntry.chat(
-                        project: path, file: $0.filePath,
-                        title: chatTitler.displayTitle($0),
-                        harness: $0.harness.rawValue
+        // The click's intent is chats; Terminal/Server stay one tap away.
+        projectPanelTab = .chat
+        chatIndex.refresh(path, force: true)
+    }
+
+    /// The project panel (2026-09-20 mock): its own header — folder glyph
+    /// + project name, pin and close — over a Chat / Terminal / Server
+    /// segment bar, then the active page.
+    private func chatListPanel(for path: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                Text(name(of: path).uppercased())
+                    .font(.system(size: 15, weight: .semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                // Three filled circle chips (per the mock): new chat,
+                // pin, close. Dead-chrome clicks never dismiss this panel
+                // (it's part of the project view) — the ✕ is the one
+                // deliberate way out; the next project click brings it back.
+                HStack(spacing: 8) {
+                    ControlIconButton(
+                        systemName: "plus.bubble",
+                        help: "Start a new chat in this project",
+                        circleSize: 32,
+                        action: { newChat(in: path) }
+                    )
+                    ControlIconButton(
+                        systemName: rightPanelDocked ? "pin.slash" : "pin",
+                        help: rightPanelDocked
+                            ? "Float over the content"
+                            : "Dock beside the content",
+                        circleSize: 32,
+                        action: { toggleRightPanelPinned() }
+                    )
+                    ControlIconButton(
+                        systemName: "xmark", help: "Close", circleSize: 32,
+                        action: closeRightPanel
                     )
                 }
             }
+            .padding(.top, 2)
+            .padding(.horizontal, 4)
+
+            projectPanelSegments
+                .padding(.top, 16)
+                .padding(.horizontal, 2)
+
+            Group {
+                switch projectPanelTab {
+                case .chat: projectChatPage(for: path)
+                case .terminal: projectTerminalPage(for: path)
+                case .server: projectServerPage(for: path)
+                }
+            }
+            .padding(.top, 10)
         }
-        return rows
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private func discloseMoreChats(in path: String) {
-        chatRowsShown[path] = (chatRowsShown[path] ?? Self.chatRowsBase)
-            + Self.chatRowsBase
+    /// The Chat / Terminal / Server pill bar — one capsule container, the
+    /// active segment filled.
+    private var projectPanelSegments: some View {
+        HStack(spacing: 0) {
+            ForEach(ProjectPanelTab.allCases, id: \.self) { tab in
+                let active = projectPanelTab == tab
+                Text(tab.rawValue)
+                    .font(.system(size: 13, weight: active ? .medium : .regular))
+                    .foregroundStyle(active ? Theme.text : Theme.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 30)
+                    .background(Capsule().fill(active ? Theme.rowSelected : .clear))
+                    .contentShape(Capsule())
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            projectPanelTab = tab
+                        }
+                    }
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(Theme.rowHovered.opacity(0.5)))
+        .overlay(Capsule().strokeBorder(Theme.borderSidebar, lineWidth: 1))
     }
 
-    /// Open a chat from the sidebar — never moves the terminal selection.
-    private func openChat(project: String, file: String) {
-        chatTarget = ChatTarget(path: project, sessionFile: file.isEmpty ? nil : file)
+    /// The chats the panel lists (same filter the sidebar nesting used):
+    /// dismissed husks and rolled-over segments hidden, pinned first.
+    private func listedChats(for path: String) -> [ChatSessionRef] {
+        let all = (chatIndex.chats[path] ?? []).filter {
+            !capsuleStore.isDismissed($0.filePath)
+                && !chatMeta.supersededFiles.contains($0.filePath)
+        }
+        return chatMeta.arrangeSidebar(all)
+    }
+
+    private func archivedChats(for path: String) -> [ChatSessionRef] {
+        (chatIndex.chats[path] ?? []).filter {
+            chatMeta.archived.contains($0.filePath)
+                && !capsuleStore.isDismissed($0.filePath)
+                && !chatMeta.supersededFiles.contains($0.filePath)
+        }
+    }
+
+    /// Chat page: every chat as a two-line row (title + timestamp over a
+    /// one-line snippet) — no truncation, the list just scrolls — with
+    /// the Archived fold at the bottom. New chat lives in the header.
+    private func projectChatPage(for path: String) -> some View {
+        let refs = listedChats(for: path)
+        let archived = archivedChats(for: path)
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                ForEach(refs) { ref in
+                    chatPanelRow(project: path, ref: ref)
+                }
+                if !archived.isEmpty {
+                    PanelRow(action: {
+                        if archivedShown.contains(path) {
+                            archivedShown.remove(path)
+                        } else {
+                            archivedShown.insert(path)
+                        }
+                    }) { _ in
+                        Text(archivedShown.contains(path)
+                            ? "Hide archived" : "Archived (\(archived.count))")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.vertical, 6)
+                    }
+                    if archivedShown.contains(path) {
+                        ForEach(archived) { ref in
+                            chatPanelRow(project: path, ref: ref)
+                        }
+                    }
+                }
+            }
+            // Breathing room between the rows and the panel's edges.
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+        }
+    }
+
+    /// One chat: title + pin/branch marks + (busy dot | timestamp, or the
+    /// archive ✕ on hover) over the snippet. Keeps every function the old
+    /// nested rows had — click opens, drag attaches to a composer,
+    /// right-click carries the full menu.
+    private func chatPanelRow(project: String, ref: ChatSessionRef) -> some View {
+        let file = ref.filePath
+        let open = chatTarget?.path == project && chatTarget?.sessionFile == file
+        let phase = ChatSessionHub.shared.sessions[file]?.phase
+        let busy = phase != nil && phase != .idle
+        return PanelRow(
+            selected: open,
+            action: { openChat(project: project, file: file) }
+        ) { hovered in
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(chatTitler.displayTitle(ref))
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    if chatMeta.pinned.contains(file) {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    if chatMeta.branches[file] != nil {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 8))
+                            .foregroundStyle(Theme.textSecondary)
+                            .help("Branched from another chat")
+                    }
+                    Spacer(minLength: 8)
+                    if hovered, !busy {
+                        RowActionIcon(symbol: "xmark", help: "Archive chat") {
+                            archiveChat(project: project, file: file)
+                        }
+                    } else if busy {
+                        Circle()
+                            .fill(Theme.dotActive)
+                            .frame(width: 6, height: 6)
+                    } else {
+                        Text(Self.chatTimestamp(ref.modified))
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
+                }
+                // The snippet observes its own store in a leaf view, so
+                // snippets streaming in re-render one row each — not the
+                // whole window (the root observed the store before, and
+                // every publish invalidated the full body).
+                SnippetText(file: file)
+            }
+            .padding(.vertical, 7)
+        }
+        .contextMenu { chatContextMenu(project: project, ref: ref) }
+        .onDrag {
+            let reference = ChatCapsule(
+                id: file, project: project, sourceFile: file,
+                harness: ref.harness.rawValue,
+                title: chatTitler.displayTitle(ref), sealedAt: Date()
+            ).referenceText
+            return NSItemProvider(object: reference as NSString)
+        }
+        .onAppear { ChatIndexStore.Snippets.shared.ensure(ref) }
+    }
+
+    /// "Today 2:13 PM" for today's chats, "9/10/26" otherwise.
+    private static func chatTimestamp(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date) {
+            return "Today " + date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(
+            .dateTime.month(.defaultDigits).day().year(.twoDigits)
+        )
+    }
+
+    /// Same actions the sidebar's NSMenu carried, as a SwiftUI menu.
+    @ViewBuilder
+    private func chatContextMenu(project: String, ref: ChatSessionRef) -> some View {
+        let file = ref.filePath
+        Button("Rename…") { ChatRowActions.promptRename(ref) }
+        Button(chatMeta.pinned.contains(file) ? "Unpin" : "Pin") {
+            chatMeta.togglePin(file)
+        }
+        Button(chatMeta.archived.contains(file) ? "Unarchive" : "Archive") {
+            // Archiving goes through archiveChat, not a bare flag flip —
+            // it refuses a chat mid-turn, shuts the warm session down,
+            // and moves the open view off the archived chat.
+            if chatMeta.archived.contains(file) {
+                chatMeta.toggleArchive(file)
+            } else {
+                archiveChat(project: project, file: file)
+            }
+        }
+        Divider()
+        Button("Branch Chat") {
+            ChatRowActions.duplicate(ref, project: project, asBranch: true)
+        }
+        Button("Duplicate") { ChatRowActions.duplicate(ref, project: project) }
+        Button("Copy Transcript") { ChatRowActions.copyTranscript(ref) }
+        Button("Reveal Transcript in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting(
+                [URL(fileURLWithPath: file)]
+            )
+        }
+        Divider()
+        Button("Delete Chat") { deleteChat(project: project, file: file) }
+    }
+
+    /// Terminal page: "+ New Terminal", then the project's open shells —
+    /// click selects (focus follows), hover carries the close.
+    private func projectTerminalPage(for path: String) -> some View {
+        let tabs = terminals.tabs[path] ?? []
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                PanelRow(action: { newTerminal(in: path) }) { _ in
+                    HStack(spacing: 7) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("New Terminal")
+                            .font(.system(size: 14))
+                    }
+                    .foregroundStyle(Theme.text)
+                    .padding(.vertical, 9)
+                }
+                ForEach(tabs, id: \.id) { tab in
+                    let isMain = tab.id == tabs.first?.id
+                    let target: SidebarSelection = isMain
+                        ? .project(path) : .shell(path: path, tab: tab.id)
+                    PanelRow(
+                        selected: selection == target,
+                        action: { select(target) }
+                    ) { hovered in
+                        HStack(spacing: 8) {
+                            Image(systemName: "terminal")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textSecondary)
+                            Text(tab.customName ?? name(of: path))
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            if hovered {
+                                RowActionIcon(
+                                    symbol: "xmark", help: "Close terminal"
+                                ) {
+                                    if isMain {
+                                        closeTerminal(path)
+                                    } else {
+                                        terminals.closeTab(path: path, tabID: tab.id)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+        }
+    }
+
+    /// Server page: the project's dev servers (live, then recent) —
+    /// clicking one pushes to its server page.
+    private func projectServerPage(for path: String) -> some View {
+        let live = servers.devServers.filter { $0.cwd == path }
+        let livePorts = Set(live.map(\.port))
+        let recents = servers.recents.filter {
+            $0.projectPath == path && !livePorts.contains($0.port)
+        }
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if live.isEmpty && recents.isEmpty {
+                    Text("No dev server detected in this project.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.top, 12)
+                        .padding(.horizontal, 10)
+                }
+                ForEach(live, id: \.id) { server in
+                    PopoverRow(height: 38, action: {
+                        toggleRightPanel(.server(server.id))
+                    }) { hovered in
+                        ServerRow(
+                            server: server,
+                            health: servers.health[server.id],
+                            hovered: hovered,
+                            selected: false
+                        )
+                    }
+                }
+                ForEach(recents, id: \.id) { recent in
+                    PopoverRow(height: 28, action: {
+                        toggleRightPanel(.server(recent.id))
+                    }) { hovered in
+                        ServerRow(recent: recent, hovered: hovered)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+        }
     }
 
     /// Archive a chat: it folds under the project's Archived toggle,
@@ -3318,34 +3627,6 @@ struct MainWindowView: View {
         sendToSnapshotPane("/model \(arg)\n", snapshot: snapshot)
     }
 
-    /// The agent running in a *specific* nested shell, told by the statusline
-    /// feed: a claude session writes a payload keyed by its pane's id, so a
-    /// snapshot for one of the tab's panes means claude is initialized right
-    /// there. Gated on the project-level scan so a leftover payload file
-    /// can't badge a shell after every agent under the path has exited.
-    private func shellAgent(path: String, tab tabID: UUID) -> CodingAgent? {
-        guard terminals.agents[path] != nil,
-              let tab = terminals.tabs[path]?.first(where: { $0.id == tabID }),
-              tab.panes.contains(where: { statusFeed.snapshots[$0.id.uuidString] != nil })
-        else { return nil }
-        return .claude
-    }
-
-    /// The agent badge for a project's main row. The process scan is
-    /// per-path, so once extra tabs exist it can't say *which* shell runs
-    /// claude — attribute it to the main tab only if one of its panes has a
-    /// feed snapshot, same as the nested rows. Non-claude agents write no
-    /// feed, so they stay on the main row rather than vanishing.
-    private func primaryAgent(path: String) -> CodingAgent? {
-        guard let agent = terminals.agents[path] else { return nil }
-        let list = terminals.tabs[path] ?? []
-        guard agent == .claude, list.count > 1, let first = list.first else { return agent }
-        let initialized = first.panes.contains {
-            statusFeed.snapshots[$0.id.uuidString] != nil
-        }
-        return initialized ? .claude : nil
-    }
-
     private func height(for entry: SidebarEntry) -> CGFloat {
         switch entry {
         case .header:
@@ -3359,17 +3640,7 @@ struct MainWindowView: View {
             // "New" stands in for the first terminal row — same height as one
             // (28pt), so the sections below don't jump when it's swapped out.
             return key == "new-terminal" ? 28 : 24
-        case .divider:
-            return 11
-        case .chat, .capsuleChat:
-            return 26
-        case let .row(id, _):
-            if case let .server(sid) = id {
-                // Live rows carry the URL subtext; stopped ones are a
-                // single line.
-                return servers.devServers.contains { $0.id == sid } ? 38 : 28
-            }
-            if case let .project(path) = id, !terminals.hasPane(for: path) { return 26 }
+        case .row:
             return 28
         }
     }
@@ -3414,155 +3685,29 @@ struct MainWindowView: View {
             // 3 inset + 8 padding + half an 18pt frame).
             .padding(.trailing, 10)
 
-        case let .action(key, title):
-            if key == "open-folder" {
-                // Two ways in: a local project folder, or a fresh clone.
-                Menu {
-                    Button("Add Project…") { addFolder() }
-                    Button("Clone Repository…") { cloneRepository() }
-                } label: {
-                    actionRowLabel(title: title, hovered: hovered)
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-            } else if key.hasPrefix("capsules") {
-                // The capsule list's tail rows ("Show more" / "View all
-                // capsules"): dimmed gray, title-only, lined up with the
-                // capsule titles above them.
-                Text(title)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(1)
-                    .padding(.leading, 42)
-                    .modifier(RowChrome(hovered: hovered, selected: false))
-                    .contentShape(Rectangle())
-                    .onTapGesture { runAction(key) }
-            } else {
-                actionRowLabel(title: title, hovered: hovered)
-                    .onTapGesture { runAction(key) }
-            }
-
-        case .divider:
-            Rectangle()
-                .fill(Theme.borderSidebar)
-                .frame(height: 1)
-                .padding(.horizontal, 10)
-                .frame(maxHeight: .infinity)
-
-        case let .chat(project, file, title, harness):
-            let open = !file.isEmpty && chatTarget?.path == project
-                && chatTarget?.sessionFile == file
-            let pinned = !file.isEmpty && chatMeta.pinned.contains(file)
-            // The agent's state, worn on the row: a trailing accent dot
-            // while a turn runs or settles, gone once it's genuinely done.
-            // (Chat rows carry no leading icon, 2026-09-17 — the title
-            // sits on the project name's line.)
-            let busy = !file.isEmpty
-                && ChatSessionHub.shared.sessions[file]?.phase != nil
-                && ChatSessionHub.shared.sessions[file]?.phase != .idle
-            HStack(spacing: 6) {
-                Text(title)
-                    .font(.system(size: 13))
-                    // A step dimmer than the project header; the
-                    // "Show more" disclosure row fades well back.
-                    .foregroundStyle(file.isEmpty
-                        ? Theme.textSecondary.opacity(0.65) : Theme.text.opacity(0.8))
-                    .lineLimit(1)
-                // Pin marker rides the trailing edge so titles line up.
-                if pinned {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                Spacer(minLength: 0)
-                if busy {
-                    Circle()
-                        .fill(Theme.dotActive)
-                        .frame(width: 6, height: 6)
-                }
-                // ✕ archives (standard concept, reversible from the
-                // Archived fold) — the transcript is never touched.
-                if hovered, !file.isEmpty {
-                    RowActionIcon(
-                        symbol: "xmark", help: "Archive chat"
-                    ) {
-                        archiveChat(project: project, file: file)
-                    }
-                }
-            }
-            // The chat TITLE lands on the project header's name line
-            // (18pt icon + 9 gap = 27) — no leading icon, the padding
-            // carries the full offset.
-            .padding(.leading, 27)
-            .modifier(RowChrome(hovered: hovered, selected: open))
-            .help(harness.isEmpty ? "" : harness)
-            .onTapGesture {
-                if file.isEmpty {
-                    discloseMoreChats(in: project)
-                } else {
-                    openChat(project: project, file: file)
-                }
-            }
-            // Any past chat drags into a composer as attached context —
-            // the same reference mechanics capsules used, minted on the
-            // fly; nothing is stored.
-            .onDrag {
-                guard !file.isEmpty else { return NSItemProvider() }
-                let reference = ChatCapsule(
-                    id: file, project: project, sourceFile: file,
-                    harness: harness, title: title, sealedAt: Date()
-                ).referenceText
-                return NSItemProvider(object: reference as NSString)
-            }
-
-        case let .capsuleChat(_, capsuleID, title):
-            // A sealed chat: the chat bubble wrapped in a capsule outline.
-            // Click opens the centered capsule dialog; dragging the row
-            // into a composer attaches the whole capsule as a chip.
-            let viewing = capsuleDialog?.id == capsuleID
-            HStack(spacing: 6) {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 6.5))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2.5)
-                    .overlay(Capsule().strokeBorder(lineWidth: 1))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 20)
-                Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.text.opacity(0.65))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            // Same title line as the chat rows: 27 minus the capsule
-            // glyph's 20pt + 6 gap.
-            .padding(.leading, 1)
-            .modifier(RowChrome(hovered: hovered, selected: viewing))
-            .contentShape(Rectangle())
-            .onTapGesture { openCapsuleDialog(id: capsuleID) }
-            .onDrag {
-                let reference = capsuleStore.capsules
-                    .first { $0.id == capsuleID }?.referenceText ?? ""
-                return NSItemProvider(object: reference as NSString)
-            }
-            .help("A sealed chat — click to view, drag into the chat to attach it")
+        case let .action(_, title):
+            // The only action row today is "new-terminal" (the Terminals
+            // section's stand-in while no shell is open).
+            actionRowLabel(title: title, hovered: hovered)
+                .onTapGesture { runAction("new-terminal") }
 
         case let .folder(path, folderName):
-            // A project header: no dot, chats fold underneath (click
-            // toggles), and hover carries the actions — "+" starts a chat,
-            // the terminal glyph adds an instance up in Terminals.
-            let collapsed = collapsedProjects.contains(path)
+            // A project row (2026-09-20 layout): clicking it opens the
+            // project's chat list in the right sheet and its chat home in
+            // the center — nothing nests beneath it anymore. Hover carries
+            // the quick actions ("+" starts a chat, the terminal glyph
+            // adds an instance up in Terminals); a working chat anywhere
+            // in the project surfaces as the trailing accent dot.
+            let chatOpen = chatTarget?.path == path
+            let busy = chatHub.sessions.values.contains {
+                $0.projectPath == path && $0.phase != .idle
+            }
             HStack(spacing: 9) {
                 // Every project wears an icon (2026-09-17): its own
                 // favicon/app icon when it ships one, the generic project
-                // glyph otherwise. The chevron takes over on hover.
+                // glyph otherwise.
                 ZStack {
-                    if hovered {
-                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(Theme.heading)
-                    } else if let logo = ProjectLogoCache.logo(for: path) {
+                    if let logo = ProjectLogoCache.logo(for: path) {
                         Image(nsImage: logo)
                             .resizable()
                             .interpolation(.high)
@@ -3585,6 +3730,11 @@ struct MainWindowView: View {
                     .foregroundStyle(Theme.text.opacity(0.85))
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                if busy, !hovered {
+                    Circle()
+                        .fill(Theme.dotActive)
+                        .frame(width: 6, height: 6)
+                }
                 if hovered {
                     HStack(spacing: 1) {
                         RowActionIcon(
@@ -3603,60 +3753,41 @@ struct MainWindowView: View {
             // The breathing room lives inside the row (and its hover
             // chrome), not as a gap between rows.
             .padding(.vertical, 2)
-            .modifier(RowChrome(hovered: hovered, selected: false))
-            .onTapGesture { toggleProjectCollapsed(path) }
+            .modifier(RowChrome(hovered: hovered, selected: chatOpen))
+            .onTapGesture { openProjectChats(path) }
 
         case let .row(id, title):
             switch id {
             case let .project(path):
-                let active = terminals.hasPane(for: path)
-                if !active {
-                    // Idle: the row sits in the library — quiet glyph, git
-                    // diff as subtext. Opening a shell hoists this same row
-                    // (same identity) to the top of the section.
-                    SidebarRow(
-                        name: title,
-                        diff: libraryDiff(path),
-                        diffTooltipOnly: sidebarNarrow,
-                        isProject: ProjectKindCache.isProject(path),
-                        hovered: hovered,
-                        selected: highlightedSelection == id
-                    )
-                } else {
-                    let mainTab = terminals.tabs[path]?.first?.id
-                    let renaming = mainTab != nil
-                        && renameTarget == mainTab.map { RenameTarget(path: path, tabID: $0) }
-                    SidebarRow(
-                        name: renaming
-                            ? currentRowName(path: path, tabID: mainTab!) : title,
-                        agent: primaryAgent(path: path),
-                        hasTerminal: true,
-                        // Gated on the process scan so a killed agent (no
-                        // Stop hook ever fires) can't pulse forever.
-                        working: terminals.agents[path] != nil
-                            && notify.isWorking(path: path),
-                        gitStatus: git.rowStatuses[path] ?? .none,
-                        needsAttention: notify.hasAttention(path: path),
-                        hovered: hovered,
-                        selected: highlightedSelection == id,
-                        onClose: { closeTerminal(path) },
-                        renaming: renaming,
-                        onRename: { result in
-                            if let mainTab {
-                                finishInlineRename(path: path, tabID: mainTab, result: result)
-                            }
+                let mainTab = terminals.tabs[path]?.first?.id
+                let renaming = mainTab != nil
+                    && renameTarget == mainTab.map { RenameTarget(path: path, tabID: $0) }
+                SidebarRow(
+                    name: renaming
+                        ? currentRowName(path: path, tabID: mainTab!) : title,
+                    hasTerminal: true,
+                    // Gated on the process scan so a killed agent (no
+                    // Stop hook ever fires) can't pulse forever.
+                    working: terminals.agents[path] != nil
+                        && notify.isWorking(path: path),
+                    needsAttention: notify.hasAttention(path: path),
+                    hovered: hovered,
+                    selected: highlightedSelection == id,
+                    onClose: { closeTerminal(path) },
+                    renaming: renaming,
+                    onRename: { result in
+                        if let mainTab {
+                            finishInlineRename(path: path, tabID: mainTab, result: result)
                         }
-                    )
-                }
+                    }
+                )
             case let .shell(path, tabID):
                 let renaming = renameTarget == RenameTarget(path: path, tabID: tabID)
                 SidebarRow(
                     name: renaming ? currentRowName(path: path, tabID: tabID) : title,
-                    agent: shellAgent(path: path, tab: tabID),
                     hasTerminal: true,
                     working: terminals.agents[path] != nil
                         && notify.isWorking(path: path, tab: tabID),
-                    gitStatus: git.rowStatuses[path] ?? .none,
                     needsAttention: notify.hasAttention(path: path, tab: tabID),
                     hovered: hovered,
                     selected: highlightedSelection == id,
@@ -3666,26 +3797,6 @@ struct MainWindowView: View {
                         finishInlineRename(path: path, tabID: tabID, result: result)
                     }
                 )
-            case let .server(sid):
-                if let server = servers.devServers.first(where: { $0.id == sid }) {
-                    ServerRow(
-                        server: server,
-                        health: servers.health[sid],
-                        hovered: hovered || rightPanel == .server(sid),
-                        selected: false
-                    )
-                    .contentShape(Rectangle())
-                    // The server page is a right-sheet panel, same as Git —
-                    // clicking the row toggles it, never the selection.
-                    .onTapGesture { toggleRightPanel(.server(sid)) }
-                } else if let recent = servers.recents.first(where: { $0.id == sid }) {
-                    ServerRow(
-                        recent: recent,
-                        hovered: hovered || rightPanel == .server(sid)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture { toggleRightPanel(.server(sid)) }
-                }
             }
         }
     }
@@ -3698,77 +3809,39 @@ struct MainWindowView: View {
             // Hover is content here: the Terminals "+" reveals on it.
             return "h:\(title)|\(hovered ? "h" : "-")"
         case let .action(key, title):
-            // Title is in the key: "Capsules (2)" → "(3)" and
-            // "Archived (n)" must re-host, their keys don't change.
             return "a:\(key)|\(title)|\(hovered ? "h" : "-")"
-        case .divider:
-            return "div"
-        case let .chat(project, file, title, _):
-            let open = !file.isEmpty && chatTarget?.path == project
-                && chatTarget?.sessionFile == file
-            let pinned = chatMeta.pinned.contains(file)
-            let branch = chatMeta.branches[file] != nil
-            let busy = !file.isEmpty
-                && ChatSessionHub.shared.sessions[file]?.phase != nil
-                && ChatSessionHub.shared.sessions[file]?.phase != .idle
-            return "ch:\(title)|\(open ? "o" : "-")|\(pinned ? "p" : "-")"
-                + "|\(branch ? "b" : "-")|\(hovered ? "h" : "-")"
-                + "|\(busy ? "w" : "-")"
-        case let .capsuleChat(_, capsuleID, title):
-            let viewing = capsuleDialog?.id == capsuleID
-            return "cc:\(title)|\(viewing ? "v" : "-")|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
-            let collapsed = collapsedProjects.contains(path)
-            return "f:\(folderName)|\(collapsed ? "c" : "-")|\(hovered ? "h" : "-")"
+            let chatOpen = chatTarget?.path == path
+            let busy = chatHub.sessions.values.contains {
+                $0.projectPath == path && $0.phase != .idle
+            }
+            return "f:\(folderName)|\(busy ? "w" : "-")"
+                + "|\(chatOpen ? "o" : "-")|\(hovered ? "h" : "-")"
         case let .row(id, title):
+            // Only what the row RENDERS rides in the key — folding in
+            // agent labels and git status re-hosted rows whose pixels
+            // could not change, on every poll that moved either.
             let selected = highlightedSelection == id
             switch id {
             case let .project(path):
-                // Idle rows read the diff subtext and the narrow flag;
-                // active rows read the agent/attention/rename state — both
-                // sets ride in one key so the hoist re-hosts the content.
-                if !terminals.hasPane(for: path) {
-                    let diff = libraryDiff(path).map { "+\($0.added)-\($0.removed)" } ?? "-"
-                    return [
-                        "lib", title, diff,
-                        sidebarNarrow ? "n" : "-",
-                        ProjectKindCache.isProject(path) ? "p" : "-",
-                        selected ? "s" : "-",
-                        hovered ? "h" : "-",
-                    ].joined(separator: "|")
-                }
                 let renaming = renameTarget?.path == path
                     && renameTarget?.tabID == terminals.tabs[path]?.first?.id
                 let working = terminals.agents[path] != nil
                     && notify.isWorking(path: path)
                 return [
                     title, "t",
-                    primaryAgent(path: path)?.label ?? "-",
                     working ? "w" : "-",
-                    String(describing: git.rowStatuses[path] ?? .none),
                     notify.hasAttention(path: path) ? "!" : "-",
                     selected ? "s" : "-",
                     hovered ? "h" : "-",
                     renaming ? "r" : "-",
                 ].joined(separator: "|")
             case let .shell(path, tab):
-                let agent = shellAgent(path: path, tab: tab)?.label ?? "-"
-                let status = String(describing: git.rowStatuses[path] ?? .none)
                 let bang = notify.hasAttention(path: path, tab: tab) ? "!" : "-"
                 let renaming = renameTarget == RenameTarget(path: path, tabID: tab)
                 let working = terminals.agents[path] != nil
                     && notify.isWorking(path: path, tab: tab)
-                return "sh:\(title)|\(tab)|\(agent)|\(working ? "w" : "-")|\(status)|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")|\(renaming ? "r" : "-")"
-            case let .server(sid):
-                let live = servers.devServers.first { $0.id == sid }
-                let port = live.map { String($0.port) }
-                    ?? servers.recents.first { $0.id == sid }.map { String($0.port) }
-                    ?? "-"
-                let health = servers.health[sid].map { String(describing: $0) } ?? "-"
-                // The row stays lit while its sheet panel is open — that
-                // state must be in the key or the highlight never updates.
-                let state = rightPanel == .server(sid) ? "P" : (hovered ? "h" : "-")
-                return "\(title)|\(port)|\(health)|\(live != nil ? "on" : "off")|\(state)"
+                return "sh:\(title)|\(tab)|\(working ? "w" : "-")|\(bang)|\(selected ? "s" : "-")|\(hovered ? "h" : "-")|\(renaming ? "r" : "-")"
             }
         }
     }
@@ -3794,77 +3867,8 @@ struct MainWindowView: View {
                 updateSettings {
                     $0.pinnedProjects.removeAll { $0 == path }
                     $0.projectsDirs.removeAll { $0 == path }
-                    $0.collapsedFolders.removeAll { $0 == path }
                 }
-                collapsedProjects.remove(path)
                 store.settingsChanged()
-            })
-            return menu
-        }
-        // A chat row: rename/pin/archive ride ChatTitler + ChatMetaStore;
-        // delete moves the transcript to the Trash (recoverable).
-        if case let .chat(project, file, title, harness) = entry, !file.isEmpty {
-            let ref = ChatSessionRef(
-                harness: ChatHarness(rawValue: harness) ?? .claude,
-                filePath: file, title: title, modified: Date()
-            )
-            let meta = ChatMetaStore.shared
-            let menu = NSMenu()
-            menu.addItem(ClosureMenuItem("Rename…") {
-                ChatRowActions.promptRename(ref)
-            })
-            menu.addItem(ClosureMenuItem(meta.pinned.contains(file) ? "Unpin" : "Pin") {
-                meta.togglePin(file)
-            })
-            menu.addItem(ClosureMenuItem(
-                meta.archived.contains(file) ? "Unarchive" : "Archive"
-            ) {
-                meta.toggleArchive(file)
-            })
-            menu.addItem(.separator())
-            menu.addItem(ClosureMenuItem("Branch Chat") {
-                ChatRowActions.duplicate(ref, project: project, asBranch: true)
-            })
-            menu.addItem(ClosureMenuItem("Duplicate") {
-                ChatRowActions.duplicate(ref, project: project)
-            })
-            menu.addItem(ClosureMenuItem("Copy Transcript") {
-                ChatRowActions.copyTranscript(ref)
-            })
-            menu.addItem(ClosureMenuItem("Reveal Transcript in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting(
-                    [URL(fileURLWithPath: file)]
-                )
-            })
-            menu.addItem(.separator())
-            menu.addItem(ClosureMenuItem("Delete Chat") {
-                deleteChat(project: project, file: file)
-            })
-            return menu
-        }
-        // A sealed chat's row: view, attach, reopen, delete — the same set
-        // the capsule shelf offers.
-        if case let .capsuleChat(project, capsuleID, _) = entry,
-           let capsule = capsuleStore.capsules.first(where: { $0.id == capsuleID }) {
-            let menu = NSMenu()
-            menu.addItem(ClosureMenuItem("Open Capsule View") {
-                openCapsuleDialog(id: capsuleID)
-            })
-            menu.addItem(ClosureMenuItem("New Chat with Capsule") {
-                attachCapsuleToNewChat(project: project, capsule: capsule)
-            })
-            menu.addItem(ClosureMenuItem("Reopen Chat") {
-                capsuleStore.unseal(capsule)
-                openChat(project: project, file: capsule.sourceFile)
-            })
-            menu.addItem(ClosureMenuItem("Reveal Transcript in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting(
-                    [URL(fileURLWithPath: capsule.sourceFile)]
-                )
-            })
-            menu.addItem(.separator())
-            menu.addItem(ClosureMenuItem("Delete Chat and Capsule") {
-                deleteChat(project: project, file: capsule.sourceFile)
             })
             return menu
         }
@@ -3952,40 +3956,6 @@ struct MainWindowView: View {
                     store.settingsChanged()
                 })
             }
-        case let .server(sid):
-            guard let server = servers.devServers.first(where: { $0.id == sid }) else {
-                guard let recent = servers.recents.first(where: { $0.id == sid }) else { return nil }
-                let path = recent.projectPath
-                menu.addItem(ClosureMenuItem("Open Terminal Here") {
-                    terminals.pane(for: path)
-                    selection = .project(path)
-                })
-                menu.addItem(ClosureMenuItem("Reveal in Finder") {
-                    Actions.revealInFinder(path: path)
-                })
-                menu.addItem(.separator())
-                // Temporary by design: the row returns the next time a
-                // server runs (and stops) in this project.
-                menu.addItem(ClosureMenuItem("Remove from Sidebar") {
-                    if rightPanel == .server(sid) { closeRightPanel() }
-                    servers.removeRecent(sid)
-                })
-                return menu
-            }
-            menu.addItem(ClosureMenuItem("Open in Browser") {
-                Actions.openExternal(server.url)
-            })
-            if let cwd = server.cwd {
-                menu.addItem(ClosureMenuItem("Open Terminal Here") {
-                    terminals.pane(for: cwd)
-                    selection = .project(cwd)
-                })
-                menu.addItem(ClosureMenuItem("Reveal in Finder") {
-                    Actions.revealInFinder(path: cwd)
-                })
-            }
-            menu.addItem(.separator())
-            menu.addItem(ClosureMenuItem("Stop Server") { Actions.killPid(server.pid) })
         }
         return menu
     }
@@ -4363,6 +4333,40 @@ private struct PopoverRow<Content: View>: View {
         content(hovered)
             .frame(height: height)
             .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .onHover { hovered = $0 }
+    }
+}
+
+/// A chat row's one-line snippet. Observes the snippet store HERE, in the
+/// leaf — snippets stream in one file at a time, and observing from the
+/// root view invalidated the entire window per publish.
+private struct SnippetText: View {
+    @ObservedObject private var snippets = ChatIndexStore.Snippets.shared
+    let file: String
+
+    var body: some View {
+        let text = snippets.snippet(for: file) ?? ""
+        if !text.isEmpty {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+/// A project-panel row: self-owned hover state, RowChrome highlight,
+/// variable height (unlike `PopoverRow`, which fixes it).
+private struct PanelRow<Content: View>: View {
+    var selected = false
+    let action: () -> Void
+    @ViewBuilder let content: (Bool) -> Content
+    @State private var hovered = false
+
+    var body: some View {
+        content(hovered)
+            .modifier(RowChrome(hovered: hovered, selected: selected))
             .onTapGesture(perform: action)
             .onHover { hovered = $0 }
     }
@@ -4838,23 +4842,12 @@ struct SidebarRow: View {
     let name: String
     /// Uncommitted line counts under the name (library rows): +added −removed.
     var diff: (added: Int, removed: Int)? = nil
-    /// Inline diff suppressed (narrow sidebar) — the counts move into the
-    /// row's hover tooltip instead of crowding the name.
-    var diffTooltipOnly: Bool = false
-    var agent: CodingAgent? = nil
     var hasTerminal: Bool = false
     /// An extra terminal tab nested under its project's row: indented, no
     /// git dot (same repo as the parent), plain terminal glyph.
     var nested: Bool = false
-    /// The row's directory is itself a project (has `.git`, a manifest, …)
-    /// rather than a plain folder — idle project rows get a project glyph.
-    var isProject: Bool = false
-    /// A library row whose project is running: trailing live dot, mirroring
-    /// its Active row without moving anything.
-    var live: Bool = false
     /// The pane's agent has a turn in flight — the dot pulses amber.
     var working: Bool = false
-    var gitStatus: GitRowStatus = .none
     /// The session is waiting on the user (permission prompt, idle, or a
     /// finished turn) — rose wash over the whole row until viewed.
     var needsAttention: Bool = false
@@ -4907,7 +4900,7 @@ struct SidebarRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            if let diff, !diffTooltipOnly {
+            if let diff {
                 HStack(spacing: 3) {
                     Text("+\(diff.added)")
                         .foregroundStyle(Theme.textPositive)
@@ -4925,8 +4918,6 @@ struct SidebarRow: View {
         .modifier(RowChrome(
             hovered: hovered, selected: selected, attention: needsAttention
         ))
-        // An empty help string attaches no tooltip.
-        .help(diffHelp)
     }
 
     private func finishRename(_ result: String?) {
@@ -5022,11 +5013,6 @@ private struct InlineRenameField: NSViewRepresentable {
 }
 
 extension SidebarRow {
-    private var diffHelp: String {
-        guard diffTooltipOnly, let diff else { return "" }
-        return "+\(diff.added) −\(diff.removed) uncommitted lines"
-    }
-
     fileprivate func rowIconButton(
         _ symbol: String, help: String, action: @escaping () -> Void
     ) -> some View {
@@ -5619,16 +5605,6 @@ struct ServerPanel: View {
         }
     }
 
-    /// One quiet word beside the dot; the nuance lives in the tooltip.
-    private var healthWord: String {
-        switch health {
-        case .healthy: "Responding"
-        case .degraded: "Slow"
-        case .down: "Down"
-        case nil: "Checking…"
-        }
-    }
-
     private var healthLabel: String {
         switch health {
         case .healthy: "Responding"
@@ -5916,45 +5892,6 @@ private struct ActionCard: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(Theme.heading)
         }
-    }
-}
-
-/// The url field's Copy chip — link-blue label that confirms with a beat
-/// of "Copied".
-private struct CopyChipButton: View {
-    let text: String
-
-    @State private var hovered = false
-    @State private var copied = false
-
-    var body: some View {
-        Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            withAnimation(.easeOut(duration: 0.12)) { copied = true }
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(1.2))
-                withAnimation(.easeOut(duration: 0.3)) { copied = false }
-            }
-        } label: {
-            Text(copied ? "Copied" : "Copy")
-                .font(Theme.Fonts.secondaryMedium)
-                .foregroundStyle(copied ? Theme.textPositive : Theme.link)
-                .padding(.horizontal, 10)
-                .frame(height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .fill(Theme.buttonFill)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Theme.radiusControl)
-                                .fill(hovered ? Theme.cardHovered : .clear)
-                        )
-                )
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovered = $0 }
-        .help("Copy link")
     }
 }
 

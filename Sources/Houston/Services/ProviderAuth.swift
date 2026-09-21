@@ -149,12 +149,23 @@ final class ProviderAuthStore: ObservableObject {
 
     private func save() {
         let url = Self.fileURL
-        try? FileManager.default.createDirectory(
+        let fm = FileManager.default
+        try? fm.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
         guard let data = try? JSONEncoder().encode(keys) else { return }
-        try? data.write(to: url, options: .atomic)
-        try? FileManager.default.setAttributes(
+        // NOT `write(options: .atomic)` + chmod after: the atomic write
+        // creates its temp file under the default umask (0644), so the
+        // plaintext keys were world-readable for a window on every save.
+        // Create the replacement 0600 from the first byte, then swap it in.
+        let temp = url.deletingLastPathComponent()
+            .appendingPathComponent(".provider-keys-\(UUID().uuidString).tmp")
+        guard fm.createFile(
+            atPath: temp.path, contents: data,
+            attributes: [.posixPermissions: 0o600]
+        ) else { return }
+        _ = try? fm.replaceItemAt(url, withItemAt: temp)
+        try? fm.setAttributes(
             [.posixPermissions: 0o600], ofItemAtPath: url.path
         )
     }

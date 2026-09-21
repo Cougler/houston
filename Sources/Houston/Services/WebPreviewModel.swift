@@ -66,7 +66,9 @@ final class WebPreviewModel: NSObject, ObservableObject {
         webView.isInspectable = true
         webView.allowsBackForwardNavigationGestures = true
 
-        webView.load(URLRequest(url: URL(string: server.url)!))
+        if let url = URL(string: server.url) {
+            webView.load(URLRequest(url: url))
+        }
     }
 
     /// Called by the window controller on close — belt-and-braces teardown
@@ -85,8 +87,8 @@ final class WebPreviewModel: NSObject, ObservableObject {
         loadError = nil
         if webView.url != nil {
             webView.reload()
-        } else {
-            webView.load(URLRequest(url: URL(string: server.url)!))
+        } else if let url = URL(string: server.url) {
+            webView.load(URLRequest(url: url))
         }
     }
 
