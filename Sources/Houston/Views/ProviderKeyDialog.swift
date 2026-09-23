@@ -18,8 +18,7 @@ struct ProviderKeyDialog: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "key.fill")
-                .font(.system(size: 19, weight: .medium))
+            LucideIcon("key", size: 21)
                 .foregroundStyle(Theme.buttonActiveStroke)
                 .frame(width: 44, height: 44)
                 .background(Circle().fill(Theme.buttonActiveFill))

@@ -205,7 +205,7 @@ struct MenuBarServersView: View {
                     .foregroundStyle(Theme.text)
                 Spacer(minLength: 8)
                 ControlIconButton(
-                    systemName: "macwindow",
+                    icon: "app-window",
                     help: "Open Houston",
                     bare: true,
                     circleSize: 32,
@@ -352,8 +352,7 @@ struct MenuBarServersView: View {
             openInWindow(project.path)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11, weight: .medium))
+                LucideIcon("folder", size: 13)
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 13)
                 Text(project.name)
@@ -397,8 +396,7 @@ struct MenuBarServersView: View {
             openInWindow(project.path)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 8, weight: .semibold))
+                LucideIcon("play", size: 10)
                     .foregroundStyle(Theme.dotActive)
                 Text("Start")
                     .font(Theme.Fonts.secondaryMedium)

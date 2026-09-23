@@ -64,8 +64,7 @@ struct CapsulePanel: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Image(systemName: "capsule")
-                .font(.system(size: 18))
+            LucideIcon("pill", size: 20)
                 .foregroundStyle(Theme.textSecondary)
             Text("No capsules yet")
                 .font(Theme.Fonts.bodyMedium)
@@ -96,8 +95,7 @@ private struct CapsuleShelfRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "capsule")
-                .font(.system(size: 11))
+            LucideIcon("pill", size: 13)
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
@@ -113,8 +111,7 @@ private struct CapsuleShelfRow: View {
             Spacer(minLength: 4)
             if hovered {
                 Button(action: onView) {
-                    Image(systemName: "eye")
-                        .font(.system(size: 10, weight: .medium))
+                    LucideIcon("eye", size: 12)
                         .foregroundStyle(viewHovered ? Theme.text : Theme.textSecondary)
                         .frame(width: 22, height: 22)
                         .background(
@@ -253,8 +250,7 @@ struct CapsuleDialog: View {
     /// copy, buttons at the bottom.
     private var introView: some View {
         VStack(spacing: 14) {
-            Image(systemName: "capsule")
-                .font(.system(size: 19, weight: .medium))
+            LucideIcon("pill", size: 21)
                 .foregroundStyle(Theme.buttonActiveStroke)
                 .frame(width: 44, height: 44)
                 .background(Circle().fill(Theme.buttonActiveFill))
@@ -296,8 +292,7 @@ struct CapsuleDialog: View {
     private var capsuleContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "capsule")
-                    .font(.system(size: 13, weight: .medium))
+                LucideIcon("pill", size: 15)
                     .foregroundStyle(Theme.buttonActiveStroke)
                     .frame(width: 28, height: 28)
                     .background(Circle().fill(Theme.buttonActiveFill))
@@ -314,7 +309,7 @@ struct CapsuleDialog: View {
                 // Own hover state (CircleIconButton) — a dialog-level
                 // hover flag re-diffed the whole transcript per enter/leave.
                 CircleIconButton(
-                    systemName: "xmark", size: 24,
+                    icon: "x", size: 24,
                     help: "Close", action: onClose
                 )
             }
@@ -515,8 +510,7 @@ private struct CapsuleMessageRow: View {
             ZStack {
                 if isSelected {
                     Circle().fill(Theme.buttonActiveStroke)
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .bold))
+                    LucideIcon("check", size: 11)
                         .foregroundStyle(.white)
                 } else {
                     Circle()
@@ -541,7 +535,7 @@ private struct CapsuleMessageRow: View {
 
     private var addButton: some View {
         CircleIconButton(
-            systemName: "plus",
+            icon: "plus",
             help: "Add just this fragment to the chat",
             action: onAdd
         )

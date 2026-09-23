@@ -1,5 +1,6 @@
 .build/
 .DS_Store
+node_modules/
 .mc.json
 nohup.out
 dist/

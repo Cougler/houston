@@ -94,6 +94,12 @@ struct HoustonSettings {
     /// The right sheet's last pin choice — a sheet opens pinned (docked)
     /// or floating based on how the user last left it.
     var rightPanelDocked: Bool
+    /// The project (chats) panel collapse — it docks always, and this
+    /// remembers whether the user last had it tucked away.
+    var chatsPanelCollapsed: Bool = false
+    /// Which workspace items live in the side panel (the rest ride the
+    /// top bar as chips). Empty = no panel at all.
+    var workspacePanelItems: [String] = ["terminals", "chats"]
     /// Last window frame as [x, y, w, h]; empty until first saved. Lives
     /// here (not just NSWindow frame autosave) because settings.json is the
     /// store that survives updates AND is shared by debug and packaged
@@ -271,6 +277,12 @@ struct HoustonSettings {
         if let docked = json["rightPanelDocked"] as? Bool {
             s.rightPanelDocked = docked
         }
+        if let collapsed = json["chatsPanelCollapsed"] as? Bool {
+            s.chatsPanelCollapsed = collapsed
+        }
+        if let items = json["workspacePanelItems"] as? [String] {
+            s.workspacePanelItems = items
+        }
         if let f = json["windowFrame"] as? [Double], f.count == 4,
            f[2] >= 400, f[3] >= 300 {
             s.windowFrame = f
@@ -322,6 +334,8 @@ struct HoustonSettings {
         obj["sidebarWidth"] = s.sidebarWidth
         obj["rightSheetWidth"] = s.rightSheetWidth
         obj["rightPanelDocked"] = s.rightPanelDocked
+        obj["chatsPanelCollapsed"] = s.chatsPanelCollapsed
+        obj["workspacePanelItems"] = s.workspacePanelItems
         obj["windowFrame"] = s.windowFrame
         obj["previewWindowFrame"] = s.previewWindowFrame
         obj["chatBubbleColor"] = s.chatBubbleColor

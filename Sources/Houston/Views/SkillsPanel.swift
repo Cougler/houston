@@ -162,8 +162,7 @@ private struct SkillRow: View {
                     }
                     Spacer(minLength: 0)
                     if hovered {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                        LucideIcon("chevron-right", size: 11)
                             .foregroundStyle(Theme.heading)
                     }
                 }
@@ -198,8 +197,7 @@ private struct SkillDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: onBack) {
                 HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 9, weight: .semibold))
+                    LucideIcon("chevron-left", size: 11)
                     Text("Skills")
                         .font(Theme.Fonts.secondaryMedium)
                 }
@@ -247,7 +245,7 @@ private struct SkillDetail: View {
                 HStack(spacing: 8) {
                     DetailActionButton(title: "Run Skill", icon: "rocket", action: onRun)
                         .help("Types /\(skill.name) into the session and runs it")
-                    DetailActionButton(title: "Type Command", icon: "text.cursor", action: onInsert)
+                    DetailActionButton(title: "Type Command", icon: "text-cursor", action: onInsert)
                         .help("Types /\(skill.name) and leaves the prompt open for arguments")
                 }
                 .padding(.top, 4)
@@ -282,8 +280,7 @@ private struct DetailActionButton: View {
                     SVGIcon(name: "rocket", size: 11)
                         .foregroundStyle(Theme.text.opacity(0.75))
                 } else {
-                    Image(systemName: icon)
-                        .font(.system(size: 9))
+                    LucideIcon(icon, size: 11)
                         .foregroundStyle(Theme.text.opacity(0.75))
                 }
                 Text(title)

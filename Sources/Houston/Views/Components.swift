@@ -57,8 +57,7 @@ struct SearchableMenuList<Item: Identifiable, Row: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
+                LucideIcon("search", size: 13)
                     .foregroundStyle(Theme.textSecondary)
                 TextField("Search", text: $query)
                     .textFieldStyle(.plain)
@@ -68,8 +67,7 @@ struct SearchableMenuList<Item: Identifiable, Row: View>: View {
                     Button {
                         query = ""
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
+                        LucideIcon("circle-x", size: 13)
                             .foregroundStyle(Theme.textSecondary)
                     }
                     .buttonStyle(.plain)
@@ -150,7 +148,7 @@ private struct MenuListRow<Content: View>: View {
 /// shared hover wash under the pointer. THE hover-circle control — reach
 /// for this instead of hand-rolling the ✕/+/chip pattern per view.
 struct CircleIconButton: View {
-    let systemName: String
+    let icon: String
     var size: CGFloat = 20
     var iconSize: CGFloat = 10
     let help: String
@@ -160,8 +158,7 @@ struct CircleIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: iconSize, weight: .semibold))
+            LucideIcon(icon, size: iconSize + 2)
                 .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
                 .frame(width: size, height: size)
                 .background(Circle().fill(
@@ -218,8 +215,7 @@ struct CopyIconButton: View {
                 withAnimation(.easeOut(duration: 0.3)) { copied = false }
             }
         } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                .font(.system(size: 10, weight: .medium))
+            LucideIcon(copied ? "check" : "copy", size: 12)
                 .foregroundStyle(
                     copied ? Theme.dotActive : hovered ? Theme.text : Theme.textSecondary
                 )
@@ -278,9 +274,9 @@ struct InlineNotice: View {
 
         var icon: String {
             switch self {
-            case .error: "exclamationmark.triangle.fill"
-            case .success: "checkmark.circle.fill"
-            case .warning: "exclamationmark.circle.fill"
+            case .error: "triangle-alert"
+            case .success: "circle-check"
+            case .warning: "circle-alert"
             }
         }
 
@@ -307,8 +303,7 @@ struct InlineNotice: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Space.xs) {
-            Image(systemName: kind.icon)
-                .font(.system(size: 11, weight: .semibold))
+            LucideIcon(kind.icon, size: 13)
                 .foregroundStyle(kind.tint)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -459,8 +454,7 @@ struct SheetListRow<Icon: View>: View {
                     }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                LucideIcon("chevron-right", size: 11)
                     .foregroundStyle(Theme.heading)
                     .opacity(hovered ? 1 : 0.4)
             }
@@ -496,6 +490,34 @@ func sheetSectionLabel(_ title: String) -> some View {
         .padding(.horizontal, 10)
         .padding(.top, 10)
         .padding(.bottom, 4)
+}
+
+/// A bundled Lucide icon (Resources/icons/lucide/<name>.svg) rendered as a
+/// template image, so `foregroundStyle` tints it like the SF Symbols these
+/// replaced. Names are Lucide's kebab-case ids; the SVG must be vendored
+/// into Resources/icons/lucide (from node_modules/lucide-static/icons) —
+/// a missing name renders nothing. Custom 24-grid UI glyphs that aren't
+/// Lucide's (dock-top, dock-right) live in Resources/icons/ and resolve
+/// via the fallback below, so every icon-name call site accepts them.
+struct LucideIcon: View {
+    let name: String
+    var size: CGFloat = 14
+
+    init(_ name: String, size: CGFloat = 14) {
+        self.name = name
+        self.size = size
+    }
+
+    var body: some View {
+        if let image = SVGIcon.template(named: "lucide/\(name)")
+            ?? SVGIcon.template(named: name) {
+            Image(nsImage: image)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+        }
+    }
 }
 
 /// A bundled SVG icon (Resources/icons/<name>.svg) rendered as a template

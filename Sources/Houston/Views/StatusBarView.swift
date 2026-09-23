@@ -138,8 +138,7 @@ struct StatusBarView: View {
                 Text(snapshot?.modelName ?? "Model")
                     .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                LucideIcon("chevron-down", size: 10)
                     .foregroundStyle(Theme.textSecondary)
             }
             .contentShape(Rectangle())
@@ -184,8 +183,7 @@ struct StatusBarView: View {
                     .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.textSecondary)
                 if shows("limits") {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
+                    LucideIcon("chevron-down", size: 10)
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
@@ -264,8 +262,7 @@ struct StatusBarView: View {
                 Text("MCP")
                     .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.textSecondary)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                LucideIcon("chevron-down", size: 10)
                     .foregroundStyle(Theme.textSecondary)
             }
             .contentShape(Rectangle())

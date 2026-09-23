@@ -330,6 +330,23 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   shown inline in the composer. Crashed on image-DATA drops (screenshot
   thumbnails, browser drags) while Finder fileURL drops worked.
 
+- **Animated slides must land on WHOLE PIXELS every frame** (the right-
+  sheet blur, root-caused 2026-09-21 after three partial fixes). Opening
+  the sheet fires async work that publishes mid-slide (chatIndex refresh,
+  snippet parses, titler results); any row re-rendering then rasterizes
+  its glyphs at the sheet's momentary FRACTIONAL x, nothing re-renders it
+  after the spring settles, and the baked subpixel phase reads as a
+  blurry panel — a full smeared pixel on a 1x external display (verified
+  live: the window runs at backingScaleFactor 1.0), near-invisible at 2x,
+  hence "sometimes". The left sidebar never blurred because its content
+  is leading-anchored (x stays integral while width animates); the sheet
+  is trailing-anchored. Neither a layout slide nor `.offset` fixes it —
+  both interpolate through fractions. The fix is the `WholePixel*`
+  animatable modifiers (rounded per frame): the sheet's trailing inset,
+  the root HStack's width reservation, and `pageParent`/`pageChild`
+  (which also makes the old interrupted-`.move` freeze land sharp). Any
+  NEW animation that moves text horizontally needs the same treatment.
+
 - **A refused backend connect surfaces as `.waiting`, not `.failed`.**
   Network.framework retries a refused localhost connection forever, so
   ShareProxy treats `.waiting` as down (server died since the lsof scan) and
@@ -454,8 +471,14 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
 - **Theming: every chrome color is a dynamic token in `Theme.swift`**
   (`Color(light:dark:)` over `NSColor(name:dynamicProvider:)`), so the
   System/Light/Dark setting restyles everything live — never hard-code a hex
-  in a view. Light values are the Figma design (file `DiTvczoWOd98QMG3o9AnMF`,
-  node 326:73); dark is the same design on #1E1E1E. The terminal's colors come
+  in a view. **Values follow shadcn's zinc design system (2026-09-22
+  retheme)**: surfaces/borders/muted text on the Tailwind zinc scale
+  (light = white/zinc-50/zinc-100, dark = zinc-950/900/800), hover washes
+  NEUTRAL ink (never a color wash), semantic colors on the Tailwind scale,
+  and the brand rose surviving only as the accent (`buttonActive*`,
+  `ctaFill`, `link`, the chat user bubble). The pre-shadcn light theme was
+  the Figma design (file `DiTvczoWOd98QMG3o9AnMF`, node 326:73) — history,
+  not the current source of truth. The terminal's colors come
   from a `TerminalTheme` (design-matched by default, or any
   `GhosttyThemeCatalog` theme via the footer gear); font/cursor/padding ride
   in the base `TerminalConfiguration` so they hold across themes, and
@@ -517,6 +540,15 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   natively on macOS 11+), so `foregroundStyle` tints them like SF Symbols —
   used for the rocket; `servers.svg` was simple enough to draw as a `Shape`
   (`ServerGlyph`) instead.
+- **UI glyphs are Lucide, not SF Symbols (2026-09-22).** Every
+  `Image(systemName:)` was replaced by `LucideIcon("<kebab-name>", size:)`
+  (Components.swift, rides `SVGIcon.template`); the SVGs are vendored from
+  `node_modules/lucide-static/icons` into `Resources/icons/lucide` — a name
+  without a vendored SVG renders NOTHING, so copy the file when using a new
+  icon. Icon-name params/properties hold Lucide names now (`systemName` →
+  `icon`). Sizing: Lucide draws on a padded 24-grid, so an icon replacing an
+  SF symbol at font size N wants `size: N + 2`. Brand art (rocket, redirect,
+  houstonlogo, provider logos, `ServerGlyph`) stays non-Lucide.
 - **Sessions die with Houston.** Accepted tradeoff — same as sessions dying with
   Ghostty today. To make them survive, launch `tmux new-session -A -s
   houston-<project>` instead of the bare shell; that's the whole change.

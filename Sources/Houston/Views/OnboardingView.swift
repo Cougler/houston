@@ -512,11 +512,9 @@ private struct ServersVignette: View {
                 .font(Theme.Fonts.monoSmall)
                 .foregroundStyle(Theme.textSecondary)
             Spacer(minLength: 0)
-            Image(systemName: "arrow.up.forward")
-                .font(.system(size: 10, weight: .semibold))
+            LucideIcon("arrow-up-right", size: 12)
                 .foregroundStyle(Theme.textSecondary)
-            Image(systemName: "xmark")
-                .font(.system(size: 9, weight: .semibold))
+            LucideIcon("x", size: 11)
                 .foregroundStyle(Theme.textSecondary)
         }
         .padding(.horizontal, 14)
@@ -531,8 +529,7 @@ private struct ShareVignette: View {
     var body: some View {
         VStack(spacing: 18) {
             HStack(spacing: 6) {
-                Image(systemName: "globe")
-                    .font(.system(size: 12))
+                LucideIcon("globe", size: 14)
                     .foregroundStyle(Theme.link)
                 Text("hierarch.local")
                     .font(.system(size: 13, weight: .medium, design: .monospaced))
@@ -542,10 +539,8 @@ private struct ShareVignette: View {
             .padding(.vertical, 9)
             .background(Capsule().fill(Theme.buttonFill))
             HStack(spacing: 6) {
-                Image(systemName: "wifi")
-                    .font(.system(size: 10))
-                Image(systemName: "iphone")
-                    .font(.system(size: 11))
+                LucideIcon("wifi", size: 12)
+                LucideIcon("smartphone", size: 13)
                 Text("Any device on your Wi-Fi")
                     .font(Theme.Fonts.secondary)
             }
@@ -571,8 +566,8 @@ private struct ProjectsVignette: View {
                 .padding(.leading, 4)
                 .padding(.bottom, 2)
             row(icon: "folder", name: "Apps")
-            row(icon: "shippingbox", name: "hierarch", selected: true)
-            row(icon: "shippingbox", name: "portfolio")
+            row(icon: "package", name: "hierarch", selected: true)
+            row(icon: "package", name: "portfolio")
             row(icon: "plus", name: "Add", quiet: true)
         }
         .frame(width: 240)
@@ -582,8 +577,7 @@ private struct ProjectsVignette: View {
         icon: String, name: String, selected: Bool = false, quiet: Bool = false
     ) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 9))
+            LucideIcon(icon, size: 11)
                 .foregroundStyle(Theme.textSecondary)
             Text(name)
                 .font(Theme.Fonts.secondaryMedium)
@@ -607,8 +601,7 @@ private struct StatusBarVignette: View {
                 Text("Opus 5")
                     .font(Theme.Fonts.bodyMedium)
                     .foregroundStyle(Theme.text)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .semibold))
+                LucideIcon("chevron-down", size: 9)
                     .foregroundStyle(Theme.textSecondary)
             }
             divider
@@ -642,8 +635,7 @@ private struct StatusBarVignette: View {
 private struct RemindersVignette: View {
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "calendar")
-                .font(.system(size: 14))
+            LucideIcon("calendar", size: 16)
                 .foregroundStyle(Theme.textSecondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Renew TLS certificate")

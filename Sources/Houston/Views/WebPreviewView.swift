@@ -60,7 +60,7 @@ struct WebPreviewView: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            ToolbarIconButton(symbol: "arrow.clockwise", help: "Reload") {
+            ToolbarIconButton(icon: "refresh-cw", help: "Reload") {
                 model.reload()
             }
             Text(model.currentURL.replacingOccurrences(of: "http://", with: ""))
@@ -83,14 +83,14 @@ struct WebPreviewView: View {
             if let store = model.annotations {
                 AnnotationsToggle(model: model, store: store)
                 ToolbarIconButton(
-                    symbol: "mappin.circle",
+                    icon: "map-pin",
                     help: model.showPins ? "Hide pins on the page" : "Show pins on the page",
                     active: model.showPins
                 ) {
                     model.showPins.toggle()
                 }
             }
-            ToolbarIconButton(symbol: "safari", help: "Open in Browser") {
+            ToolbarIconButton(icon: "compass", help: "Open in Browser") {
                 model.openInBrowser()
             }
             inspectToggle
@@ -105,8 +105,7 @@ struct WebPreviewView: View {
             model.inspectMode.toggle()
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "cursorarrow.rays")
-                    .font(.system(size: 11, weight: .medium))
+                LucideIcon("mouse-pointer-click", size: 13)
                 Text("Inspect")
                     .font(Theme.Fonts.bodyMedium)
             }
@@ -140,7 +139,7 @@ private struct AnnotationsToggle: View {
 
     var body: some View {
         ToolbarIconButton(
-            symbol: "checklist",
+            icon: "list-checks",
             help: "Tasks",
             active: model.showAnnotations,
             badge: store.open.count
@@ -381,7 +380,7 @@ private struct AnnotationsPanel: View {
 // MARK: - Small pieces
 
 private struct ToolbarIconButton: View {
-    let symbol: String
+    let icon: String
     let help: String
     var active = false
     var badge = 0
@@ -391,8 +390,7 @@ private struct ToolbarIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .medium))
+            LucideIcon(icon, size: 14)
                 .foregroundStyle(
                     active ? Theme.buttonActiveStroke : hovered ? Theme.text : Theme.textSecondary
                 )

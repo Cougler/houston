@@ -1,86 +1,88 @@
 import AppKit
 import SwiftUI
 
-/// Design tokens. Light values come from the Figma design; dark values are
-/// the same design translated to a #1E1E1E surface. Every token is a dynamic
-/// color, so switching the app appearance restyles everything live.
+/// Design tokens. Retheme 2026-09-22: values follow shadcn's zinc design
+/// system (surfaces/borders/muted text on the Tailwind zinc scale, light =
+/// white-on-zinc, dark = zinc-950), with Houston's brand rose surviving as
+/// the accent (`buttonActive*`, `ctaFill`, `link`). Every token is a
+/// dynamic color, so switching the app appearance restyles everything live.
 enum Theme {
 
-    // MARK: - Surfaces
+    // MARK: - Surfaces (shadcn: background / card / muted)
 
-    /// Window / detail background.
-    static let background = Color(light: 0xEBEBEB, dark: 0x0A0B0E)
-    /// The sidebar panel (and the chat composer, which matches it) — a
-    /// step lighter than the window chrome so the column reads as its own
-    /// surface.
-    static let sidebarFill = Color(light: 0xEDEDED, dark: 0x0E1015)
-    /// The sidebar's top tiles: a raised fill (dark #1D1E22), hover and
-    /// active a step DARKER than the resting fill.
-    // Tiles sit a step DARKER than the sidebar at rest and lift to the
-    // lighter-than-sidebar fill while active (2026-09-16); hover is the
-    // sidebar rows' `rowHovered` wash over the rest fill, not a tile
-    // token of its own.
-    static let tileFill = Color(light: 0xE4E4E4, dark: 0x0A0C10)
-    static let tileActive = Color(light: 0xF7F7F7, dark: 0x1D1E22)
-    /// The empty state's sky — follows the appearance (2026-09-14): a
-    /// daylight gray matching the chat page in light mode, night black in
-    /// dark. The star field's tokens (heading, orbitRing) already track.
-    static let emptyStateBackground = Color(light: 0xEBEBEB, dark: 0x000000)
+    /// Window / detail background — shadcn `background`.
+    static let background = Color(light: 0xFFFFFF, dark: 0x09090B)
+    /// The sidebar panel (and the chat composer, which matches it) —
+    /// shadcn's sidebar surface: zinc-50 on light, zinc-900 on dark, so
+    /// the column reads as its own surface either way.
+    static let sidebarFill = Color(light: 0xFAFAFA, dark: 0x18181B)
+    /// The sidebar's top tiles — shadcn `muted` (zinc-100 / zinc-800);
+    /// active lifts a step (white / zinc-700).
+    static let tileFill = Color(light: 0xF4F4F5, dark: 0x27272A)
+    static let tileActive = Color(light: 0xFFFFFF, dark: 0x3F3F46)
+    /// The empty state's sky AND the chat page (2026-09-21, one content
+    /// surface) — the plain background, so content reads a step apart
+    /// from the zinc side panels in both modes.
+    static let emptyStateBackground = Color(light: 0xFFFFFF, dark: 0x09090B)
     /// Text sitting directly on the sky (empty state, onboarding chrome) —
     /// tracks the appearance along with it.
-    static let skyText = Color(light: 0x111111, dark: 0xE8E8E8)
-    static let skyTextSecondary = Color(light: 0x666666, dark: 0x9A9A9A)
-    /// Floating cards (skills panel, rail flyouts). Light mode matches the
-    /// sidebar chrome; dark mode steps lighter to separate from it.
-    static let panelFill = Color(light: 0xEBEBEB, dark: 0x262626)
-    /// The git panel: chrome-colored in light mode like the other cards,
-    /// darker than the UI in dark mode.
-    static let gitPanelFill = Color(light: 0xEBEBEB, dark: 0x050608)
+    static let skyText = Color(light: 0x09090B, dark: 0xFAFAFA)
+    static let skyTextSecondary = Color(light: 0x71717A, dark: 0xA1A1AA)
+    /// Floating cards (skills panel, rail flyouts) — shadcn `card` /
+    /// `popover`: white on light, zinc-900 on dark (a card on zinc-950
+    /// needs the step plus the border to separate).
+    static let panelFill = Color(light: 0xFFFFFF, dark: 0x18181B)
+    /// The git panel / sheet surface: zinc-50 in light, the deep
+    /// background in dark.
+    static let gitPanelFill = Color(light: 0xFAFAFA, dark: 0x09090B)
     /// The viewer-code row attached under the live-link field: barely off
-    /// the drawer background (0x0A0B0E dark / 0xEBEBEB light) so the row
-    /// reads as recessed, not as a second field.
-    static let attachedWellFill = Color(light: 0xE7E7E7, dark: 0x08090C)
-    /// The faded helmet on the empty state.
-    static let watermark = Color(light: 0xEBEBEB, dark: 0x323232)
+    /// the drawer background so the row reads as recessed, not as a
+    /// second field.
+    static let attachedWellFill = Color(light: 0xF4F4F5, dark: 0x18181B)
+    /// The faded helmet on the empty state — a whisper, not a shape.
+    static let watermark = Color(light: 0xF4F4F5, dark: 0x27272A)
 
-    // MARK: - Text
+    // MARK: - Text (shadcn: foreground / muted-foreground)
 
-    static let text = Color(light: 0x111111, dark: 0xE8E8E8)
-    /// Server row subtitle.
-    static let textSecondary = Color(light: 0x666666, dark: 0x9A9A9A)
-    /// Section headings.
-    static let heading = Color(light: 0x7A7A7A, dark: 0x8C8C8C)
+    static let text = Color(light: 0x09090B, dark: 0xFAFAFA)
+    /// Server row subtitle — shadcn `muted-foreground`.
+    static let textSecondary = Color(light: 0x71717A, dark: 0xA1A1AA)
+    /// Section headings — same muted-foreground; hierarchy comes from
+    /// weight and kerning, not another gray.
+    static let heading = Color(light: 0x71717A, dark: 0xA1A1AA)
     /// Path line under the header title.
-    static let textPath = Color(light: 0x888888, dark: 0x828282)
+    static let textPath = Color(light: 0x71717A, dark: 0xA1A1AA)
 
-    // MARK: - Borders
+    // MARK: - Borders (shadcn `border`: zinc-200 / zinc-800)
 
     /// Sidebar → detail split line.
-    static let borderSidebar = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x2B2B2B))
+    static let borderSidebar = Color(light: NSColor(hex: 0xE4E4E7), dark: NSColor(hex: 0x27272A))
     /// Header underline.
-    static let borderHeader = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x292929))
+    static let borderHeader = Color(light: NSColor(hex: 0xE4E4E7), dark: NSColor(hex: 0x27272A))
     /// Sidebar footer top line.
-    static let borderFooter = Color(light: .black.withAlphaComponent(0.10), dark: NSColor(hex: 0x2B2B2B))
+    static let borderFooter = Color(light: NSColor(hex: 0xE4E4E7), dark: NSColor(hex: 0x27272A))
     /// Solar-system orbit rings on the empty state.
     static let orbitRing = Color(
-        light: .black.withAlphaComponent(0.10),
-        dark: NSColor(hex: 0x323232).withAlphaComponent(0.5)
+        light: .black.withAlphaComponent(0.08),
+        dark: NSColor(hex: 0x27272A).withAlphaComponent(0.6)
     )
 
     // MARK: - Controls
 
-    static let buttonFill = Color(light: 0xF3F3F3, dark: 0x2C2C2C)
-    /// Header button while its menu/panel is open: dusty-rose accent — the
-    /// dark values are the design's; light is the same hue deepened to hold
-    /// contrast on the light chrome.
+    /// Secondary button fill — shadcn `secondary` (zinc-100 / zinc-800).
+    static let buttonFill = Color(light: 0xF4F4F5, dark: 0x27272A)
+    /// Header button while its menu/panel is open: the brand rose accent —
+    /// deliberately the one non-neutral in the chrome (shadcn's `accent`
+    /// slot, in Houston's color).
     static let buttonActiveFill = Color(
         light: NSColor(hex: 0xAD7370).withAlphaComponent(0.12),
         dark: NSColor(hex: 0xC79491).withAlphaComponent(0.15)
     )
     static let buttonActiveStroke = Color(light: 0xAD7370, dark: 0xC79491)
-    static let buttonStroke = Color(light: 0xE0E0E0, dark: 0x3D3D3D)
-    /// Close button glyph — #FF685F in both appearances.
-    static let closeRed = Color(hex: 0xFF685F)
+    /// Input/control border — shadcn `input` (zinc-200 / zinc-700).
+    static let buttonStroke = Color(light: 0xE4E4E7, dark: 0x3F3F46)
+    /// Close button glyph — shadcn `destructive` red, both appearances.
+    static let closeRed = Color(hex: 0xEF4444)
 
     /// Selected / hovered sidebar row pills.
     static let rowSelected = Color(nsColor: NSColor(name: nil) { appearance in
@@ -88,14 +90,23 @@ enum Theme {
             ? NSColor.white.withAlphaComponent(0.08)
             : NSColor.black.withAlphaComponent(0.05)
     })
-    /// THE hover fill, app-wide: the link blue at 15%. Every control that
-    /// tints under the pointer uses this wash (or `controlHovered` when it
-    /// sits on an already-washed surface).
-    static let rowHovered = link.opacity(0.15)
+    /// THE hover fill, app-wide — NEUTRAL now (shadcn convention: hover
+    /// is a whisper of ink, color is reserved for meaning). Every control
+    /// that tints under the pointer uses this wash (or `controlHovered`
+    /// when it sits on an already-washed surface).
+    static let rowHovered = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.07)
+            : NSColor.black.withAlphaComponent(0.05)
+    })
     /// A small inline control (icon/pill button) under the pointer while
-    /// its ROW is also washed — the same blue, stepped up so it still reads
+    /// its ROW is also washed — the same ink, stepped up so it still reads
     /// on top of `rowHovered`.
-    static let controlHovered = link.opacity(0.28)
+    static let controlHovered = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.13)
+            : NSColor.black.withAlphaComponent(0.10)
+    })
     /// Resting chip behind always-chromed icon buttons (the sheet header's
     /// close circle, the tracked panel's menu chips) — neutral, NOT the
     /// hover wash; the wash layers on top under the pointer.
@@ -109,33 +120,34 @@ enum Theme {
     /// green darkens in light mode: #00DD21 on white sat under 2:1 contrast,
     /// invisible to low-vision users; #15803D clears 3:1 (WCAG for non-text
     /// UI) while the dark surface keeps the bright signal color.
-    static let dotActive = Color(light: 0x15803D, dark: 0x00DD21)
+    static let dotActive = Color(light: 0x15803D, dark: 0x22C55E)
     /// The sidebar status dot's idle state — a quiet gray, non-signal.
-    static let dotIdle = Color(light: 0xB8B8B8, dark: 0x4E4E4E)
-    /// The chat view's user bubble. This orange holds 4.5:1 against white
-    /// text — don't lighten it without rechecking.
-    static let chatUserFill = Color(light: 0xC2410C, dark: 0xC2410C)
-    /// Assistant chat prose. Dark mode steps down from `text`'s #E8E8E8 —
-    /// full-brightness paragraphs glare at 16pt reading size; #C6C6C6
+    static let dotIdle = Color(light: 0xA1A1AA, dark: 0x52525B)
+    /// The chat view's user bubble — the brand rose (deepened; white text
+    /// clears 4.5:1 in both modes — don't lighten without rechecking).
+    static let chatUserFill = Color(light: 0x7E4340, dark: 0x8F5350)
+    /// Assistant chat prose. Dark mode steps down from full foreground —
+    /// full-brightness paragraphs glare at 16pt reading size; zinc-300
     /// still clears 10:1 on the chat background.
-    static let chatProse = Color(light: 0x111111, dark: 0xC6C6C6)
+    static let chatProse = Color(light: 0x09090B, dark: 0xD4D4D8)
     /// Deepened in light mode: its only text use (diff hunk headers) sat at
     /// 3.1:1 with the fixed #3B82F6.
     static let dotServer = Color(light: 0x1D4ED8, dark: 0x3B82F6)
-    static let dotShell = Color(hex: 0xA6A6A6)
+    static let dotShell = Color(hex: 0xA1A1AA)
     /// Degraded / warning status. The classic amber #D97706 read 2.7:1 on
     /// the light chrome; the light value deepens to clear 3:1 (non-text)
     /// and 4.5:1 when it colors small text.
     static let dotDegraded = Color(light: 0xB45309, dark: 0xD97706)
 
-    /// Inline text links — the design's blues (Figma server page, node
-    /// 511:7): #9EC9EF on the dark chrome, #628DB3 on the light.
-    static let link = Color(light: 0x628DB3, dark: 0x9EC9EF)
-    /// The server page's custom switch (Figma node 511:7): off-state track;
-    /// the knob is white in both states.
-    static let switchTrack = Color(light: 0xD9D9D9, dark: 0x141414)
-    /// On-state track — a deeper blue than `link`, so the white knob holds.
-    static let switchTrackOn = Color(hex: 0x266CCD)
+    /// Inline text links — the brand rose, now that the chrome is
+    /// neutral zinc (light deepened until text clears 4.5:1 on white).
+    static let link = Color(light: 0x7E4340, dark: 0xC79491)
+    /// The switch's off-state track (zinc-200 / zinc-800); the knob is
+    /// white in both states.
+    static let switchTrack = Color(light: 0xE4E4E7, dark: 0x27272A)
+    /// On-state track — green, per the server-card design (toggles read
+    /// as "live"), deep enough that the white knob holds.
+    static let switchTrackOn = Color(hex: 0x16A34A)
     /// The server page's card hover — a whisper of ink, not the blue wash:
     /// 5% white on dark, 5% black on light.
     static let cardHovered = Color(nsColor: NSColor(name: nil) { appearance in
@@ -151,14 +163,13 @@ enum Theme {
     /// Red *text* (deleted-line counts, destructive commands). `closeRed`
     /// stays for glyphs and fills, but as small text it read 2.4:1 on the
     /// light chrome.
-    static let textDanger = Color(light: 0xB91C1C, dark: 0xFF685F)
+    static let textDanger = Color(light: 0xB91C1C, dark: 0xF87171)
     /// Green *text* (added-line counts, diff additions). The raw #16A34A
-    /// sat at 2.8:1 on the light chrome; `dotActive`'s dark #00DD21 is a
-    /// signal color, too loud as prose.
-    static let textPositive = Color(light: 0x166534, dark: 0x34C759)
+    /// sat at 2.8:1 on the light chrome; green-400 carries the dark side.
+    static let textPositive = Color(light: 0x166534, dark: 0x4ADE80)
     /// Amber *text* ("not pushed"). Text-grade amber has to go brown —
     /// #D97706 can't reach 4.5:1 on the light chrome at any small size.
-    static let textWarning = Color(light: 0x92400E, dark: 0xD97706)
+    static let textWarning = Color(light: 0x92400E, dark: 0xFBBF24)
 
     // MARK: - Metrics
 
@@ -184,9 +195,10 @@ enum Theme {
     /// The one shadow, reserved for layers that genuinely float above the
     /// canvas (flyouts, popovers). In-flow content never casts one — space
     /// and tint do the separating.
-    static let floatShadowColor = SwiftUI.Color.black.opacity(0.18)
-    static let floatShadowRadius: CGFloat = 18
-    static let floatShadowY: CGFloat = 6
+    /// shadcn-grade: soft and close, not a glow.
+    static let floatShadowColor = SwiftUI.Color.black.opacity(0.10)
+    static let floatShadowRadius: CGFloat = 14
+    static let floatShadowY: CGFloat = 4
 
     // MARK: - Spacing
 

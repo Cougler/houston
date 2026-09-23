@@ -14,6 +14,10 @@ struct AnnotationRowView: View {
     /// becomes COPY (paste it into any chat — Claude, Codex, Gemini,
     /// Grok) instead of the web preview's send-to-session paperplane.
     var copyText: String? = nil
+    /// Non-nil swaps the trash button for a hover ⋯ menu (the tasks
+    /// menu): assign the task to one of these projects, or delete.
+    var moveChoices: [Project]? = nil
+    var onMoveTo: ((String) -> Void)? = nil
     let onSend: () -> Void
     let onToggleDone: () -> Void
     let onDelete: () -> Void
@@ -83,10 +87,32 @@ struct AnnotationRowView: View {
                             help: "Copy task — paste it into any chat"
                         )
                     } else {
-                        AnnotationIconButton(symbol: "paperplane", help: "Send to Claude now", action: onSend)
+                        AnnotationIconButton(icon: "send", help: "Send to Claude now", action: onSend)
                     }
                 }
-                AnnotationIconButton(symbol: "trash", help: "Delete", action: onDelete)
+                if let moveChoices, let onMoveTo {
+                    Menu {
+                        Menu("Add to Project") {
+                            ForEach(moveChoices) { project in
+                                Button(project.name) { onMoveTo(project.path) }
+                            }
+                        }
+                        Divider()
+                        Button("Delete", role: .destructive, action: onDelete)
+                    } label: {
+                        LucideIcon("ellipsis", size: 12)
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 21, height: 21)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("More")
+                } else {
+                    AnnotationIconButton(icon: "trash-2", help: "Delete", action: onDelete)
+                }
             }
             .frame(height: 21)
             .opacity(hovered ? 1 : 0)
@@ -124,8 +150,7 @@ struct AnnotationRowView: View {
             ZStack {
                 if item.done {
                     Circle().fill(Theme.dotActive)
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 8, weight: .bold))
+                    LucideIcon("check", size: 10)
                         .foregroundStyle(.white)
                 } else {
                     Circle().strokeBorder(Theme.heading, lineWidth: 1.5)
@@ -269,8 +294,7 @@ struct AnnotationsSheetPanel: View {
                 .font(Theme.Fonts.body)
                 .onSubmit { addManual() }
             Button(action: addManual) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 12, weight: .semibold))
+                LucideIcon("arrow-up", size: 14)
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
                     .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.switchTrackOn))
@@ -316,6 +340,291 @@ struct AnnotationsSheetPanel: View {
         )
     }
 
+}
+
+/// The titlebar tasks menu (2026-09-23): OPEN tasks grouped by project
+/// (with a "No project" group — the home-directory store, the same
+/// stand-in chats use), an Add Project affordance, and a task input
+/// pinned to the bottom. Completed tasks collapse behind a chevron row
+/// and Reminders behind the bell at the top right — each its own pushed
+/// page with a back arrow. The right sheet keeps the full navigator.
+struct TasksMenuList: View {
+    @ObservedObject var tracked: TrackedStore
+
+    private enum Page { case root, completed, reminders }
+    @State private var page: Page = .root
+    @State private var groupPaths: [String] = []
+    /// Every project, for the rows' Add-to-Project menus.
+    @State private var projects: [Project] = []
+    @State private var newTask = ""
+
+    private let home = NSHomeDirectory()
+
+    var body: some View {
+        Group {
+            switch page {
+            case .root: rootPage
+            case .completed: completedPage
+            case .reminders: remindersPage
+            }
+        }
+        .onAppear(perform: reload)
+    }
+
+    // MARK: Root — the task list
+
+    private var rootPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 2) {
+                caps("TASKS")
+                Spacer(minLength: 0)
+                // Completed moved behind ⋯ (2026-09-23) — no row in the
+                // list itself.
+                Menu {
+                    Button("Completed") {
+                        withAnimation(Theme.quick) { page = .completed }
+                    }
+                } label: {
+                    LucideIcon("ellipsis", size: 14)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
+                ControlIconButton(
+                    icon: "bell", help: "Reminders", bare: true,
+                    action: { withAnimation(Theme.quick) { page = .reminders } }
+                )
+                .overlay(alignment: .topTrailing) {
+                    if tracked.attentionCount > 0 {
+                        Circle()
+                            .fill(Theme.dotDegraded)
+                            .frame(width: 5, height: 5)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if groupPaths.isEmpty {
+                        Text("No tasks yet — type one below.")
+                            .font(Theme.Fonts.secondary)
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 10)
+                            .padding(.top, 8)
+                    }
+                    ForEach(groupPaths, id: \.self) { path in
+                        TasksMenuGroup(
+                            store: AnnotationStores.store(for: path),
+                            title: groupTitle(path), done: false,
+                            moveChoices: projects, onChanged: reload
+                        )
+                    }
+                }
+                .padding(.bottom, 8)
+                .thinScrollbar()
+            }
+            .frame(maxHeight: 340)
+            .fixedSize(horizontal: false, vertical: true)
+            // shadcn separator grammar: a full-bleed hairline, then the
+            // input on its own uniformly padded band.
+            Rectangle()
+                .fill(Theme.borderSidebar.opacity(0.6))
+                .frame(height: 1)
+            taskInput
+                .padding(8)
+        }
+    }
+
+    /// The bottom input: one plain field — a new task lands in No
+    /// project; the row's ⋯ menu assigns it from there.
+    private var taskInput: some View {
+        HStack(spacing: 8) {
+            TextField("Add a task…", text: $newTask)
+                .textFieldStyle(.plain)
+                .font(Theme.Fonts.body)
+                .onSubmit(addTask)
+            Button(action: addTask) {
+                LucideIcon("arrow-up", size: 14)
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                            .fill(Theme.switchTrackOn)
+                    )
+                    .contentShape(
+                        RoundedRectangle(cornerRadius: Theme.radiusSurface))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canAdd)
+            .opacity(canAdd ? 1 : 0.4)
+            .help("Add to the task list")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .frame(height: 40)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                .fill(Theme.attachedWellFill)
+        )
+    }
+
+    // MARK: Pushed pages
+
+    private var completedPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            pageHeader("COMPLETED")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Its own listing, not `groupPaths` — a project whose
+                    // tasks are ALL done has no root group but belongs
+                    // here.
+                    ForEach(completedPaths, id: \.self) { path in
+                        TasksMenuGroup(
+                            store: AnnotationStores.store(for: path),
+                            title: groupTitle(path), done: true,
+                            moveChoices: projects, onChanged: reload
+                        )
+                    }
+                }
+                .padding(.bottom, 6)
+                .thinScrollbar()
+            }
+            .frame(maxHeight: 400)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 6)
+    }
+
+    private var completedPaths: [String] {
+        var paths = AnnotationStores.allStores()
+            .filter { !$0.doneItems.isEmpty }
+            .map(\.projectPath)
+        if let at = paths.firstIndex(of: home) {
+            paths.append(paths.remove(at: at))
+        }
+        return paths
+    }
+
+    private var remindersPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            pageHeader("REMINDERS")
+            TrackedPanel(store: tracked, compact: true)
+                .padding(.horizontal, 10)
+                .padding(.top, 4)
+                .frame(height: 380)
+        }
+        .padding(.bottom, 8)
+    }
+
+    /// Back arrow + caps title, both pushed pages.
+    private func pageHeader(_ title: String) -> some View {
+        HStack(spacing: 6) {
+            ControlIconButton(
+                icon: "arrow-left", help: "Back", bare: true,
+                action: { withAnimation(Theme.quick) { page = .root } }
+            )
+            caps(title)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
+    }
+
+    private func caps(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .kerning(0.8)
+            .foregroundStyle(Theme.heading)
+    }
+
+    // MARK: Data
+
+    private func groupTitle(_ path: String) -> String {
+        path == home
+            ? "NO PROJECT"
+            : (path as NSString).lastPathComponent.uppercased()
+    }
+
+    private var canAdd: Bool {
+        !newTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func addTask() {
+        let trimmed = newTask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        AnnotationStores.store(for: home).add(comment: trimmed)
+        newTask = ""
+        reload()
+    }
+
+    /// Only projects with OPEN tasks make the root list (a task file
+    /// alone, or done-only, doesn't earn a header — those live on the
+    /// Completed page). No-project last when it qualifies.
+    private func reload() {
+        var paths = AnnotationStores.allStores()
+            .filter { !$0.open.isEmpty }
+            .map(\.projectPath)
+        if let at = paths.firstIndex(of: home) {
+            paths.append(paths.remove(at: at))
+        }
+        groupPaths = paths
+        projects = ProjectList.allProjects(settings: HoustonSettings.read())
+    }
+}
+
+/// One project's group in the tasks menu: caps header + its rows —
+/// open tasks on the root page, done tasks (dimmed) on Completed. Each
+/// row's ⋯ menu can re-home the task to any other project.
+private struct TasksMenuGroup: View {
+    @ObservedObject var store: AnnotationStore
+    let title: String
+    /// false = open tasks (root page), true = done tasks (Completed).
+    let done: Bool
+    /// Every project, for the ⋯ menu (the row's own is filtered out).
+    let moveChoices: [Project]
+    /// A move/add/delete changed which groups exist — the list re-derives.
+    let onChanged: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sheetSectionLabel(title)
+            ForEach(done ? store.doneItems : store.open) { item in
+                row(item).opacity(done ? 0.55 : 1)
+            }
+        }
+    }
+
+    private func row(_ item: Annotation) -> some View {
+        AnnotationRowView(
+            item: item,
+            projectPath: store.projectPath,
+            carded: true,
+            copyText: AnnotationPrompts.compose(
+                item, projectRoot: store.projectPath),
+            moveChoices: moveChoices.filter { $0.path != store.projectPath },
+            onMoveTo: { path in
+                store.move(item.id, to: AnnotationStores.store(for: path))
+                onChanged()
+            },
+            onSend: {},
+            onToggleDone: {
+                item.done ? store.markUndone(item.id) : store.markDone(item.id)
+                onChanged()
+            },
+            onDelete: {
+                store.remove(item.id)
+                onChanged()
+            },
+            onEdit: { store.updateComment(item.id, comment: $0) }
+        )
+    }
 }
 
 /// The tasks sheet's navigation shell: All Tasks is the root; a project's
@@ -374,8 +683,7 @@ struct AllTasksPanel: View {
                         dot: trackedAttention > 0,
                         onTap: onOpenReminders,
                         icon: {
-                            Image(systemName: "bell")
-                                .font(.system(size: 14, weight: .medium))
+                            LucideIcon("bell", size: 16)
                                 .foregroundStyle(Theme.textSecondary)
                         }
                     )
@@ -417,8 +725,7 @@ struct AllTasksPanel: View {
                     Text(targetProjectName ?? "Project")
                         .font(Theme.Fonts.secondaryMedium)
                         .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
+                    LucideIcon("chevrons-up-down", size: 10)
                 }
                 .foregroundStyle(targetProject == nil ? Theme.textSecondary : Theme.text)
                 .padding(.horizontal, 8)
@@ -436,8 +743,7 @@ struct AllTasksPanel: View {
                     .font(Theme.Fonts.body)
                     .onSubmit { addTask() }
                 Button(action: addTask) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .semibold))
+                    LucideIcon("arrow-up", size: 14)
                         .foregroundStyle(.white)
                         .frame(width: 32, height: 32)
                         .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.switchTrackOn))
@@ -509,8 +815,7 @@ private struct ProjectTaskRow: View {
                 subtitle: subtitle,
                 onTap: onOpen,
                 icon: {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 14, weight: .medium))
+                    LucideIcon("list-checks", size: 16)
                         .foregroundStyle(Theme.textSecondary)
                 }
             )
@@ -528,7 +833,7 @@ private struct ProjectTaskRow: View {
 }
 
 private struct AnnotationIconButton: View {
-    let symbol: String
+    let icon: String
     let help: String
     let action: () -> Void
 
@@ -536,8 +841,7 @@ private struct AnnotationIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .medium))
+            LucideIcon(icon, size: 12)
                 .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(

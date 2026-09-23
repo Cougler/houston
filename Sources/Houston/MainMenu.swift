@@ -79,6 +79,17 @@ enum MainMenu {
         askSelection.keyEquivalent = "a"
         askSelection.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(askSelection)
+        // ⌘S saves the selection as a task (Houston has no documents, so
+        // Save is free) — the window captures the text and opens the
+        // tasks menu.
+        let saveSelection = ClosureMenuItem("Add Selection to Tasks") {
+            NotificationCenter.default.post(
+                name: .houstonAddSelectionToTasks, object: nil
+            )
+        }
+        saveSelection.keyEquivalent = "s"
+        saveSelection.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(saveSelection)
         editItem.submenu = editMenu
         main.addItem(editItem)
 

@@ -252,6 +252,10 @@ extension Notification.Name {
     /// Edit ▸ Ask About Selection (⇧⌘A): thread the current text
     /// selection. The open transcript's view resolves and validates it.
     static let houstonAskSelection = Notification.Name("houstonAskSelection")
+    /// Edit ▸ Add Selection to Tasks (⌘S): save the current text
+    /// selection as a task and open the tasks menu.
+    static let houstonAddSelectionToTasks =
+        Notification.Name("houstonAddSelectionToTasks")
 }
 
 /// The right-sheet thread view: the quoted anchor on top, that anchor's
@@ -336,8 +340,7 @@ struct ChatThreadPanel: View {
                 .focused($inputFocused)
                 .onSubmit(send)
             Button(action: send) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .semibold))
+                LucideIcon("arrow-up", size: 13)
                     .foregroundStyle(.white)
                     .frame(width: 26, height: 26)
                     .background(Circle().fill(Theme.ctaFill))

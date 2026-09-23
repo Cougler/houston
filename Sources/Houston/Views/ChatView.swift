@@ -41,13 +41,16 @@ struct ChatModelChoice: Hashable {
     /// start with `modelProvider`. nil = the harness's cloud default.
     var provider: String? = nil
 
-    static let claude: [ChatModelChoice] = [
+    /// Mutable so `ModelCatalog` can overlay a refreshed list (menu ▸
+    /// Refresh Model List) — a new model is a models.json edit, not an
+    /// app update. These literals are the shipped defaults.
+    @MainActor static var claude: [ChatModelChoice] = [
         .init(label: "Fable 5", harness: .claude, arg: "fable"),
         .init(label: "Opus 5", harness: .claude, arg: "opus"),
         .init(label: "Sonnet 5", harness: .claude, arg: "sonnet"),
         .init(label: "Haiku 4.5", harness: .claude, arg: "haiku"),
     ]
-    static let openAI: [ChatModelChoice] = [
+    @MainActor static var openAI: [ChatModelChoice] = [
         .init(label: "GPT-6 Astra", harness: .codex, arg: "gpt-6-astra"),
         .init(label: "GPT-5.6 Sol", harness: .codex, arg: "gpt-5.6-sol"),
         .init(label: "GPT-5.6 Terra", harness: .codex, arg: "gpt-5.6-terra"),
@@ -103,6 +106,7 @@ struct ChatModelChoice: Hashable {
         return out
     }
 
+    @MainActor
     static func fallback(for harness: ChatHarness) -> ChatModelChoice {
         switch harness {
         case .codex: openAI[0]
@@ -159,7 +163,7 @@ struct ChatModelChoice: Hashable {
 
     /// A Pi-harness model, back on its native CLI — the reverse of
     /// `piEquivalent`, matched through the same table.
-    var nativeEquivalent: ChatModelChoice? {
+    @MainActor var nativeEquivalent: ChatModelChoice? {
         guard harness == .pi, let arg else { return nil }
         let candidates = Self.claude + Self.openAI
             + ChatProvider.cloud.flatMap { provider in
@@ -238,6 +242,13 @@ struct ChatBrowserView: View {
     @State private var contextMonitor: Any?
     /// The transcript's frame in global coords, gating the interceptor.
     @State private var transcriptFrame: CGRect = .zero
+    /// Live scroll metrics OUTSIDE SwiftUI state: read by growth handlers,
+    /// written every scroll frame — an @State here would re-render the
+    /// transcript per frame for a number only closures consult.
+    final class ScrollMetrics {
+        var bottomDistance: CGFloat = 0
+    }
+    @State private var scrollMetrics = ScrollMetrics()
     /// Whether the transcript follows the stream. Latching with hysteresis
     /// (not a bare "is the sentinel visible" recompute): a chunky append
     /// briefly shoves the sentinel far below the fold, and the old
@@ -288,7 +299,9 @@ struct ChatBrowserView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.gitPanelFill)
+        // Same surface as the empty state — chat and the no-selection sky
+        // are one page, not two shades of it (2026-09-21).
+        .background(Theme.emptyStateBackground)
         // No teardown on close: warm processes now outlive the browser
         // (the hub's TTL sweep reclaims them), so returning to a chat
         // doesn't pay a CLI cold start.
@@ -476,7 +489,18 @@ struct ChatBrowserView: View {
                                     LiveTurnView(
                                         session: session, harness: ref.harness,
                                         onGrow: {
-                                            guard stickToBottom else { return }
+                                            // Only scroll when actually AWAY
+                                            // from the bottom: at the bottom,
+                                            // `defaultScrollAnchor(.bottom)`
+                                            // already re-pins on growth, and
+                                            // issuing a scrollTo on top of it
+                                            // made the transcript jump one
+                                            // frame up and back on every new
+                                            // live block (seen on the Lucide
+                                            // migration recording, 2026-09-22).
+                                            guard stickToBottom,
+                                                  scrollMetrics.bottomDistance > 6
+                                            else { return }
                                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                                         }
                                     ) {
@@ -506,7 +530,9 @@ struct ChatBrowserView: View {
                                 minHeight: max(0, geo.size.height - composerHeight),
                                 alignment: .top
                             )
-                            .thinScrollbar()
+                            // No scrollbar — the jump-dot rail on the
+                            // leading edge is the position indicator.
+                            .hiddenScrollbar()
                         }
                         .defaultScrollAnchor(.bottom)
                         .coordinateSpace(name: "chatScroll")
@@ -527,6 +553,26 @@ struct ChatBrowserView: View {
                         .onPreferenceChange(ComposerHeightKey.self) {
                             composerHeight = $0
                         }
+                        // Codex-style jump rail, in circles: one dot per
+                        // user turn, hover grows the cascade, click jumps
+                        // that turn to the top. On the LEADING edge
+                        // (2026-09-22) — the trailing edge belongs to
+                        // nothing now that the scrollbar is gone. After
+                        // the safeAreaInset so it centers in the region
+                        // above the composer.
+                        .overlay(alignment: .leading) {
+                            ChatScrollDots(
+                                targets: Self.dotTargets(visible)
+                            ) { id in
+                                // Jumping into history is leaving the
+                                // stream — don't yank back on growth.
+                                stickToBottom = false
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    proxy.scrollTo(id, anchor: .top)
+                                }
+                            }
+                            .padding(.leading, 8)
+                        }
                         .onPreferenceChange(ChatBottomYKey.self) { y in
                             // Distance of the sentinel below the viewport
                             // bottom. Wide hysteresis so a growth blip
@@ -537,6 +583,7 @@ struct ChatBrowserView: View {
                             // frame, so the steady state must cost a
                             // comparison, not a state write.
                             let distance = y - geo.size.height
+                            scrollMetrics.bottomDistance = distance
                             if distance <= 80 {
                                 if !stickToBottom { stickToBottom = true }
                             } else if distance > 240, stickToBottom {
@@ -544,7 +591,10 @@ struct ChatBrowserView: View {
                             }
                         }
                         .onChange(of: messages.count) {
-                            guard stickToBottom else { return }
+                            // Same rule as onGrow: the bottom anchor owns
+                            // the at-bottom case.
+                            guard stickToBottom,
+                                  scrollMetrics.bottomDistance > 6 else { return }
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
                         .onChange(of: sendScrollTick) {
@@ -601,6 +651,7 @@ struct ChatBrowserView: View {
                 ?? .fallback(for: ref.harness),
             ghostContext: ref.harness == .claude ? ghostContext : nil,
             runningSession: hub.sessions[ref.filePath],
+            draftKey: ref.filePath,
             onSend: { text, model in
                 handleSend(ref, text: text, model: model)
             }
@@ -636,6 +687,7 @@ struct ChatBrowserView: View {
                     selectedProject: activeProject,
                     onSelectProject: { chosenProject = $0 },
                     attached: false,
+                    draftKey: "new:\(activeProject)",
                     onSend: { text, model in
                         hub.draft(in: activeProject, harness: model.harness)
                             .send(text: text, model: model)
@@ -690,6 +742,9 @@ struct ChatBrowserView: View {
                 initialModel: session.lastModel ?? .fallback(for: session.harness),
                 ghostContext: nil,
                 runningSession: session,
+                // Same key as the new-chat composer: a draft chat is that
+                // conversation continuing, pre-promotion.
+                draftKey: "new:\(activeProject)",
                 onSend: { text, model in
                     hub.draft(in: activeProject, harness: model.harness)
                         .send(text: text, model: model)
@@ -1104,6 +1159,23 @@ struct ChatBrowserView: View {
             .joined(separator: " ")
     }
 
+    /// Jump-dot targets: each user turn's id, paired with the exchange
+    /// text (question + the reply's head) the hover preview reads.
+    private static func dotTargets(
+        _ visible: [ChatMessage]
+    ) -> [(id: String, source: String)] {
+        var out: [(id: String, source: String)] = []
+        for (index, message) in visible.enumerated() where message.role == .user {
+            var source = "User: " + String(ChatArchive.flatten(message).prefix(300))
+            if index + 1 < visible.count, visible[index + 1].role == .assistant {
+                source += "\nAssistant: "
+                    + String(ChatArchive.flatten(visible[index + 1]).prefix(200))
+            }
+            out.append((message.id, source))
+        }
+        return out
+    }
+
     /// The transcript's autocomplete context: the tail of the conversation.
     /// Non-nil ONLY while the assistant's last message ends in a question —
     /// the ghost text (typed completion and the pre-typed suggested reply)
@@ -1320,9 +1392,11 @@ private struct LiveTurnView: View {
             // turn (like the terminal's queued line). Dimmed, with a clock
             // and a ✕ to drop one before it runs.
             ForEach(session.queued) { held in
-                QueuedMessageRow(text: held.text) {
-                    session.cancelQueued(held.id)
-                }
+                QueuedMessageRow(
+                    text: held.text,
+                    onSendNow: { session.sendQueuedNow(held.id) },
+                    onCancel: { session.cancelQueued(held.id) }
+                )
             }
             if let error = session.lastError {
                 if session.needsLogin {
@@ -1401,8 +1475,140 @@ private struct LiveTurnView: View {
 
 /// A held message: sent while a turn was running, shown dimmed on the
 /// trailing edge (where the user's bubbles sit) until it's its turn.
+/// The transcript's scroll indicator (2026-09-23 mock): a vertical rail
+/// of dots, one per user turn. Rows near the pointer stretch into
+/// horizontal pills — widest under the cursor, melting back to resting
+/// circles a few rows out — with the hovered row wearing the preview
+/// label pill. Click jumps the transcript to that turn. Long chats
+/// sample down to `maxDots` rows, first and last turns always kept, so
+/// the rail never outgrows the viewport.
+private struct ChatScrollDots: View {
+    /// Jump targets in transcript order: each user turn's message id
+    /// plus the exchange text the hover preview is generated from.
+    let targets: [(id: String, source: String)]
+    let onJump: (String) -> Void
+
+    /// The pointer's y within the rail — the bloom is a continuous
+    /// function of this, so the swell GLIDES with the cursor instead of
+    /// stepping row to row (the old integer pyramid).
+    @State private var mouseY: CGFloat?
+    @ObservedObject private var previewer = ChatDotPreviewer.shared
+
+    private let maxDots = 24
+    private let dotSize: CGFloat = 5
+    private let rowHeight: CGFloat = 14
+
+    /// Evenly sampled representatives when the chat has more turns than
+    /// the rail has rows.
+    private var capped: [(id: String, source: String)] {
+        guard targets.count > maxDots else { return targets }
+        let step = Double(targets.count - 1) / Double(maxDots - 1)
+        return (0..<maxDots).map {
+            targets[Int((Double($0) * step).rounded())]
+        }
+    }
+
+    var body: some View {
+        let rows = capped
+        if rows.count >= 2 {
+            // No spacing: each row is a full band, so the rail is one
+            // contiguous hover surface tracked continuously.
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, target in
+                    row(index: index, target: target)
+                        // A fixed hit zone wider than the grown row, so
+                        // the bloom never flickers under its own dots.
+                        .frame(width: 40, height: rowHeight, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onJump(target.id) }
+                        .zIndex(nearestIndex == index ? 1 : 0)
+                }
+            }
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case let .active(point):
+                    mouseY = point.y
+                case .ended:
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        mouseY = nil
+                    }
+                }
+            }
+        }
+    }
+
+    /// The row the pointer is on — wears the preview pill.
+    private var nearestIndex: Int? {
+        mouseY.map { min(max(Int($0 / rowHeight), 0), capped.count - 1) }
+    }
+
+    /// Gaussian of the pointer's vertical distance to this row's center:
+    /// 1 under the cursor, melting smoothly to 0 a few rows away. The
+    /// sigma spans ~4 rows so the swell reads as a wave, not a bump.
+    private func falloff(_ index: Int) -> CGFloat {
+        guard let mouseY else { return 0 }
+        let center = (CGFloat(index) + 0.5) * rowHeight
+        let d = (center - mouseY) / 56
+        return exp(-d * d)
+    }
+
+    /// Pill grammar (the mock): each row is a capsule anchored on the
+    /// rail's left edge that stretches RIGHTWARD as the pointer nears —
+    /// resting rows sit as small circles, the hovered row is the widest
+    /// pill, and the swell melts through the neighbors as a wave.
+    private func row(index: Int, target: (id: String, source: String)) -> some View {
+        let f = falloff(index)
+        // Only the row UNDER the cursor lights up in full ink — every
+        // other row stays the resting gray, even while it swells.
+        let active = nearestIndex == index && mouseY != nil
+        return HStack(spacing: 8) {
+            Capsule()
+                .fill(Theme.text.opacity(active ? 0.92 : 0.32))
+                .frame(width: dotSize + 15 * f, height: dotSize + 2 * f)
+                // The row band is fixed; the pill grows out of its
+                // left edge.
+                .frame(
+                    width: dotSize + 20, height: rowHeight,
+                    alignment: .leading
+                )
+            if nearestIndex == index, mouseY != nil {
+                previewPill(target)
+            }
+        }
+    }
+
+    /// What this dot jumps to, as a floating on-device one-liner (raw
+    /// text until the model answers). Never hit-testable — it must not
+    /// steal the rail's hover.
+    private func previewPill(_ target: (id: String, source: String)) -> some View {
+        Text(previewer.text(for: target.id, source: target.source))
+            .font(.system(size: 12.5, weight: .medium))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                Capsule()
+                    .fill(Theme.panelFill)
+                    .shadow(
+                        color: Theme.floatShadowColor,
+                        radius: 8, x: 0, y: 2
+                    )
+            )
+            .overlay(Capsule().strokeBorder(Theme.borderSidebar, lineWidth: 1))
+            .frame(maxWidth: 320, alignment: .leading)
+            .fixedSize()
+            .allowsHitTesting(false)
+            .transition(.opacity)
+    }
+}
+
 private struct QueuedMessageRow: View {
     let text: String
+    /// The ⬆ beside the ✕: interrupt the running turn and send this
+    /// held message now.
+    let onSendNow: () -> Void
     let onCancel: () -> Void
 
     @State private var hovered = false
@@ -1412,14 +1618,18 @@ private struct QueuedMessageRow: View {
             Spacer(minLength: 40)
             if hovered {
                 CircleIconButton(
-                    systemName: "xmark", iconSize: 9,
+                    icon: "x", iconSize: 9,
                     help: "Remove this held message",
                     action: onCancel
                 )
+                CircleIconButton(
+                    icon: "arrow-up", iconSize: 9,
+                    help: "Send now — interrupts the current turn",
+                    action: onSendNow
+                )
             }
             HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.system(size: 10))
+                LucideIcon("clock", size: 12)
                     .foregroundStyle(Theme.textSecondary)
                 Text(text)
                     .font(.system(size: 14))
@@ -1554,6 +1764,14 @@ private struct StagedFragment: Identifiable {
 
 /// The chat input bar: image attach, model picker, ghost-text autocomplete
 /// (on-device model — dimmed inline continuation, Tab accepts), send.
+/// Half-typed composer text, kept per chat while the app runs — navigate
+/// away and back and the draft is still there. In-memory by design:
+/// drafts die with Houston, like sessions do.
+@MainActor
+enum ComposerDraftStore {
+    static var texts: [String: String] = [:]
+}
+
 private struct ChatComposer: View {
     let placeholder: String
     /// Menu selection before the user touches it — the session's harness.
@@ -1576,10 +1794,16 @@ private struct ChatComposer: View {
     /// bottom corners, no gap. The new-chat composer floats mid-sky and
     /// keeps the all-round radius.
     var attached: Bool = true
+    /// Identity for draft persistence: half-typed text survives the
+    /// composer unmounting (navigate away, come back) under this key,
+    /// for as long as the app runs. nil = no persistence.
+    var draftKey: String? = nil
     let onSend: (String, ChatModelChoice) -> Void
 
     @ObservedObject private var localModels = LocalModelStore.shared
     @ObservedObject private var providerAuth = ProviderAuthStore.shared
+    /// Observed so a refreshed model list rebuilds the menu in place.
+    @ObservedObject private var modelCatalog = ModelCatalog.shared
     @State private var draft = ""
     @State private var picked: ChatModelChoice?
     /// Explicitly chosen effort level (flag value); nil = no pick yet, in
@@ -1630,7 +1854,7 @@ private struct ChatComposer: View {
     @State private var dropError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             // Staged capsules/fragments/images float ABOVE the input,
             // outside the composer's surface — the chips carry their own
             // chrome, so they read as riding on top of the bar.
@@ -1640,8 +1864,7 @@ private struct ChatComposer: View {
             }
             if let dropError {
                 HStack(spacing: 5) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
+                    LucideIcon("triangle-alert", size: 12)
                     Text(dropError)
                         .font(Theme.Fonts.secondary)
                         .lineLimit(2)
@@ -1649,34 +1872,21 @@ private struct ChatComposer: View {
                 .foregroundStyle(Theme.textDanger)
                 .transition(.opacity)
             }
-            VStack(alignment: .leading, spacing: 4) {
+            // The card (Figma 778:1732 / 778:1733): in a transcript, a
+            // compact 42px bar — one vertically centered line, growing
+            // with the draft — send riding INSIDE at the right. On the
+            // new-chat sky, the taller text-area card with send at the
+            // bottom-right. The picker strip sits OUT, in its own bar
+            // below either way.
+            ZStack(alignment: attached ? .trailing : .bottomTrailing) {
                 inputField
-                // Controls live UNDER the input: project + attach +
-                // pickers on the left, meter and send on the right.
-                HStack(alignment: .center, spacing: 6) {
-                    if projectChoices != nil { projectMenu }
-                    Button(action: attachImage) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.text)
-                            .frame(width: 24, height: 24)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Attach an image (inserts its path)")
-                    modelMenu
-                    harnessMenu
-                    // Hidden for local models (the local server decides)
-                    // and ACP harnesses (no effort flag — the menu would
-                    // be empty).
-                    if model.provider == nil,
-                       !ChatModelChoice.efforts(for: model.harness).isEmpty {
-                        effortMenu
-                    }
-                    Spacer(minLength: 0)
-                    if let runningSession {
-                        ContextMeter(session: runningSession)
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    // Clears the send button.
+                    .padding(.trailing, 36)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minHeight: attached ? 42 : 64)
+                Group {
                     if let runningSession {
                         SendStopButton(
                             session: runningSession, sendDisabled: draftEmpty,
@@ -1686,39 +1896,84 @@ private struct ChatComposer: View {
                         SendGlyphButton(disabled: draftEmpty, action: send)
                     }
                 }
+                .padding(attached ? 9 : 10)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
-            // Bottom padding matches the side padding (12) so the controls
-            // sit evenly inset; the input height drops to compensate.
-            .padding(.bottom, 12)
-            // Frosted glass: the transcript scrolls behind the bar and
+            // Frosted glass: the transcript scrolls behind the card and
             // reads through the blur. The sidebarFill wash on top keeps
-            // the chips and text at full contrast (bare material washed
-            // them out over bright message text).
+            // the text at full contrast.
             .background(
                 ZStack {
-                    barShape.fill(.ultraThinMaterial)
-                    barShape.fill(Theme.sidebarFill.opacity(0.6))
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .fill(Theme.sidebarFill.opacity(0.6))
                 }
-                // On the background, not the bar — a whole-view shadow
-                // would shadow the input text and chips too.
                 .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 3)
             )
-            // A hairline catches the glass edge against whatever slides
-            // under it; the drop-target rose replaces it during a drag.
-            .overlay(
-                barShape
-                    .strokeBorder(
-                        dropTargeted ? Theme.link : Theme.text.opacity(0.09),
-                        lineWidth: dropTargeted ? 1.5 : 1
-                    )
+            // Borderless (2026-09-23 mock); only a drag-target ring.
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: cardRadius)
+                        .strokeBorder(Theme.link, lineWidth: 1.5)
+                }
+            }
+
+            // The picker pill, below-left of the card: attach + model +
+            // harness + effort (+ meter), on the recessed tile fill.
+            HStack(alignment: .center, spacing: 6) {
+                Button(action: attachImage) {
+                    LucideIcon("plus", size: 14)
+                        .foregroundStyle(Theme.text)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Attach an image (inserts its path)")
+                if projectChoices != nil { projectMenu }
+                modelMenu
+                harnessMenu
+                // Hidden for local models (the local server decides)
+                // and ACP harnesses (no effort flag — the menu would
+                // be empty).
+                if model.provider == nil,
+                   !ChatModelChoice.efforts(for: model.harness).isEmpty {
+                    effortMenu
+                }
+                if let runningSession {
+                    ContextMeter(session: runningSession)
+                }
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 30)
+            // 8px radius, not a capsule — same frosted fill as the
+            // input card above, not the recessed tile gray.
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Theme.sidebarFill.opacity(0.6))
+                }
             )
+            // Indented off the card's left edge (mock).
+            .padding(.leading, 12)
         }
         .onDrop(
             of: [.fileURL, .image, .plainText], isTargeted: $dropTargeted,
             perform: handleDrop
         )
+        // Draft persistence: restore on mount, mirror every edit into the
+        // in-memory store. Send clears `draft`, and the mirror removes
+        // the entry with it — so only genuinely unsent text survives.
+        .onAppear {
+            if draft.isEmpty, let key = draftKey,
+               let saved = ComposerDraftStore.texts[key] {
+                draft = saved
+            }
+        }
+        .onChange(of: draft) { _, text in
+            guard let key = draftKey else { return }
+            ComposerDraftStore.texts[key] = text.isEmpty ? nil : text
+        }
         // Capsule-view insert buttons route here; drags land via onDrop
         // instead.
         .onReceive(
@@ -1760,27 +2015,16 @@ private struct ChatComposer: View {
         .padding(.horizontal, 20)
         .frame(maxWidth: 800)
         .frame(maxWidth: .infinity)
-        .padding(.bottom, attached ? 0 : 12)
+        // The card floats now — it never docks flush, so the bottom
+        // margin holds in both contexts.
+        .padding(.bottom, 16)
         .padding(.top, 8)
         .onAppear { localModels.refresh() }
     }
 
-    /// Attached: docked to the window's bottom edge, rounded on top only
-    /// (a step up from radiusFloat), square where it meets the edge.
-    /// Floating (the new-chat sky): the original all-round radius.
-    private var barShape: UnevenRoundedRectangle {
-        attached
-            ? UnevenRoundedRectangle(
-                topLeadingRadius: 16, bottomLeadingRadius: 0,
-                bottomTrailingRadius: 0, topTrailingRadius: 16
-            )
-            : UnevenRoundedRectangle(
-                topLeadingRadius: Theme.radiusFloat,
-                bottomLeadingRadius: Theme.radiusFloat,
-                bottomTrailingRadius: Theme.radiusFloat,
-                topTrailingRadius: Theme.radiusFloat
-            )
-    }
+    /// The card's corner radius: 12 on a transcript's compact bar
+    /// (Figma 778:1713), 16 on the taller new-chat card.
+    private var cardRadius: CGFloat { attached ? 12 : 16 }
 
     // MARK: Control chips
 
@@ -1866,6 +2110,15 @@ private struct ChatComposer: View {
                     }
                 }
             }
+            Divider()
+            // Pulls models.json from the repo and overlays the Claude /
+            // OpenAI lists — how a new model arrives without an app
+            // update.
+            Button(modelCatalog.refreshing
+                ? "Refreshing model list…" : "Refresh Model List") {
+                modelCatalog.refresh()
+            }
+            .disabled(modelCatalog.refreshing)
         } label: {
             chip(model.label,
                  tint: activePermission == .full ? Theme.textWarning : nil)
@@ -2010,8 +2263,7 @@ private struct ChatComposer: View {
         var body: some View {
             if session.running {
                 Button(action: { session.interrupt() }) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 11, weight: .semibold))
+                    LucideIcon("square", size: 13)
                         .foregroundStyle(.white)
                         .frame(width: 32, height: 32)
                         .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.ctaFill))
@@ -2031,8 +2283,7 @@ private struct ChatComposer: View {
 
         var body: some View {
             Button(action: action) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 12, weight: .semibold))
+                LucideIcon("arrow-up", size: 14)
                     .foregroundStyle(.white)
                     .frame(width: 32, height: 32)
                     .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.ctaFill))
@@ -2048,8 +2299,7 @@ private struct ChatComposer: View {
         HStack(spacing: 3) {
             Text(text)
                 .font(.system(size: 13))
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 8, weight: .semibold))
+            LucideIcon("chevrons-up-down", size: 10)
         }
         .foregroundStyle(tint ?? Theme.text)
         .padding(.horizontal, 4)
@@ -2102,17 +2352,16 @@ private struct ChatComposer: View {
                 .onChange(of: ghostContext) { _, _ in refreshGhost(draft) }
                 .onAppear { refreshGhost(draft) }
         }
-        // A text AREA, not a field: the line sits at the top of a 64px
-        // well with open space under it (more lines grow it further, to
-        // 10). The whole well is the click target for focus. No
-        // horizontal inset — the text's left edge lines up with the +
-        // circle below it.
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        // Transcript bar: a single centered line (the card's 42px
+        // minHeight sets the resting height); more lines grow it, to 10.
+        // New-chat card: a text AREA — the line sits at the top of the
+        // well with open space under it. The whole well is the click
+        // target for focus. No horizontal inset — the text's left edge
+        // lines up with the + circle below it.
+        .padding(.top, attached ? 0 : 10)
+        .padding(.bottom, attached ? 0 : 8)
         .padding(.horizontal, 2)
-        // Shortened to offset the extra bottom padding added under the
-        // controls, so the bar's overall height holds.
-        .frame(minHeight: 58, alignment: .topLeading)
+        .frame(minHeight: attached ? nil : 58, alignment: .topLeading)
         .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
         .onTapGesture { inputFocused = true }
         // The whole well is a text target — cursor says so. NOT an
@@ -2276,8 +2525,7 @@ private struct ChatComposer: View {
                         Button {
                             attachments.removeAll { $0 == url }
                         } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12))
+                            LucideIcon("circle-x", size: 14)
                                 .foregroundStyle(.white, .black.opacity(0.6))
                         }
                         .buttonStyle(.plain)
@@ -2677,11 +2925,9 @@ struct MessageView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .semibold))
+                        LucideIcon("chevron-right", size: 10)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
-                        Image(systemName: "wrench.and.screwdriver")
-                            .font(.system(size: 10, weight: .medium))
+                        LucideIcon("wrench", size: 12)
                         Text("\(run.count) steps")
                             .font(Theme.Fonts.mono)
                     }
@@ -2704,8 +2950,7 @@ struct MessageView: View {
 
     private func toolChip(_ tool: (name: String, detail: String)) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "wrench.and.screwdriver")
-                .font(.system(size: 10, weight: .medium))
+            LucideIcon("wrench", size: 12)
             Text(tool.detail.isEmpty ? tool.name : "\(tool.name) · \(tool.detail)")
                 .font(Theme.Fonts.mono)
                 .lineLimit(1)
@@ -2813,8 +3058,7 @@ private struct ThreadableBlock<Content: View>: View {
                         Button {
                             onOpen(anchor)
                         } label: {
-                            Image(systemName: "arrowshape.turn.up.left")
-                                .font(.system(size: 10, weight: .medium))
+                            LucideIcon("reply", size: 12)
                                 .foregroundStyle(Theme.textSecondary)
                                 .frame(width: 22, height: 22)
                                 .background(
@@ -2855,8 +3099,7 @@ private struct ThreadableBlock<Content: View>: View {
             onOpen(thread.anchor)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "text.bubble")
-                    .font(.system(size: 9, weight: .medium))
+                LucideIcon("message-square-text", size: 11)
                 if threads.count > 1 {
                     Text("\u{201C}\(String(thread.anchor.prefix(22)))…\u{201D}")
                         .font(.system(size: 11))
@@ -2911,8 +3154,7 @@ private struct ChatImageBlock: View {
                 .help((path as NSString).abbreviatingWithTildeInPath)
         } else {
             HStack(spacing: 5) {
-                Image(systemName: "photo")
-                    .font(.system(size: 10, weight: .medium))
+                LucideIcon("image", size: 12)
                 Text((path as NSString).lastPathComponent)
                     .font(Theme.Fonts.bodyMedium)
                     .lineLimit(1)
@@ -2944,15 +3186,13 @@ struct CapsuleChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "capsule")
-                .font(.system(size: 10, weight: .medium))
+            LucideIcon("pill", size: 12)
             Text(title)
                 .font(Theme.Fonts.bodyMedium)
                 .lineLimit(1)
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .semibold))
+                    LucideIcon("x", size: 10)
                         .opacity(0.7)
                 }
                 .buttonStyle(.plain)
@@ -2994,15 +3234,13 @@ struct FragmentChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "text.quote")
-                .font(.system(size: 10, weight: .medium))
+            LucideIcon("text-quote", size: 12)
             Text(title)
                 .font(Theme.Fonts.bodyMedium)
                 .lineLimit(1)
             if let onRemove {
                 Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .semibold))
+                    LucideIcon("x", size: 10)
                         .opacity(0.7)
                 }
                 .buttonStyle(.plain)
@@ -3174,6 +3412,11 @@ private struct MarkdownBlockView: View {
             .foregroundStyle(color)
             .tint(accent ? color : Theme.link)
             .textSelection(.enabled)
+            // Chat prose NEVER truncates: nil overrides any lineLimit
+            // inherited through the environment, and the vertical
+            // fixedSize claims full height even under a tight proposal.
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
             // User bubbles (accent) hug their text; assistant prose fills
             // the column.
             .frame(maxWidth: accent ? nil : .infinity, alignment: .leading)
@@ -3281,8 +3524,7 @@ private struct LinkCard: View {
             NSWorkspace.shared.open(url)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: "globe")
-                    .font(.system(size: 13, weight: .medium))
+                LucideIcon("globe", size: 15)
                     .foregroundStyle(Theme.link)
                     .frame(width: 28, height: 28)
                     .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.rowHovered))
@@ -3297,8 +3539,7 @@ private struct LinkCard: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10, weight: .semibold))
+                LucideIcon("arrow-up-right", size: 12)
                     .foregroundStyle(Theme.textSecondary)
             }
             .padding(8)

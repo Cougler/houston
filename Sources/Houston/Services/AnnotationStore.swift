@@ -129,6 +129,21 @@ final class AnnotationStore: ObservableObject {
         }
     }
 
+    /// Move one task to another project's list — the raw dict travels
+    /// verbatim, so fields this build doesn't know survive the hop.
+    func move(_ id: String, to target: AnnotationStore) {
+        guard target.projectPath != projectPath else { return }
+        var moved: [String: Any]?
+        mutateRaw { dicts in
+            if let index = dicts.firstIndex(
+                where: { $0["id"] as? String == id }) {
+                moved = dicts.remove(at: index)
+            }
+        }
+        guard let moved else { return }
+        target.mutateRaw { $0.append(moved) }
+    }
+
     private func setFlag(_ id: String, key: String, to value: Bool) {
         mutateRaw { dicts in
             for index in dicts.indices where dicts[index]["id"] as? String == id {

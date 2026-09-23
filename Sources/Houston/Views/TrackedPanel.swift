@@ -8,6 +8,9 @@ import SwiftUI
 /// (done / postpone / untrack) replacing the countdown pill on hover.
 struct TrackedPanel: View {
     @ObservedObject var store: TrackedStore
+    /// The tasks menu's Reminders page: no sort/filter pills, no /track
+    /// hint — just the cards and the add affordance.
+    var compact = false
 
     enum SortKey: String, CaseIterable {
         case due, title, project
@@ -35,7 +38,7 @@ struct TrackedPanel: View {
         let upcoming = arranged(store.active.filter { !store.needsAttention($0) })
         let done = arranged(store.doneItems)
         return VStack(alignment: .leading, spacing: 8) {
-            if !store.items.isEmpty {
+            if !store.items.isEmpty, !compact {
                 controls
             }
             ScrollView(showsIndicators: false) {
@@ -83,7 +86,9 @@ struct TrackedPanel: View {
             } else {
                 addButton
             }
-            skillHint
+            if !compact {
+                skillHint
+            }
             Spacer(minLength: 0)
         }
         .padding(.top, 2)
@@ -151,7 +156,7 @@ struct TrackedPanel: View {
                 .labelsHidden()
             } label: {
                 controlPill(
-                    icon: "arrow.up.arrow.down",
+                    icon: "arrow-up-down",
                     text: sort == .due ? "Due date"
                         : sort == .title ? "Title" : "Project"
                 )
@@ -173,7 +178,7 @@ struct TrackedPanel: View {
                     .labelsHidden()
                 } label: {
                     controlPill(
-                        icon: "line.3.horizontal.decrease",
+                        icon: "list-filter",
                         text: filterProject ?? "All projects"
                     )
                 }
@@ -189,8 +194,7 @@ struct TrackedPanel: View {
 
     private func controlPill(icon: String, text: String) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 8.5, weight: .semibold))
+            LucideIcon(icon, size: 10.5)
             Text(text)
                 .font(.system(size: 10.5, weight: .medium))
         }
@@ -247,8 +251,7 @@ struct TrackedPanel: View {
             withAnimation(Theme.quick) { adding = true }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "plus")
-                    .font(.system(size: 10, weight: .semibold))
+                LucideIcon("plus", size: 12)
                 Text("Track something")
                     .font(.system(size: 11.5, weight: .medium))
             }
@@ -330,14 +333,12 @@ struct TrackedPanel: View {
             Button("1 month before") { newLeadDays = 30 }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "bell")
-                    .font(.system(size: 9, weight: .medium))
+                LucideIcon("bell", size: 11)
                     .foregroundStyle(Theme.textSecondary)
                 Text("Remind \(leadLabel) before")
                     .font(Theme.Fonts.secondaryMedium)
                     .foregroundStyle(Theme.text)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 7, weight: .semibold))
+                LucideIcon("chevrons-up-down", size: 9)
                     .foregroundStyle(Theme.textSecondary)
             }
             .padding(.horizontal, 10)
@@ -454,7 +455,7 @@ private struct TrackedCard: View {
     private var actions: some View {
         HStack(spacing: 4) {
             ControlIconButton(
-                systemName: "checkmark", help: "Mark done", action: onDone
+                icon: "check", help: "Mark done", action: onDone
             )
             Menu {
                 Button("1 week") { onPostpone(0, 7) }
@@ -463,8 +464,7 @@ private struct TrackedCard: View {
                 Button("6 months") { onPostpone(6, 0) }
                 Button("1 year") { onPostpone(12, 0) }
             } label: {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 9, weight: .semibold))
+                LucideIcon("history", size: 11)
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 20, height: 20)
                     .background(
@@ -479,7 +479,7 @@ private struct TrackedCard: View {
             .fixedSize()
             .help("Postpone")
             ControlIconButton(
-                systemName: "xmark", help: "Untrack", action: onRemove
+                icon: "x", help: "Untrack", action: onRemove
             )
         }
     }
@@ -503,8 +503,8 @@ private struct CalendarGrid: View {
                     .foregroundStyle(Theme.text)
                 yearMenu
                 Spacer(minLength: 8)
-                chevron("chevron.left") { step(-1) }
-                chevron("chevron.right") { step(1) }
+                chevron("chevron-left") { step(-1) }
+                chevron("chevron-right") { step(1) }
             }
             LazyVGrid(
                 columns: Array(
@@ -547,8 +547,7 @@ private struct CalendarGrid: View {
                 Text(String(calendar.component(.year, from: month)))
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(Theme.textSecondary)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 6.5, weight: .semibold))
+                LucideIcon("chevrons-up-down", size: 8.5)
                     .foregroundStyle(Theme.textSecondary)
             }
             .contentShape(Rectangle())
@@ -611,8 +610,7 @@ private struct CalendarGrid: View {
 
     private func chevron(_ name: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: 9, weight: .semibold))
+            LucideIcon(name, size: 11)
                 .foregroundStyle(Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(
@@ -721,12 +719,12 @@ private struct TrackedDoneCard: View {
             Spacer(minLength: 4)
             if hovered {
                 ControlIconButton(
-                    systemName: "arrow.uturn.backward",
+                    icon: "undo-2",
                     help: "Restore",
                     action: onRestore
                 )
                 ControlIconButton(
-                    systemName: "trash", help: "Delete", action: onRemove
+                    icon: "trash-2", help: "Delete", action: onRemove
                 )
             }
         }
@@ -763,7 +761,7 @@ struct QuietCardButton<Label: View>: View {
 
 /// Small square icon control on a row or card.
 struct ControlIconButton: View {
-    let systemName: String
+    let icon: String
     let help: String
     /// No resting chrome — the glyph sits bare, hover still fills.
     var bare = false
@@ -779,10 +777,7 @@ struct ControlIconButton: View {
             // two can never drift apart.
             ZStack {
                 chrome
-                // 12pt, not 11: an odd-sized glyph centered in an even
-                // frame straddles the pixel grid and reads off-center.
-                Image(systemName: systemName)
-                    .font(.system(size: circleSize == nil ? 9 : 12, weight: .semibold))
+                LucideIcon(icon, size: circleSize == nil ? 11 : 14)
                     .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
             }
             .frame(width: circleSize ?? 20, height: circleSize ?? 20)

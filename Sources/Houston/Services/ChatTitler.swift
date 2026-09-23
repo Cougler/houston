@@ -211,3 +211,83 @@ final class ChatTitler: ObservableObject {
     private static func generate(_ snippet: String) async -> String? { nil }
     #endif
 }
+
+/// One-line on-device previews for the chat's jump dots: hover a dot,
+/// see what that part of the conversation is about before jumping.
+/// Cached per message id for the app's lifetime; the raw user text
+/// stands in until the model answers (and forever without the model).
+@MainActor
+final class ChatDotPreviewer: ObservableObject {
+    static let shared = ChatDotPreviewer()
+
+    @Published private(set) var generated: [String: String] = [:]
+    private var pending = Set<String>()
+
+    /// The preview to show right now — generated if ready, the raw text
+    /// otherwise — kicking off a generation on first ask.
+    func text(for id: String, source: String) -> String {
+        if let ready = generated[id] { return ready }
+        request(id: id, source: source)
+        // Fallback: the user's own words, role marker stripped.
+        let flat = source
+            .replacingOccurrences(of: "User: ", with: "")
+            .split(separator: "\n").first.map(String.init) ?? source
+        return String(flat.trimmingCharacters(in: .whitespacesAndNewlines).prefix(90))
+    }
+
+    private func request(id: String, source: String) {
+        guard !pending.contains(id) else { return }
+        guard #available(macOS 26.0, *) else { return }
+        pending.insert(id)
+        Task {
+            if let text = await Self.generate(source) {
+                generated[id] = text
+            }
+            // A failed generation stays pending — no retry loop while
+            // the pointer sits on the dot.
+        }
+    }
+
+    #if canImport(FoundationModels)
+    @available(macOS 26.0, *)
+    private static func generate(_ source: String) async -> String? {
+        guard SystemLanguageModel.default.availability == .available
+        else { return nil }
+        let session = LanguageModelSession(instructions: """
+        You write a tiny index label for one exchange in a coding \
+        conversation, so the user can spot it while scrubbing through \
+        the chat. Reply with ONLY the label: a specific noun phrase, \
+        3-6 words, capturing the exchange's SUBJECT — the feature, bug, \
+        file, or decision — not the fact that it was discussed. \
+        Sentence case, no quotes, no trailing period. Never start with \
+        "User", "The user", "Discussion", "Conversation", "Question", \
+        "Request", or "Asking". Good labels: "Fixing the composer drop \
+        crash", "Server popover redesign", "Context rollover threshold", \
+        "Why chat felt slower than terminal".
+        """)
+        guard let response = try? await session.respond(to: source)
+        else { return nil }
+        var text = response.content
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'`.,: "))
+        // Belt and suspenders on the banned openers — the small model
+        // slips sometimes, and a meta label is worse than raw text.
+        for banned in ["the user ", "user ", "discussion of ", "question about ",
+                       "conversation about ", "asking about ", "request to "] {
+            if text.lowercased().hasPrefix(banned) {
+                text = String(text.dropFirst(banned.count))
+            }
+        }
+        guard !text.isEmpty, text.count <= 60,
+              !text.lowercased().contains("exchange"),
+              !text.lowercased().contains("label")
+        else { return nil }
+        return text.prefix(1).uppercased() + text.dropFirst()
+    }
+    #else
+    @available(macOS 26.0, *)
+    private static func generate(_ source: String) async -> String? { nil }
+    #endif
+}

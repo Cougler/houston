@@ -145,7 +145,7 @@ struct GitPanel: View {
                             if branch != info.branchLabel { onSwitchBranch(branch) }
                         } label: {
                             if branch == info.branchLabel {
-                                Label(branch, systemImage: "checkmark")
+                                Label { Text(branch) } icon: { LucideIcon("check") }
                             } else {
                                 Text(branch)
                             }
@@ -159,14 +159,12 @@ struct GitPanel: View {
                     // long one can't force the 320pt card wider (the menu
                     // control sizes to its label's ideal width).
                     HStack(spacing: 6) {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 11, weight: .semibold))
+                        LucideIcon("git-branch", size: 13)
                             .foregroundStyle(Theme.heading)
                         Text("Branch")
                             .font(Theme.Fonts.title)
                             .foregroundStyle(Theme.text)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
+                        LucideIcon("chevron-down", size: 10)
                             .foregroundStyle(Theme.heading)
                     }
                     .contentShape(Rectangle())
@@ -177,7 +175,7 @@ struct GitPanel: View {
                 .fixedSize()
                 .help("Switch or create a branch")
                 Spacer(minLength: 0)
-                HoverArrowButton(icon: "terminal", help: "Git commands") {
+                HoverArrowButton(icon: "square-terminal", help: "Git commands") {
                     withAnimation(.easeOut(duration: 0.18)) { page = .commands }
                 }
                 if let remote = info.remoteURL {
@@ -245,8 +243,7 @@ struct GitPanel: View {
     private var notARepo: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 11, weight: .semibold))
+                LucideIcon("git-branch", size: 13)
                     .foregroundStyle(Theme.heading)
                 Text("Not under version control")
                     .font(Theme.Fonts.title)
@@ -276,8 +273,7 @@ private struct CommitDetailPage: View {
             HStack(spacing: 6) {
                 Button(action: onBack) {
                     HStack(spacing: 3) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
+                        LucideIcon("chevron-left", size: 12)
                         Text("Back")
                             .font(Theme.Fonts.secondaryMedium)
                     }
@@ -430,8 +426,7 @@ private struct GitCommandsPage: View {
             HStack(spacing: 6) {
                 Button(action: onBack) {
                     HStack(spacing: 3) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
+                        LucideIcon("chevron-left", size: 12)
                         Text("Back")
                             .font(Theme.Fonts.secondaryMedium)
                     }
@@ -498,8 +493,7 @@ private struct CommandRow: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: spec.typeOnly ? "keyboard" : "return")
-                    .font(.system(size: 9, weight: .semibold))
+                LucideIcon(spec.typeOnly ? "keyboard" : "corner-down-left", size: 11)
                     .foregroundStyle(Theme.heading.opacity(hovered ? 1 : 0.4))
             }
             .padding(.horizontal, 6)
@@ -583,8 +577,7 @@ private struct ChangeRow: View {
                 Text(kindWord(change.kind))
                     .font(Theme.Fonts.meta)
                     .foregroundStyle(Theme.textSecondary)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
+                LucideIcon("chevron-right", size: 10)
                     .foregroundStyle(Theme.heading.opacity(hovered ? 1 : 0.4))
             }
             .padding(.horizontal, 6)
@@ -619,8 +612,7 @@ private struct FileDiffPage: View {
             HStack(spacing: 6) {
                 Button(action: onBack) {
                     HStack(spacing: 3) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
+                        LucideIcon("chevron-left", size: 12)
                         Text("Back")
                             .font(Theme.Fonts.secondaryMedium)
                     }
@@ -696,8 +688,7 @@ private struct CommitFileRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "doc")
-                .font(.system(size: 11))
+            LucideIcon("file", size: 13)
                 .foregroundStyle(Theme.textSecondary)
             Text(file.fileName)
                 .font(Theme.Fonts.body)
@@ -751,8 +742,7 @@ private struct CommitRow: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 4)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
+                LucideIcon("chevron-right", size: 10)
                     .foregroundStyle(Theme.heading.opacity(hovered ? 1 : 0.4))
             }
             .padding(.horizontal, 6)
@@ -769,15 +759,14 @@ private struct CommitRow: View {
 }
 
 private struct HoverArrowButton: View {
-    var icon: String = "arrow.up.forward"
+    var icon: String = "arrow-up-right"
     let help: String
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
+            LucideIcon(icon, size: 12)
                 .foregroundStyle(hovered ? Theme.text : Theme.heading)
                 .frame(width: 20, height: 20)
                 .contentShape(Rectangle())

@@ -1396,7 +1396,6 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     }
 
     private func endTurn(error: String?) {
-        let wasInterrupting = interrupting
         running = false
         interrupting = false
         approval = nil
@@ -1408,12 +1407,26 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         // The transcript now holds the finished exchange — put it in the
         // sidebar immediately, even when no chat view is mounted.
         ChatIndexStore.shared.refresh(projectPath, force: true)
-        // Only a cleanly finished turn auto-fires the next held message.
-        // Stop means "halt, await me" (the queue holds, visibly, until
-        // the user's next send resumes it), and an errored turn must not
-        // launch messages into the failed state — or wipe the error the
-        // user hasn't seen yet.
-        if error == nil, !wasInterrupting {
+        // A finished OR stopped turn fires the next held message
+        // (2026-09-21: Stop with a queue means "skip to what's waiting",
+        // not "halt everything" — an empty queue still just halts). Only
+        // an errored turn holds, so messages don't launch into the
+        // failed state — or wipe the error the user hasn't seen yet.
+        if error == nil {
+            drainQueue()
+        }
+    }
+
+    /// The queued bubble's ⬆ — run this held message NOW: it jumps to
+    /// the front, and a running turn is interrupted (its end drains the
+    /// queue, which now leads with this message).
+    func sendQueuedNow(_ id: UUID) {
+        guard let index = queued.firstIndex(where: { $0.id == id }) else { return }
+        let item = queued.remove(at: index)
+        queued.insert(item, at: 0)
+        if running {
+            interrupt()
+        } else {
             drainQueue()
         }
     }

@@ -49,20 +49,48 @@ final class ThinScroller: NSScroller {
     }
 }
 
+/// No scroller at all — for scroll views whose position is shown some
+/// other way (the chat transcript's jump-dot rail). Scrolling itself is
+/// untouched; only the indicator goes.
+final class HiddenScroller: NSScroller {
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+    override class func scrollerWidth(
+        for controlSize: NSControl.ControlSize, scrollerStyle: NSScroller.Style
+    ) -> CGFloat { 0 }
+
+    override func draw(_ dirtyRect: NSRect) {}
+    override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {}
+    override func drawKnob() {}
+}
+
 extension View {
     /// Replaces the enclosing scroll view's vertical scroller with
     /// `ThinScroller`. Attach to the ScrollView's *content* — the
     /// installer resolves the scroll view via `enclosingScrollView`.
     func thinScrollbar() -> some View {
-        background(ThinScrollerInstaller())
+        background(ScrollerInstaller(hidden: false))
+    }
+
+    /// Removes the enclosing scroll view's vertical scroller entirely.
+    func hiddenScrollbar() -> some View {
+        background(ScrollerInstaller(hidden: true))
     }
 }
 
-private struct ThinScrollerInstaller: NSViewRepresentable {
-    func makeNSView(context: Context) -> InstallerView { InstallerView() }
+private struct ScrollerInstaller: NSViewRepresentable {
+    let hidden: Bool
+
+    func makeNSView(context: Context) -> InstallerView {
+        let view = InstallerView()
+        view.wantsHiddenScroller = hidden
+        return view
+    }
     func updateNSView(_ view: InstallerView, context: Context) {}
 
     final class InstallerView: NSView {
+        var wantsHiddenScroller = false
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             // The enclosing scroll view isn't wired up until after this
@@ -71,9 +99,14 @@ private struct ThinScrollerInstaller: NSViewRepresentable {
         }
 
         private func install() {
-            guard let scroll = enclosingScrollView,
-                  !(scroll.verticalScroller is ThinScroller) else { return }
-            scroll.verticalScroller = ThinScroller()
+            guard let scroll = enclosingScrollView else { return }
+            if wantsHiddenScroller {
+                guard !(scroll.verticalScroller is HiddenScroller) else { return }
+                scroll.verticalScroller = HiddenScroller()
+            } else {
+                guard !(scroll.verticalScroller is ThinScroller) else { return }
+                scroll.verticalScroller = ThinScroller()
+            }
         }
     }
 }
