@@ -352,6 +352,18 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   ShareProxy treats `.waiting` as down (server died since the lsof scan) and
   serves its offline page instead of hanging the request.
 
+- **The chat must render THINKING, not just text (2026-09-24).** On an
+  open-ended build prompt at high/xhigh, Opus 5.5 and Fable 5.1 think for
+  minutes right after the first tool result (measured: 10k+ tokens, still
+  going at two minutes; a terminal session did the same). The terminal
+  shows "Thinking… 7.8k tokens" climbing; the chat handled only
+  `text_delta` and showed a bare "Working…", which read as a hang — the
+  user interrupted three times and filed it as "Houston is choking".
+  `ChatAgentSession.thinkingTokens` now tracks the CLI's
+  `system/thinking_tokens` estimate (0 on `content_block_start` of a
+  thinking block, nil when a text/tool block opens or the turn ends) and
+  `LiveTurnView` shows it. Any new stream state the terminal displays
+  during a turn belongs in the live turn too; "Working…" alone is a bug.
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
   anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
   allowlist of the *small*-window models (`smallWindowPatterns`: Haiku, Opus

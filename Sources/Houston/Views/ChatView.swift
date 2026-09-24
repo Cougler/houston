@@ -616,8 +616,8 @@ struct ChatBrowserView: View {
                     .onDisappear { removeContextMonitor() }
                 }
             } else {
-                ProgressView()
-                    .controlSize(.small)
+                LiquidThinkingView()
+                    .frame(width: 96, height: 96)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 transcriptComposer(ref)
             }
@@ -1465,12 +1465,31 @@ private struct LiveTurnView: View {
             }
             if session.running {
                 // Stop lives in the composer (the send button's slot).
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Working…")
-                        .font(Theme.Fonts.body)
-                        .foregroundStyle(Theme.textSecondary)
+                // The liquid-chrome blob is THE activity indicator — no
+                // spinner anywhere in a turn. Thinking adds the CLI's live
+                // token estimate (the terminal's "Thinking… 7.8k tokens");
+                // a long think used to read as a hang here.
+                HStack(spacing: 10) {
+                    LiquidThinkingView()
+                        .frame(width: 56, height: 56)
+                        .accessibilityHidden(true)
+                    Group {
+                        if let tokens = session.thinkingTokens {
+                            Text(tokens > 0
+                                ? "Thinking… \(formatTokens(tokens)) tokens"
+                                : "Thinking…")
+                        } else {
+                            Text("Working…")
+                        }
+                    }
+                    .font(Theme.Fonts.body)
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
                 }
+                // Pull the blob's internal breathing room back so it sits
+                // on the row's leading edge like the spinner did.
+                .padding(.leading, -12)
             }
             // Held messages: sent while the turn was running, waiting their
             // turn (like the terminal's queued line). Dimmed, with a clock

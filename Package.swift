@@ -24,6 +24,7 @@ let package = Package(
                 .copy("Resources/icons"),
                 .copy("Resources/skills"),
                 .copy("Resources/inspect.js"),
+                .copy("Resources/liquid-thinking.html"),
             ]
         )
     ]

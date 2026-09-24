@@ -1,0 +1,138 @@
+<!doctype html>
+<!--
+Liquid thinking — the chat's "Thinking…" indicator, hosted in a transparent
+WKWebView by LiquidThinkingView (Views/LiquidThinkingView.swift). The
+component is the REUSABLE COMPONENT script from ~/Documents/liquid-thinking.html
+(a WebGL raymarched chrome blob; CSS iridescent fallback when WebGL is
+unavailable), trimmed of its demo page. The element fills the square view
+(--blob-size: 100vmin) and hides its own label — the token count is drawn
+by SwiftUI beside it. It pauses itself when the document is hidden and
+honors prefers-reduced-motion.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;background:transparent;overflow:hidden;width:100%;height:100%}
+body{display:grid;place-items:center}
+liquid-thinking{--blob-size:100vmin}
+</style>
+</head>
+<body>
+<liquid-thinking label=""></liquid-thinking>
+<script>
+(()=>{
+'use strict';
+if(customElements.get('liquid-thinking'))return;
+const vertex=`attribute vec2 position;void main(){gl_Position=vec4(position,0.,1.);}`;
+const fragment=`precision highp float;
+uniform vec2 resolution;uniform float time;uniform vec2 pointer;uniform float pulse;
+float shape(vec3 p){
+ float t=time*.64;
+ float ripple=sin(p.y*11.+p.x*7.-time*7.)*pulse*.028;
+ float wobble=sin(p.x*3.1+t)*sin(p.y*2.7-t*.8)*sin(p.z*2.9+t*.6);
+ return length(p)-(.88+.13*wobble+.045*sin(p.y*4.+p.x*2.+t*1.5)+ripple);
+}
+vec3 environment(vec3 r){
+ float t=time*.10;
+ float hue=r.x*.48+r.y*.34+r.z*.29+t;
+ vec3 spectrum=.5+.5*cos(6.28318*(hue+vec3(.02,.35,.67)));
+ vec3 col=mix(vec3(.17,.19,.27),spectrum,.75);
+ float bands=.5+.5*sin(r.y*9.+r.x*3.+sin(r.z*4.+t)*1.5);
+ col*=.22+1.1*pow(bands,2.);
+ float box1=pow(max(0.,dot(r,normalize(vec3(-.5,.8,1.)))),32.);
+ float box2=pow(max(0.,dot(r,normalize(vec3(.9,.1,.6)))),60.);
+ float strip=exp(-pow((r.y+.24+r.x*.23)*24.,2.))*.6;
+ return col+vec3(.9,.96,1.)*(box1*2.7+box2*1.7+strip);
+}
+void main(){
+ vec2 uv=(gl_FragCoord.xy*2.-resolution)/min(resolution.x,resolution.y);
+ vec3 ro=vec3(0.,0.,3.5);vec3 rd=normalize(vec3(uv*1.45,-3.5));
+ vec3 shift=vec3(pointer*.09,0.);
+ float travel=1.9;vec3 p;float d=1.;
+ for(int i=0;i<56;i++){p=ro+rd*travel-shift;d=shape(p);if(d<.0015||travel>5.)break;travel+=d*.75;}
+ if(travel>5.||d>.006){gl_FragColor=vec4(0.);return;}
+ vec2 e=vec2(.002,0.);
+ vec3 n=normalize(vec3(shape(p+e.xyy)-shape(p-e.xyy),shape(p+e.yxy)-shape(p-e.yxy),shape(p+e.yyx)-shape(p-e.yyx)));
+ vec3 v=-rd;vec3 r=reflect(rd,n);r.xy+=pointer*.21;r=normalize(r);
+ vec3 color=environment(r);
+ float fresnel=pow(1.-max(dot(n,v),0.),3.);
+ color+=vec3(.35,.48,.65)*fresnel*.6;
+ color*=.7+.3*smoothstep(-1.,1.,p.y);
+ color=color/(color+vec3(.72));color=pow(color,vec3(.88));
+ gl_FragColor=vec4(color,1.);
+}`;
+class LiquidThinking extends HTMLElement{
+ static get observedAttributes(){return ['paused','label'];}
+ constructor(){
+  super();this.attachShadow({mode:'open'});
+  this.shadowRoot.innerHTML=`<style>
+  :host{display:inline-flex;flex-direction:column;align-items:center;width:var(--blob-size,240px);color:var(--label-color,inherit);vertical-align:middle}
+  button{position:relative;display:block;width:100%;aspect-ratio:1;border:0;padding:0;background:transparent;color:inherit;cursor:default;-webkit-tap-highlight-color:transparent}
+  button:focus-visible{outline:none}
+  canvas{display:block;width:100%;height:100%;position:relative;z-index:1}
+  .fallback{position:absolute;inset:19%;border-radius:43% 57% 58% 42% / 48% 38% 62% 52%;background:radial-gradient(ellipse at 28% 20%,#fff 0%,#ffffff00 24%),conic-gradient(from 30deg,#202a4b,#91e9df,#7e7fdc,#ecb8e5,#29313e,#a8f1de,#ecd0aa,#202a4b);box-shadow:inset 8px 8px 15px #ffffff60,inset -12px -15px 18px #130c3266;animation:flow 5s ease-in-out infinite alternate}
+  .fallback[hidden]{display:none}.still .fallback{animation-play-state:paused}
+  @keyframes flow{to{border-radius:60% 40% 43% 57% / 39% 58% 42% 61%;transform:rotate(13deg) scale(.95,1.04)}}
+  .label{font:500 12px/1.5 system-ui,sans-serif;letter-spacing:.12em;margin-top:-7px;padding-bottom:8px}
+  .label:empty{display:none}
+  .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  @media(prefers-reduced-motion:reduce){.fallback{animation:none}}
+  </style><button type="button" tabindex="-1" aria-label="Thinking"><span class="fallback" hidden></span><canvas aria-hidden="true"></canvas></button><span class="label" aria-hidden="true"></span><span class="sr" role="status" aria-live="polite"></span>`;
+  this.canvas=this.shadowRoot.querySelector('canvas');this.button=this.shadowRoot.querySelector('button');this.fallback=this.shadowRoot.querySelector('.fallback');
+  this.target=[0,0];this.pointer=[0,0];this.elapsed=0;this.pulse=0;this.visible=true;this.frame=0;
+ }
+ connectedCallback(){
+  this.abort=new AbortController();const options={signal:this.abort.signal};
+  this.motion=matchMedia('(prefers-reduced-motion: reduce)');
+  this.motion.addEventListener('change',()=>this.schedule(),options);
+  document.addEventListener('visibilitychange',()=>this.schedule(),options);
+  this.button.addEventListener('pointermove',event=>{const r=this.button.getBoundingClientRect();this.target=[(event.clientX-r.left)/r.width*2-1,1-(event.clientY-r.top)/r.height*2];},options);
+  this.button.addEventListener('pointerleave',()=>{this.target=[0,0];},options);
+  this.button.addEventListener('click',()=>{if(!this.motion.matches&&!this.hasAttribute('paused'))this.pulse=1;},options);
+  this.canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();this.gl=null;this.fallback.hidden=false;this.schedule();},options);
+  this.canvas.addEventListener('webglcontextrestored',()=>{this.setup();this.resize();this.schedule();},options);
+  this.resizeObserver=new ResizeObserver(()=>{this.resize();this.schedule();});this.resizeObserver.observe(this);
+  this.intersectionObserver=new IntersectionObserver(entries=>{this.visible=entries[0].isIntersecting;this.schedule();});this.intersectionObserver.observe(this);
+  this.setup();this.resize();this.updateLabel();this.schedule();
+ }
+ disconnectedCallback(){
+  cancelAnimationFrame(this.frame);this.frame=0;this.abort.abort();this.resizeObserver.disconnect();this.intersectionObserver.disconnect();
+  if(this.gl){this.gl.deleteBuffer(this.buffer);this.gl.deleteProgram(this.program);}this.gl=null;
+ }
+ attributeChangedCallback(name){if(name==='label')this.updateLabel();else if(this.isConnected)this.schedule();}
+ updateLabel(){const label=this.getAttribute('label')??'Thinking';this.shadowRoot.querySelector('.label').textContent=label;this.shadowRoot.querySelector('.sr').textContent=label||'AI is thinking';}
+ setup(){
+  try{
+   const gl=this.canvas.getContext('webgl',{alpha:true,antialias:true,premultipliedAlpha:false,depth:false,powerPreference:'low-power'});if(!gl)throw Error('WebGL unavailable');
+   this.gl=gl;
+   const compile=(type,source)=>{const shader=gl.createShader(type);gl.shaderSource(shader,source);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){const message=gl.getShaderInfoLog(shader);gl.deleteShader(shader);throw Error(message);}return shader;};
+   const vs=compile(gl.VERTEX_SHADER,vertex),fs=compile(gl.FRAGMENT_SHADER,fragment);
+   this.program=gl.createProgram();gl.attachShader(this.program,vs);gl.attachShader(this.program,fs);gl.linkProgram(this.program);gl.deleteShader(vs);gl.deleteShader(fs);
+   if(!gl.getProgramParameter(this.program,gl.LINK_STATUS))throw Error('Shader link failed');gl.useProgram(this.program);
+   this.buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this.buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+   const location=gl.getAttribLocation(this.program,'position');gl.enableVertexAttribArray(location);gl.vertexAttribPointer(location,2,gl.FLOAT,false,0,0);
+   this.uniforms={};for(const name of ['resolution','time','pointer','pulse'])this.uniforms[name]=gl.getUniformLocation(this.program,name);
+   this.fallback.hidden=true;this.canvas.hidden=false;
+  }catch(error){if(this.gl){if(this.buffer)this.gl.deleteBuffer(this.buffer);if(this.program)this.gl.deleteProgram(this.program);}this.gl=null;this.fallback.hidden=false;this.canvas.hidden=true;}
+ }
+ resize(){const size=Math.max(1,Math.min(480,Math.round(this.getBoundingClientRect().width*Math.min(devicePixelRatio||1,2))));if(this.canvas.width!==size||this.canvas.height!==size){this.canvas.width=size;this.canvas.height=size;}}
+ schedule(){
+  cancelAnimationFrame(this.frame);this.frame=0;
+  if(!this.isConnected)return;
+  const still=this.hasAttribute('paused')||this.motion.matches||document.hidden||!this.visible;
+  this.button.classList.toggle('still',still);this.draw();
+  if(!still&&this.gl){this.last=performance.now();this.frame=requestAnimationFrame(now=>this.tick(now));}
+ }
+ tick(now){
+  const dt=Math.min((now-this.last)/1000,.05);this.last=now;this.elapsed+=dt;
+  const ease=1-Math.exp(-dt*5);for(let i=0;i<2;i++)this.pointer[i]+=(this.target[i]-this.pointer[i])*ease;
+  this.pulse*=Math.exp(-dt*2.6);this.draw();this.frame=requestAnimationFrame(t=>this.tick(t));
+ }
+ draw(){const gl=this.gl;if(!gl)return;gl.viewport(0,0,this.canvas.width,this.canvas.height);gl.useProgram(this.program);gl.uniform2f(this.uniforms.resolution,this.canvas.width,this.canvas.height);gl.uniform1f(this.uniforms.time,this.elapsed);gl.uniform2f(this.uniforms.pointer,...this.pointer);gl.uniform1f(this.uniforms.pulse,this.pulse);gl.drawArrays(gl.TRIANGLES,0,6);}
+}
+customElements.define('liquid-thinking',LiquidThinking);
+})();
+</script>
+</body>
+</html>

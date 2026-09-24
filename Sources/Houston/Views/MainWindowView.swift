@@ -2543,7 +2543,11 @@ struct MainWindowView: View {
                 if let sid = subServerFlyoutID,
                    let anchor = anchors["subserver:" + sid]
                        ?? anchors["barchip:servers"] {
-                    subServerFlyoutLayer(proxy[anchor], sid, in: proxy.size)
+                    subServerFlyoutLayer(
+                        proxy[anchor], sid, in: proxy.size,
+                        // No row anchor means the bar chip opened it.
+                        fromBar: anchors["subserver:" + sid] == nil
+                    )
                 }
                 if let item = barDropdown, let path = chatTarget?.path,
                    let anchor = anchors["barchip:" + item.rawValue] {
@@ -2564,7 +2568,9 @@ struct MainWindowView: View {
         in bounds: CGSize
     ) -> some View {
         let width: CGFloat = 260
-        let x = min(max(12, chipFrame.minX), bounds.width - width - 12)
+        // Straight down from the chip: centered on it, only nudged
+        // sideways when the window edge would clip it.
+        let x = min(max(12, chipFrame.midX - width / 2), bounds.width - width - 12)
         return ZStack(alignment: .topLeading) {
             Color.clear
                 .contentShape(Rectangle())
@@ -2722,14 +2728,20 @@ struct MainWindowView: View {
     /// to the LEFT of the anchor; only when neither side fits does it
     /// drop below, right-aligned.
     private func subServerFlyoutLayer(
-        _ rowFrame: CGRect, _ sid: String, in bounds: CGSize
+        _ rowFrame: CGRect, _ sid: String, in bounds: CGSize,
+        fromBar: Bool = false
     ) -> some View {
         let cardWidth: CGFloat = 300
         let rightX = rowFrame.maxX + 10
         let leftX = rowFrame.minX - cardWidth - 10
         let x: CGFloat
         let y: CGFloat
-        if rightX + cardWidth + 12 <= bounds.width {
+        if fromBar {
+            // Opened from the top bar chip: straight down, centered on
+            // it, like every other bar menu.
+            x = min(max(12, rowFrame.midX - cardWidth / 2), bounds.width - cardWidth - 12)
+            y = rowFrame.maxY + 8
+        } else if rightX + cardWidth + 12 <= bounds.width {
             x = rightX
             y = max(8, rowFrame.minY - 8)
         } else if leftX >= 12 {
@@ -2745,7 +2757,15 @@ struct MainWindowView: View {
                 .onTapGesture { subServerFlyoutID = nil }
             Group {
                 if let server = liveServer(for: sid) {
-                    ServerFlyoutCard(server: server, share: share, relay: relay)
+                    ServerFlyoutCard(
+                        server: server, share: share, relay: relay,
+                        onMoveToPanel: fromBar ? {
+                            withAnimation(sheetSpring) {
+                                subServerFlyoutID = nil
+                                moveToPanel(.servers)
+                            }
+                        } : nil
+                    )
                 } else {
                     rightSheetPlaceholder("This server is no longer listening.")
                 }
@@ -3855,8 +3875,15 @@ struct MainWindowView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("Switch project")
+            // Servers only earns a chip while something is actually
+            // listening in this project — an idle "Servers" item was
+            // dead weight in the bar (the side panel's section still
+            // offers Start server).
+            let liveServers = servers.devServers.contains { $0.cwd == path }
             ForEach(
-                WorkspaceItem.allCases.filter { !workspaceItems.contains($0) },
+                WorkspaceItem.allCases.filter {
+                    !workspaceItems.contains($0) && ($0 != .servers || liveServers)
+                },
                 id: \.self
             ) { item in
                 barChip(item, path: path)
@@ -3895,11 +3922,23 @@ struct MainWindowView: View {
                         ? Theme.dotDegraded : Theme.dotActive
                 ) { toggleBarDropdown(item) }
             case .servers:
-                let live = servers.devServers.first { $0.cwd == path }
+                let live = servers.devServers.filter { $0.cwd == path }
                 headerChip(
                     icon: "server",
-                    label: live.map { "Localhost:" + String($0.port) } ?? "Servers"
-                ) { toggleBarDropdown(item) }
+                    label: live.first.map { "Localhost:" + String($0.port) } ?? "Servers"
+                ) {
+                    // One server: straight to its card (the dropdown
+                    // would be a one-row list). Several: the list.
+                    if live.count == 1, let only = live.first {
+                        withAnimation(Theme.quick) {
+                            barDropdown = nil
+                            subServerFlyoutID = subServerFlyoutID == only.id
+                                ? nil : only.id
+                        }
+                    } else {
+                        toggleBarDropdown(item)
+                    }
+                }
             case .terminals:
                 if (terminals.tabs[path] ?? []).isEmpty {
                     // No terminals yet: the chip IS the create affordance —
@@ -6268,6 +6307,9 @@ struct ServerFlyoutCard: View {
     @ObservedObject var share: ShareProxyStore
     @ObservedObject var relay: RelayTunnelStore
     var onBack: (() -> Void)? = nil
+    /// Set when the card opened from the top bar's Servers chip: the same
+    /// "move into the side panel" control the bar dropdowns carry.
+    var onMoveToPanel: (() -> Void)? = nil
 
     @State private var stopHovered = false
 
@@ -6287,6 +6329,12 @@ struct ServerFlyoutCard: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                if let onMoveToPanel {
+                    PanelControlButton(
+                        icon: "dock-right", help: "Move into the side panel",
+                        action: onMoveToPanel
+                    )
+                }
             }
             .padding(.bottom, 14)
             launchRow(

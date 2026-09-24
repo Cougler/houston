@@ -346,8 +346,8 @@ struct CapsuleDialog: View {
                 .thinScrollbar()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ProgressView()
-                    .controlSize(.small)
+                LiquidThinkingView()
+                    .frame(width: 72, height: 72)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 

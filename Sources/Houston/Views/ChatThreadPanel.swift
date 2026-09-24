@@ -440,12 +440,28 @@ private struct ThreadLiveSection: View {
                     )
                 }
                 if session.running {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Working…")
-                            .font(Theme.Fonts.body)
-                            .foregroundStyle(Theme.textSecondary)
+                    // Same indicator as the main live turn: the liquid
+                    // blob, plus the thinking token count when the model
+                    // is in an extended-thinking block.
+                    HStack(spacing: 10) {
+                        LiquidThinkingView()
+                            .frame(width: 44, height: 44)
+                            .accessibilityHidden(true)
+                        Group {
+                            if let tokens = session.thinkingTokens {
+                                Text(tokens > 0
+                                    ? "Thinking… \(formatTokens(tokens)) tokens"
+                                    : "Thinking…")
+                            } else {
+                                Text("Working…")
+                            }
+                        }
+                        .font(Theme.Fonts.body)
+                        .foregroundStyle(Theme.textSecondary)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
                     }
+                    .padding(.leading, -9)
                 }
             }
         }

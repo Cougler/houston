@@ -244,6 +244,15 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     @Published private(set) var liveBlocks: [ChatMessage.Block] = []
     /// The currently-streaming text tail.
     @Published private(set) var streamText = ""
+    /// Extended-thinking progress for the block in flight: the CLI's
+    /// running token estimate (`system/thinking_tokens`), 0 the instant a
+    /// thinking block opens, nil once a text or tool block lands. On an
+    /// open-ended build prompt at high/xhigh, Opus 5.5 and Fable 5.1 think
+    /// for MINUTES after the first tool result (measured 2026-09-24:
+    /// 10k+ tokens, still going at two minutes) — the terminal shows a
+    /// climbing counter, and without this the chat showed a bare
+    /// "Working…" and read as frozen.
+    @Published private(set) var thinkingTokens: Int?
     /// Exchanges superseded by a newer send before the transcript
     /// re-read absorbed them — rendered ahead of the pending message so
     /// back-to-back sends never make the earlier one vanish.
@@ -667,17 +676,32 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     private func handleClaude(_ o: [String: Any]) {
         switch o["type"] as? String {
         case "system":
-            if o["subtype"] as? String == "init",
-               let id = o["session_id"] as? String {
-                sessionID = id
+            switch o["subtype"] as? String {
+            case "init":
+                if let id = o["session_id"] as? String { sessionID = id }
+            case "thinking_tokens":
+                // The CLI's own running estimate for the open thinking
+                // block — the same number the terminal's spinner shows.
+                if let n = o["estimated_tokens"] as? Int { thinkingTokens = n }
+            default:
+                break
             }
         case "stream_event":
-            guard let event = o["event"] as? [String: Any],
-                  event["type"] as? String == "content_block_delta",
-                  let delta = event["delta"] as? [String: Any],
-                  delta["type"] as? String == "text_delta",
-                  let text = delta["text"] as? String else { return }
-            streamText += text
+            guard let event = o["event"] as? [String: Any] else { return }
+            switch event["type"] as? String {
+            case "content_block_start":
+                // A thinking block opening shows "Thinking…" at once, before
+                // the first token estimate; any other block ends the phase.
+                let kind = (event["content_block"] as? [String: Any])?["type"] as? String
+                thinkingTokens = kind == "thinking" ? (thinkingTokens ?? 0) : nil
+            case "content_block_delta":
+                guard let delta = event["delta"] as? [String: Any],
+                      delta["type"] as? String == "text_delta",
+                      let text = delta["text"] as? String else { return }
+                streamText += text
+            default:
+                break
+            }
         case "assistant":
             guard let message = o["message"] as? [String: Any],
                   let content = message["content"] as? [[String: Any]] else { return }
@@ -1399,6 +1423,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         running = false
         interrupting = false
         approval = nil
+        thinkingTokens = nil
         currentTurnID = nil
         lastUsed = Date()
         if let error { lastError = error }
