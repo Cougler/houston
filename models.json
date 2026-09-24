@@ -1,5 +1,6 @@
 {
   "claude": [
+    { "label": "Fable 5.1", "arg": "claude-fable-5-1" },
     { "label": "Fable 5", "arg": "fable" },
     { "label": "Opus 5.5", "arg": "claude-opus-5-5" },
     { "label": "Opus 5", "arg": "opus" },
