@@ -32,6 +32,59 @@ enum Actions {
         }
     }
 
+    /// The apps a project folder can be handed to from a chat row's
+    /// "Open in" — editors, terminals, Finder. Order is the menu order.
+    enum ExternalApp: String, CaseIterable, Identifiable {
+        case vscode, cursor, xcode, ghostty, terminal, finder
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .vscode: "VS Code"
+            case .cursor: "Cursor"
+            case .xcode: "Xcode"
+            case .ghostty: "Ghostty"
+            case .terminal: "Terminal"
+            case .finder: "Finder"
+            }
+        }
+
+        var bundleID: String {
+            switch self {
+            case .vscode: "com.microsoft.VSCode"
+            case .cursor: "com.todesktop.230313mzl4w4u92"
+            case .xcode: "com.apple.dt.Xcode"
+            case .ghostty: "com.mitchellh.ghostty"
+            case .terminal: "com.apple.Terminal"
+            case .finder: "com.apple.finder"
+            }
+        }
+
+        /// Installed on this Mac — the menu lists only these, so a
+        /// missing editor is absent rather than a dead item.
+        var installed: Bool {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+        }
+    }
+
+    /// Opens a folder in one of the external apps: editors open it as a
+    /// workspace, the terminals start a shell there, Finder shows it.
+    static func open(path: String, in app: ExternalApp) {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        if app == .finder {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        guard let appURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: app.bundleID
+        ) else { return }
+        NSWorkspace.shared.open(
+            [url], withApplicationAt: appURL,
+            configuration: NSWorkspace.OpenConfiguration()
+        )
+    }
+
     /// Opens an arbitrary URL in the user's default browser (or `open`-handler).
     static func openExternal(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }

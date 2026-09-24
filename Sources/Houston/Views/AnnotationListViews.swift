@@ -350,6 +350,10 @@ struct AnnotationsSheetPanel: View {
 /// page with a back arrow. The right sheet keeps the full navigator.
 struct TasksMenuList: View {
     @ObservedObject var tracked: TrackedStore
+    /// The card's height (~80% of the window) — fixed, not a ceiling:
+    /// the list area fills it and the input stays pinned at the bottom,
+    /// so the panel reads tall even with a short list.
+    var maxHeight: CGFloat = 440
 
     private enum Page { case root, completed, reminders }
     @State private var page: Page = .root
@@ -368,6 +372,7 @@ struct TasksMenuList: View {
             case .reminders: remindersPage
             }
         }
+        .frame(height: maxHeight, alignment: .top)
         .onAppear(perform: reload)
     }
 
@@ -426,11 +431,13 @@ struct TasksMenuList: View {
                         )
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 8)
                 .thinScrollbar()
             }
-            .frame(maxHeight: 340)
-            .fixedSize(horizontal: false, vertical: true)
+            // Fills whatever the card's fixed height leaves after the
+            // header and the input band.
+            .frame(maxHeight: .infinity)
             // shadcn separator grammar: a full-bleed hairline, then the
             // input on its own uniformly padded band.
             Rectangle()
@@ -492,11 +499,11 @@ struct TasksMenuList: View {
                         )
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 6)
                 .thinScrollbar()
             }
-            .frame(maxHeight: 400)
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxHeight: .infinity)
         }
         .padding(.bottom, 6)
     }
@@ -517,7 +524,7 @@ struct TasksMenuList: View {
             TrackedPanel(store: tracked, compact: true)
                 .padding(.horizontal, 10)
                 .padding(.top, 4)
-                .frame(height: 380)
+                .frame(maxHeight: .infinity)
         }
         .padding(.bottom, 8)
     }

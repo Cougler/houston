@@ -91,6 +91,25 @@ enum MainWindowController {
 /// debug and packaged builds.
 @MainActor
 private final class WindowFrameSaver: NSObject, NSWindowDelegate {
+    /// The window's one field editor — every NSTextField-backed SwiftUI
+    /// `TextField` (the chat composer included) edits through it. Created
+    /// lazily on the main thread the first time a field asks.
+    private var fieldEditor: NoDropFieldEditor?
+
+    /// AppKit's stock field editor accepts file drags and inserts the raw
+    /// path as text — an image dropped on the composer's own text landed
+    /// as a `/var/folders/…/drop.png` line. This editor registers for NO
+    /// drag types, so the window's drop-target hit test skips it and the
+    /// drop falls through to the SwiftUI `.onDrop` beneath (the
+    /// composer's, then the root's window-wide image drop).
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        if let fieldEditor { return fieldEditor }
+        let editor = NoDropFieldEditor()
+        editor.isFieldEditor = true
+        fieldEditor = editor
+        return editor
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         save(notification)
     }
@@ -111,4 +130,14 @@ private final class WindowFrameSaver: NSObject, NSWindowDelegate {
         ]
         HoustonSettings.write(s)
     }
+}
+
+/// A field editor that is never a drag destination — see
+/// `WindowFrameSaver.windowWillReturnFieldEditor`. Both hooks are
+/// overridden: `acceptableDragTypes` is what NSTextView registers, and
+/// `updateDragTypeRegistration` is re-run on every text-container change,
+/// so an override of the first alone could be undone by the second.
+private final class NoDropFieldEditor: NSTextView {
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
+    override func updateDragTypeRegistration() { unregisterDraggedTypes() }
 }

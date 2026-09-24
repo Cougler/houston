@@ -556,6 +556,18 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   the same repo — the Swift rewrite is grafted on top of it (`29de87b` is the
   last Electron commit), so the old code stays reachable without a separate
   archive repo.
+- **The chat model list refreshes without a release (2026-09-23).**
+  `ModelCatalog` (model chip ▸ Refresh Model List) merges two sources
+  over the shipped defaults: the repo's curated `models.json` (raw
+  GitHub, args CLI-verified — the authoritative labels/order) and
+  models.dev's open catalog (no auth) for anything newer than the
+  curated frontier that isn't already covered — filtered to the chat
+  families each CLI runs (`isChatFamily`: no dated snapshots, no
+  pro/mini/nano). The merge is cached under `Application Support/
+  Houston/models.json` and re-applied at launch. Discovered args are the
+  provider ids (`claude-fable-5-1`), which both CLIs accept verbatim.
+  `ChatModelChoice.claude/openAI` are `@MainActor static var`s for this;
+  `piModelIDs` stays compiled in, so a discovered model shows Pi grayed.
 - **Updates come from GitHub Releases.** `UpdateChecker` polls
   `releases/latest` (public API, no auth) and compares the tag against
   `CFBundleShortVersionString` — so releases MUST be tagged `vX.Y.Z` with the

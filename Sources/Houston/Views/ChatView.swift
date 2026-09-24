@@ -41,22 +41,25 @@ struct ChatModelChoice: Hashable {
     /// start with `modelProvider`. nil = the harness's cloud default.
     var provider: String? = nil
 
-    /// Mutable so `ModelCatalog` can overlay a refreshed list (menu ▸
-    /// Refresh Model List) — a new model is a models.json edit, not an
-    /// app update. These literals are the shipped defaults.
-    @MainActor static var claude: [ChatModelChoice] = [
+    /// The shipped defaults. `claude`/`openAI` start as these and are
+    /// overlaid by `ModelCatalog` (menu ▸ Refresh Model List): the repo's
+    /// curated models.json plus anything newer models.dev lists — a new
+    /// model needs no app update, and usually no JSON edit either.
+    static let claudeDefaults: [ChatModelChoice] = [
         .init(label: "Fable 5", harness: .claude, arg: "fable"),
         .init(label: "Opus 5", harness: .claude, arg: "opus"),
         .init(label: "Sonnet 5", harness: .claude, arg: "sonnet"),
         .init(label: "Haiku 4.5", harness: .claude, arg: "haiku"),
     ]
-    @MainActor static var openAI: [ChatModelChoice] = [
+    static let openAIDefaults: [ChatModelChoice] = [
         .init(label: "GPT-6 Astra", harness: .codex, arg: "gpt-6-astra"),
         .init(label: "GPT-5.6 Sol", harness: .codex, arg: "gpt-5.6-sol"),
         .init(label: "GPT-5.6 Terra", harness: .codex, arg: "gpt-5.6-terra"),
         .init(label: "GPT-5.6 Luna", harness: .codex, arg: "gpt-5.6-luna"),
         .init(label: "GPT-5.5", harness: .codex, arg: "gpt-5.5"),
     ]
+    @MainActor static var claude: [ChatModelChoice] = claudeDefaults
+    @MainActor static var openAI: [ChatModelChoice] = openAIDefaults
 
     /// A local MLX Core model — runs through codex against the local
     /// server, so everything downstream (streaming, approvals, resume)
@@ -1296,25 +1299,106 @@ enum ChatRowActions {
     /// The whole conversation as markdown on the clipboard.
     static func copyTranscript(_ ref: ChatSessionRef) {
         Task.detached(priority: .userInitiated) {
-            let messages = ChatArchive.transcript(ref)
-            let text = messages.map { message in
-                let heading = message.role == .user ? "## User" : "## Assistant"
-                let body = message.blocks.compactMap { block -> String? in
-                    switch block {
-                    case let .text(t): t
-                    case let .code(c, lang): "```" + (lang ?? "") + "\n" + c + "\n```"
-                    case let .tool(name, detail):
-                        detail.isEmpty ? "*[\(name)]*" : "*[\(name): \(detail)]*"
-                    case let .capsule(title, _): "*[Capsule: \(title)]*"
-                    case let .fragment(title, _): "*[Fragment: \(title)]*"
-                    case let .image(path): "![image](\(path))"
-                    }
-                }.joined(separator: "\n\n")
-                return heading + "\n\n" + body
-            }.joined(separator: "\n\n")
+            let text = markdown(ChatArchive.transcript(ref))
             await MainActor.run {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
+    }
+
+    /// The conversation as a markdown document — what Copy Transcript
+    /// puts on the clipboard and Share hands to the share sheet.
+    nonisolated static func markdown(_ messages: [ChatMessage]) -> String {
+        messages.map { message in
+            let heading = message.role == .user ? "## User" : "## Assistant"
+            let body = message.blocks.compactMap { block -> String? in
+                switch block {
+                case let .text(t): t
+                case let .code(c, lang): "```" + (lang ?? "") + "\n" + c + "\n```"
+                case let .tool(name, detail):
+                    detail.isEmpty ? "*[\(name)]*" : "*[\(name): \(detail)]*"
+                case let .capsule(title, _): "*[Capsule: \(title)]*"
+                case let .fragment(title, _): "*[Fragment: \(title)]*"
+                case let .image(path): "![image](\(path))"
+                }
+            }.joined(separator: "\n\n")
+            return heading + "\n\n" + body
+        }.joined(separator: "\n\n")
+    }
+
+    /// Share: the transcript written as `<title>.md` in a temp folder,
+    /// offered through the system share sheet (Messages, Mail, AirDrop,
+    /// Notes…), anchored at the pointer. A file, not a string — a string
+    /// item strips the title and lands as an unnamed blob.
+    static func share(_ ref: ChatSessionRef) {
+        let title = ChatTitler.shared.displayTitle(ref)
+        Task.detached(priority: .userInitiated) {
+            let text = markdown(ChatArchive.transcript(ref))
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("HoustonShares", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+            let safe = title.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+            let file = dir.appendingPathComponent(
+                (safe.isEmpty ? "Chat" : safe) + ".md"
+            )
+            guard (try? text.write(to: file, atomically: true, encoding: .utf8)) != nil
+            else { return }
+            await MainActor.run {
+                guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+                      let content = window.contentView else { return }
+                let point = content.convert(
+                    window.mouseLocationOutsideOfEventStream, from: nil
+                )
+                let anchor = NSRect(x: point.x, y: point.y, width: 1, height: 1)
+                NSSharingServicePicker(items: [file])
+                    .show(relativeTo: anchor, of: content, preferredEdge: .minY)
+            }
+        }
+    }
+
+    /// Move a chat to another project: re-exported as a native session in
+    /// the destination's store (the same export Duplicate uses, pointed at
+    /// the other project), title carried, then the original trashed. The
+    /// CLIs key sessions by directory, so a move IS an export + remove —
+    /// there's no in-place field to flip.
+    static func move(
+        _ ref: ChatSessionRef, from project: String, to destination: String,
+        completion: @escaping @MainActor (String?) -> Void
+    ) {
+        let title = ChatTitler.shared.displayTitle(ref)
+        let pinned = ChatMetaStore.shared.pinned.contains(ref.filePath)
+        Task.detached(priority: .userInitiated) {
+            let messages = ChatArchive.transcript(ref)
+            let file: String? = switch ref.harness {
+            case .claude:
+                ChatArchive.exportToClaude(messages, projectPath: destination)
+                    .map { ChatArchive.claudeProjectDir(for: destination) + "/" + $0 + ".jsonl" }
+            case .codex:
+                ChatArchive.exportToCodex(
+                    messages, projectPath: destination, originator: "Houston-Move"
+                ).flatMap { ChatArchive.codexRolloutPath(id: $0) }
+            case .gemini, .grok, .pi:
+                ChatArchive.exportToACP(
+                    messages, projectPath: destination, harness: ref.harness)
+            }
+            await MainActor.run {
+                if let file {
+                    ChatTitler.shared.setCustomTitle(title, for: file)
+                    if pinned { ChatMetaStore.shared.togglePin(file) }
+                    ChatSessionHub.shared.forget(file: ref.filePath)
+                    ChatMetaStore.shared.forget(ref.filePath)
+                    CapsuleStore.shared.forget(file: ref.filePath)
+                    try? FileManager.default.trashItem(
+                        at: URL(fileURLWithPath: ref.filePath), resultingItemURL: nil
+                    )
+                    ChatIndexStore.shared.refresh(destination, force: true)
+                }
+                ChatIndexStore.shared.refresh(project, force: true)
+                completion(file)
             }
         }
     }
@@ -1590,7 +1674,7 @@ private struct ChatScrollDots: View {
             .padding(.vertical, 7)
             .background(
                 Capsule()
-                    .fill(Theme.panelFill)
+                    .fill(Theme.menuFill)
                     .shadow(
                         color: Theme.floatShadowColor,
                         radius: 8, x: 0, y: 2
@@ -1957,8 +2041,13 @@ private struct ChatComposer: View {
             // Indented off the card's left edge (mock).
             .padding(.leading, 12)
         }
+        // Text only (capsule/fragment chips, plain text): the ring is
+        // the target hint for those. Images and files are the WINDOW's
+        // drop (`MainWindowView`'s root onDrop + its "Drop image
+        // anywhere" field) — declaring them here too made the window
+        // target flicker off whenever the drag crossed the composer.
         .onDrop(
-            of: [.fileURL, .image, .plainText], isTargeted: $dropTargeted,
+            of: [.plainText], isTargeted: $dropTargeted,
             perform: handleDrop
         )
         // Draft persistence: restore on mount, mirror every edit into the
@@ -2438,6 +2527,11 @@ private struct ChatComposer: View {
         let text = parts.joined(separator: "\n")
         guard !text.isEmpty else { return }
         draft = ""
+        // Clear the persisted copy HERE, not via the onChange mirror: on a
+        // new chat, `onSend` swaps this composer out synchronously (sky →
+        // draft view), so the mirror never runs and the next composer —
+        // same "new:<project>" key — restored the just-sent prompt.
+        if let key = draftKey { ComposerDraftStore.texts[key] = nil }
         suggestion = ""
         attachments = []
         stagedCapsules = []
@@ -2621,10 +2715,18 @@ private struct ChatComposer: View {
 /// isolation assertion when the provider invoked them off-main; six
 /// crash logs across 1.0.31–1.0.34). Here there is no enclosing
 /// isolation to inherit, so the closures are genuinely nonisolated.
-private enum ComposerDropLoader {
+enum ComposerDropLoader {
     @discardableResult
     static func load(_ providers: [NSItemProvider]) -> Bool {
         var handled = false
+        // A drag carrying an image or a file (Finder, a browser image, a
+        // screenshot thumbnail) usually carries a text flavor too — the
+        // URL, the filename. Those never become draft text: the image
+        // is the drop, and its text sibling is dropped on the floor.
+        let carriesMedia = providers.contains {
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                || $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+        }
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 handled = true
@@ -2670,7 +2772,7 @@ private enum ComposerDropLoader {
                             + "Try dragging it from Finder, or convert it first."])
                     }
                 }
-            } else if provider.hasItemConformingToTypeIdentifier(
+            } else if !carriesMedia, provider.hasItemConformingToTypeIdentifier(
                 UTType.plainText.identifier
             ) {
                 handled = true

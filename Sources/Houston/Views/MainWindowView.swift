@@ -157,6 +157,13 @@ struct MainWindowView: View {
     /// Everything project-scoped lives INSIDE the panel as a push
     /// (2026-09-21) — the old Chat/Terminal/Server segment bar is gone.
     @State private var projectPanelServer: String?
+    /// Extra pages of chats the side panel's CHATS section has revealed —
+    /// each "Show more" adds one page of ten. Resets whenever the
+    /// workspace leaves the project, so coming back starts at ten again.
+    @State private var chatsPagesRevealed = 0
+    /// An image/file drag is over the window while a chat surface shows
+    /// — the chat area wears the "Drop image anywhere" field.
+    @State private var imageDropTargeted = false
     @StateObject private var chatIndex = ChatIndexStore.shared
     @StateObject private var chatTitler = ChatTitler.shared
     @StateObject private var chatMeta = ChatMetaStore.shared
@@ -249,6 +256,35 @@ struct MainWindowView: View {
         return terminals.hasPane(for: path)
     }
 
+    /// Everything right of the sidebar: the detail column, the workspace
+    /// panel, and the right sheet's width reservation.
+    private var contentArea: some View {
+        HStack(spacing: 0) {
+            detailColumn
+                .frame(maxWidth: .infinity)
+            // The project workspace panel (2026-09-23): a floating
+            // rounded canvas on the right holding whichever workspace
+            // items were placed in it. No items — no panel. ALWAYS
+            // mounted, width animated to zero when closed (whole pixels
+            // per frame): an animated `if` insertion interpolates the
+            // HStack through fractional layouts, and the card's rows
+            // re-render mid-slide (chatIndex refresh, snippets, titler)
+            // — the same baked-subpixel blur the right sheet had.
+            workspacePanelColumn(chatTarget?.path)
+            // Reserve the sheet's width in the layout. The sheet itself
+            // always draws in the overlay flush with the right edge, so
+            // pin/unpin animates nothing but this width (and the scrim) —
+            // no re-parenting, no jump. The project sidebar reserves even
+            // unpinned: chat content centers between the two sidebars.
+            // Whole pixels per frame, same rule as the sheet's slide: a
+            // fractional reservation makes the centered chat column
+            // fractional mid-slide, and text streaming in right then
+            // bakes the subpixel phase (soft on a 1x display).
+            Color.clear
+                .modifier(WholePixelWidth(width: rightPanelReservedWidth))
+        }
+    }
+
     private var chromeBackground: Color {
         // Chat mode's chrome matches the chat page, which matches the
         // empty state (2026-09-21) — one content surface everywhere.
@@ -315,28 +351,7 @@ struct MainWindowView: View {
             // the swap.
             splitDivider
                 .opacity(sidebarRevealed ? 1 : 0)
-            detailColumn
-                .frame(maxWidth: .infinity)
-            // The project workspace panel (2026-09-23): a floating
-            // rounded canvas on the right holding whichever workspace
-            // items were placed in it. No items — no panel. ALWAYS
-            // mounted, width animated to zero when closed (whole pixels
-            // per frame): an animated `if` insertion interpolates the
-            // HStack through fractional layouts, and the card's rows
-            // re-render mid-slide (chatIndex refresh, snippets, titler)
-            // — the same baked-subpixel blur the right sheet had.
-            workspacePanelColumn(chatTarget?.path)
-            // Reserve the sheet's width in the layout. The sheet itself
-            // always draws in the overlay flush with the right edge, so
-            // pin/unpin animates nothing but this width (and the scrim) —
-            // no re-parenting, no jump. The project sidebar reserves even
-            // unpinned: chat content centers between the two sidebars.
-            // Whole pixels per frame, same rule as the sheet's slide: a
-            // fractional reservation makes the centered chat column
-            // fractional mid-slide, and text streaming in right then
-            // bakes the subpixel phase (soft on a 1x display).
-            Color.clear
-                .modifier(WholePixelWidth(width: rightPanelReservedWidth))
+            contentArea
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(chromeBackground)
@@ -355,6 +370,14 @@ struct MainWindowView: View {
         // One overlay link, contents extracted — inline closures here push
         // the root body past the type-checker's limit.
         .overlay { modalLayer }
+        // Window-wide image drop: an image or file dragged ANYWHERE over
+        // the window (sidebar, panel, sky, the composer's own text) lands
+        // in the visible chat's composer. A delegate, not a closure — the
+        // root body is at the type-checker's limit, and the delegate also
+        // gates on the drag's flavor so text drags never light the field.
+        .onDrop(of: [.image, .fileURL], delegate: WindowImageDropDelegate(
+            targeted: $imageDropTargeted, accepts: chatSurfaceShowing
+        ))
         .overlayPreferenceValue(SidebarFlyoutAnchorKey.self, sidebarFlyoutsResolved)
         // The titlebar region is a safe area, so without this the whole
         // layout starts ~30pt down: the split divider stopped short of the
@@ -396,10 +419,14 @@ struct MainWindowView: View {
             feed.noteGit(path: selection?.projectPath, info: info)
         }
         // A project's last terminal closing (✕, ⇧⌘W, ctrl-D) lands on the
-        // solar-system empty state, not a dead detail page.
+        // solar-system empty state, not a dead detail page — unless the
+        // workspace was showing that terminal as its surface, in which
+        // case the chat underneath comes back (the selection still goes
+        // nil; the nil rule below keeps the workspace).
         .onChange(of: terminalPaths) { _, paths in
             if case let .project(path) = selection, !paths.contains(path),
                !terminals.hasPane(for: path) {
+                if chatTarget?.path == path { detailShowsTerminal = false }
                 selection = nil
             }
         }
@@ -409,8 +436,11 @@ struct MainWindowView: View {
             // workspace's own project: that swaps the surface under the
             // top bar + side panel (`select` set detailShowsTerminal),
             // so the workspace must survive here or the rule in `select`
-            // is dead on arrival.
-            if newValue?.projectPath != chatTarget?.path {
+            // is dead on arrival. A NIL selection never leaves the
+            // workspace either: it only ever means "the terminal closed"
+            // (the two close paths are its sole writers), and closing the
+            // terminal you opened from a chat returns you to that chat.
+            if let path = newValue?.projectPath, path != chatTarget?.path {
                 chatTarget = nil
             }
             if let path = newValue?.projectPath { chatIndex.refresh(path) }
@@ -475,6 +505,9 @@ struct MainWindowView: View {
         .onChange(of: allTabIDs) { _, ids in
             guard case let .shell(path, tab) = selection else { return }
             if !ids.contains(tab) {
+                // The workspace's terminal surface closed: back to the
+                // chat, not to whichever sibling terminal survived.
+                if chatTarget?.path == path { detailShowsTerminal = false }
                 selection = terminals.hasPane(for: path) ? .project(path) : nil
             } else if terminals.tabs[path]?.first?.id == tab {
                 selection = .project(path)
@@ -952,7 +985,7 @@ struct MainWindowView: View {
                 railPopoverContent(section)
                     .background(
                         RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                            .fill(Theme.panelFill)
+                            .fill(Theme.menuFill)
                             .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                     )
                     .overlay(
@@ -993,7 +1026,7 @@ struct MainWindowView: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.radiusFloat))
                 .background(
                     RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                        .fill(Theme.panelFill)
+                        .fill(Theme.menuFill)
                         .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                 )
                 .overlay(
@@ -1072,7 +1105,7 @@ struct MainWindowView: View {
                 .frame(width: 250)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                        .fill(Theme.panelFill)
+                        .fill(Theme.menuFill)
                         .shadow(color: Theme.floatShadowColor, radius: Theme.floatShadowRadius, x: 0, y: Theme.floatShadowY)
                 )
                 .overlay(
@@ -1240,10 +1273,13 @@ struct MainWindowView: View {
         // it. Attached here, not the root body — the sheet layer is
         // always mounted, and one more root modifier tips the
         // type-checker's expression limit.
-        .onChange(of: chatTarget) { _, _ in
+        .onChange(of: chatTarget) { old, new in
             // The workspace sub-sidebar tracks chatTarget directly now
             // (2026-09-22); a legacy chats sheet just closes.
             if case .chats = rightPanel { closeRightPanel() }
+            // Leaving the project (or the workspace) folds the CHATS
+            // section back to its first page.
+            if old?.path != new?.path { chatsPagesRevealed = 0 }
         }
         // Once the close animation lands, drop the sheet's render
         // fallback — a closed sheet keeps building `lastRightPanel`'s
@@ -1755,23 +1791,7 @@ struct MainWindowView: View {
     @ViewBuilder
     private var railTipLayer: some View {
         if sidebarCollapsed, railPopover == nil, let tip = railTip {
-            Text(tip.label)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .fill(Theme.panelFill)
-                        .shadow(
-                            color: Theme.floatShadowColor,
-                            radius: 4, x: 0, y: 1
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.radiusControl)
-                        .strokeBorder(Theme.borderSidebar, lineWidth: 1)
-                )
+            TipCard(text: tip.label)
                 .offset(x: railWidth + 8, y: railTipTop(tip))
                 .allowsHitTesting(false)
                 .transition(.opacity)
@@ -1850,30 +1870,29 @@ struct MainWindowView: View {
             }
             return
         }
+        // Down THEN left (2026-09-23), with a soft handoff: the second
+        // phase starts as the first is settling (~75% through, in its
+        // spring tail), not 0.1s in — early overlap read as one skewed
+        // diagonal, a hard stop read as two mechanical steps. Low bounce
+        // so the tail doesn't wobble under the handoff.
         if collapsed {
-            // Mirror of the expand sweep below: the top drop leads and
-            // the width joins while it's still moving — one diagonal
-            // down-and-in motion on the same overlapping springs.
-            withAnimation(.spring(duration: 0.34, bounce: 0.14)) {
+            withAnimation(.spring(duration: 0.32, bounce: 0.06)) {
                 sidebarTopTucked = true
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
                 guard seq == collapseStageSeq else { return }
-                withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
+                withAnimation(.spring(duration: 0.36, bounce: 0.06)) {
                     sidebarCollapsed = true
                 }
             }
         } else {
-            // Expand sweeps: the width leads and the top joins while the
-            // width is still moving — overlapping springs read as one
-            // diagonal out-and-up motion. Waiting for the width to land
-            // before popping the top felt like two mechanical steps.
-            withAnimation(.spring(duration: 0.38, bounce: 0.12)) {
+            // Reverse: right (width) first, the top pops up as it settles.
+            withAnimation(.spring(duration: 0.36, bounce: 0.06)) {
                 sidebarCollapsed = false
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.27) {
                 guard seq == collapseStageSeq else { return }
-                withAnimation(.spring(duration: 0.34, bounce: 0.14)) {
+                withAnimation(.spring(duration: 0.32, bounce: 0.06)) {
                     sidebarTopTucked = false
                 }
             }
@@ -2519,7 +2538,7 @@ struct MainWindowView: View {
                     serversFlyoutLayer(proxy[anchor])
                 }
                 if tasksPopoverShown, let anchor = anchors["tasks"] {
-                    tasksFlyoutLayer(proxy[anchor])
+                    tasksFlyoutLayer(proxy[anchor], in: proxy.size)
                 }
                 if let sid = subServerFlyoutID,
                    let anchor = anchors["subserver:" + sid]
@@ -2553,18 +2572,25 @@ struct MainWindowView: View {
                     withAnimation(Theme.quick) { barDropdown = nil }
                 }
             VStack(alignment: .leading, spacing: 2) {
+                // Same header grammar and control size as the side
+                // panel's module cards: caps title, then the square
+                // add + move controls in the corner.
                 HStack(spacing: 6) {
                     Text(item.rawValue.uppercased())
                         .font(.system(size: 11, weight: .semibold))
                         .kerning(0.8)
                         .foregroundStyle(Theme.heading)
                         .padding(.leading, 8)
-                    Spacer(minLength: 12)
-                    ControlIconButton(
-                        icon: "dock-right",
-                        help: "Move into the side panel",
-                        bare: true,
-                        circleSize: 22,
+                    Spacer(minLength: 8)
+                    PanelControlButton(
+                        icon: "plus", help: addHelp(item),
+                        action: {
+                            withAnimation(Theme.quick) { barDropdown = nil }
+                            addAction(item, path: path)
+                        }
+                    )
+                    PanelControlButton(
+                        icon: "dock-right", help: "Move into the side panel",
                         action: {
                             withAnimation(sheetSpring) {
                                 barDropdown = nil
@@ -2573,7 +2599,7 @@ struct MainWindowView: View {
                         }
                     )
                 }
-                .frame(height: 26)
+                .frame(height: 28)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         dropdownRows(item, path: path)
@@ -2586,7 +2612,7 @@ struct MainWindowView: View {
             .frame(width: width)
             .background(
                 RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                    .fill(Theme.panelFill)
+                    .fill(Theme.menuFill)
                     .shadow(
                         color: Theme.floatShadowColor,
                         radius: Theme.floatShadowRadius,
@@ -2729,7 +2755,7 @@ struct MainWindowView: View {
             .fixedSize(horizontal: false, vertical: true)
             .background(
                 RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                    .fill(Theme.panelFill)
+                    .fill(Theme.menuFill)
                     .shadow(
                         color: Theme.floatShadowColor,
                         radius: Theme.floatShadowRadius,
@@ -2746,16 +2772,19 @@ struct MainWindowView: View {
     }
 
     /// The tasks flyout: same card chrome and placement grammar as the
-    /// servers flyout, wrapping the tasks navigator.
-    private func tasksFlyoutLayer(_ rowFrame: CGRect) -> some View {
+    /// servers flyout, wrapping the tasks navigator. The card may run to
+    /// ~80% of the window's height before its list scrolls.
+    private func tasksFlyoutLayer(
+        _ rowFrame: CGRect, in bounds: CGSize
+    ) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture { tasksPopoverShown = false }
-            tasksPopoverContent
+            tasksPopoverContent(maxHeight: bounds.height * 0.8)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                        .fill(Theme.panelFill)
+                        .fill(Theme.menuFill)
                         .shadow(
                             color: Theme.floatShadowColor,
                             radius: Theme.floatShadowRadius,
@@ -2806,7 +2835,7 @@ struct MainWindowView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                        .fill(Theme.panelFill)
+                        .fill(Theme.menuFill)
                         .shadow(
                             color: Theme.floatShadowColor,
                             radius: Theme.floatShadowRadius,
@@ -2853,10 +2882,10 @@ struct MainWindowView: View {
     /// The tasks popover (2026-09-23): no navigator, no breadcrumbs —
     /// one flat list of every task grouped by project. The right sheet's
     /// tasks page keeps the full navigator.
-    private var tasksPopoverContent: some View {
-        // Height comes from the content (the list caps itself); only the
-        // width is pinned here.
-        TasksMenuList(tracked: tracked)
+    private func tasksPopoverContent(maxHeight: CGFloat) -> some View {
+        // Height comes from the content (the list caps itself at the
+        // window-relative maximum); only the width is pinned here.
+        TasksMenuList(tracked: tracked, maxHeight: maxHeight)
             .frame(width: 300)
     }
 
@@ -3302,6 +3331,18 @@ struct MainWindowView: View {
         }
     }
 
+    /// True while the detail surface is a chat (sky, draft, or
+    /// transcript) — i.e. a composer is mounted to receive a drop. The
+    /// same test `detailContent` makes when it picks the terminal card.
+    private func chatSurfaceShowing() -> Bool {
+        guard let chatTarget else { return false }
+        if detailShowsTerminal, let path = selection?.projectPath,
+           path == chatTarget.path, terminals.hasPane(for: path) {
+            return false
+        }
+        return true
+    }
+
     @ViewBuilder
     private var detailContent: some View {
         // Chat mode swaps the surface, not the session: panes stay mounted
@@ -3326,6 +3367,16 @@ struct MainWindowView: View {
                         projects: store.pinnedProjects
                     )
                     .id(chatTarget)
+                    // The window-wide drop's target hint, drawn over the
+                    // chat area wherever the drag actually is. Not a drop
+                    // target itself — the root's onDrop does the catching.
+                    .overlay {
+                        if imageDropTargeted {
+                            ImageDropField()
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.12), value: imageDropTargeted)
                 }
             }
         } else {
@@ -3646,7 +3697,8 @@ struct MainWindowView: View {
 
     // MARK: - Project workspace panel (2026-09-23 floating canvas)
 
-    private static let subSidebarWidth: CGFloat = 224
+    // Widened 224 → 256 for the module cards (2026-09-23 mock).
+    private static let subSidebarWidth: CGFloat = 256
     /// Measured content height — the card hugs it, capped at the window.
     @State private var workspaceContentHeight: CGFloat = 0
     /// Which workspace items live in the side panel; the rest ride the
@@ -3664,6 +3716,26 @@ struct MainWindowView: View {
     private func moveToBar(_ item: WorkspaceItem) {
         withAnimation(sheetSpring) { _ = workspaceItems.remove(item) }
         persistWorkspaceItems()
+    }
+
+    /// Each section's "+" — the same action its side-panel card header
+    /// runs, so the bar dropdown and the card behave alike.
+    private func addAction(_ item: WorkspaceItem, path: String) {
+        switch item {
+        case .branches: toggleRightPanel(.git)
+        case .servers: startProjectDevServer(path)
+        case .terminals: newTerminal(in: path)
+        case .chats: newChat(in: path)
+        }
+    }
+
+    private func addHelp(_ item: WorkspaceItem) -> String {
+        switch item {
+        case .branches: "Open git — branches and changes"
+        case .servers: "Start the dev server"
+        case .terminals: "Open a terminal in this project"
+        case .chats: "Start a new chat"
+        }
     }
 
     private func persistWorkspaceItems() {
@@ -3699,30 +3771,28 @@ struct MainWindowView: View {
         .clipped()
     }
 
-    /// The floating workspace card: TERMINALS / CHATS with their hover
-    /// "+" headers, sized to CONTENT (capped at the window) — it only
-    /// runs tall when the chat list does. The chevron tucks it into the
-    /// chat toolbar; the toolbar's panel button brings it back.
+    /// The floating workspace panel (2026-09-23 mock): each module is its
+    /// OWN rounded card — TERMINALS, CHATS… — stacked with a gap, on the
+    /// dropdown surface color. Each card's header carries the caps title
+    /// and, in its top-right corner, the always-visible square controls
+    /// (add, move to the top bar). The stack is sized to CONTENT (capped
+    /// at the window) and scrolls past the cap.
     private func workspaceCard(_ path: String, maxHeight: CGFloat) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
                 if workspaceItems.contains(.branches) {
-                    subBranchesSection(path)
+                    moduleCard { subBranchesSection(path) }
                 }
                 if workspaceItems.contains(.servers) {
-                    subServersSection(path)
+                    moduleCard { subServersSection(path) }
                 }
                 if workspaceItems.contains(.terminals) {
-                    subTerminalsSection(path)
+                    moduleCard { subTerminalsSection(path) }
                 }
                 if workspaceItems.contains(.chats) {
-                    subChatsSection(path)
+                    moduleCard { subChatsSection(path) }
                 }
             }
-            // shadcn menu grammar: a tight uniform card inset, with the
-            // rows' own 8px padding carrying the text alignment — hover
-            // pills run nearly edge to edge, like a Popover's items.
-            .padding(8)
             .background(GeometryReader { proxy in
                 Color.clear.preference(
                     key: WorkspacePanelHeightKey.self,
@@ -3732,19 +3802,26 @@ struct MainWindowView: View {
         }
         .frame(width: Self.subSidebarWidth)
         .frame(height: min(max(workspaceContentHeight, 120), maxHeight))
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                .fill(Theme.sidebarFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                .strokeBorder(Theme.borderSidebar, lineWidth: 1)
-        )
         .onPreferenceChange(WorkspacePanelHeightKey.self) {
             workspaceContentHeight = $0
         }
         .padding(.top, 24)
         .task(id: path) { chatIndex.refresh(path, force: true) }
+    }
+
+    /// One module's card: a tight uniform inset, the rows' own 8px
+    /// padding carrying the text alignment (hover pills run nearly edge
+    /// to edge, like a Popover's items).
+    private func moduleCard<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusFloat)
+                    .fill(Theme.menuFill)
+            )
     }
 
     /// The chat view's top bar: the project title plus a labeled chip
@@ -3994,16 +4071,31 @@ struct MainWindowView: View {
                 onAdd: { newChat(in: path) },
                 onMoveToBar: { moveToBar(.chats) }
             )
-            ForEach(listedChats(for: path)) { ref in
+            // Ten at a time — a long-lived project has hundreds, and the
+            // panel is a card that hugs its content, so an unbounded list
+            // would swallow the workspace. "Show more" reveals the next
+            // page; the count is per project and lives with the view.
+            let all = listedChats(for: path)
+            let shown = Self.chatsPageSize * (1 + chatsPagesRevealed)
+            ForEach(all.prefix(shown)) { ref in
                 SubSidebarRow(
                     title: chatTitler.displayTitle(ref),
                     busy: ChatSessionHub.shared.sessions[ref.filePath]
                         .map { $0.phase != .idle } ?? false,
                     selected: chatTarget?.sessionFile == ref.filePath
                 ) { openChat(project: path, file: ref.filePath) }
+                // Same menu as the chat page's rows — one definition.
+                .contextMenu { chatContextMenu(project: path, ref: ref) }
+            }
+            if all.count > shown {
+                ShowMoreRow(remaining: all.count - shown) {
+                    chatsPagesRevealed += 1
+                }
             }
         }
     }
+
+    private static let chatsPageSize = 10
 
     /// Start the project's own dev server: a terminal plus the detected
     /// dev command (plain terminal when the project declares none).
@@ -4196,6 +4288,7 @@ struct MainWindowView: View {
     @ViewBuilder
     private func chatContextMenu(project: String, ref: ChatSessionRef) -> some View {
         let file = ref.filePath
+        let running = ChatSessionHub.shared.sessions[file]?.running == true
         Button("Rename…") { ChatRowActions.promptRename(ref) }
         Button(chatMeta.pinned.contains(file) ? "Unpin" : "Pin") {
             chatMeta.togglePin(file)
@@ -4210,19 +4303,69 @@ struct MainWindowView: View {
                 archiveChat(project: project, file: file)
             }
         }
+        Button("Delete Permanently…") { deleteChat(project: project, file: file) }
+            .disabled(running)
         Divider()
-        Button("Branch Chat") {
-            ChatRowActions.duplicate(ref, project: project, asBranch: true)
+        // Another project's store — an export + remove (the CLIs key
+        // sessions by directory). Disabled mid-turn: the live session
+        // would keep appending to a file that's about to be trashed.
+        Menu("Move to Project") {
+            ForEach(store.pinnedProjects.filter { $0 != project }, id: \.self) { other in
+                Button(displayProjectName(other)) {
+                    moveChat(ref, from: project, to: other)
+                }
+            }
         }
-        Button("Duplicate") { ChatRowActions.duplicate(ref, project: project) }
-        Button("Copy Transcript") { ChatRowActions.copyTranscript(ref) }
-        Button("Reveal Transcript in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting(
-                [URL(fileURLWithPath: file)]
-            )
+        .disabled(running || store.pinnedProjects.count < 2)
+        Divider()
+        Button("Share…") { ChatRowActions.share(ref) }
+        Menu("Copy") {
+            Button("Copy Title") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    chatTitler.displayTitle(ref), forType: .string
+                )
+            }
+            Button("Copy Transcript") { ChatRowActions.copyTranscript(ref) }
+            Button("Copy Transcript Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(file, forType: .string)
+            }
+        }
+        Menu("Fork") {
+            Button("Branch Chat") {
+                ChatRowActions.duplicate(ref, project: project, asBranch: true)
+            }
+            Button("Duplicate") { ChatRowActions.duplicate(ref, project: project) }
         }
         Divider()
-        Button("Delete Chat") { deleteChat(project: project, file: file) }
+        // The chat's PROJECT folder in an editor, a terminal, or Finder —
+        // installed apps only, so nothing here is a dead item.
+        Menu("Open in") {
+            ForEach(Actions.ExternalApp.allCases.filter(\.installed)) { app in
+                Button(app.title) { Actions.open(path: project, in: app) }
+            }
+            Divider()
+            Button("Transcript in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [URL(fileURLWithPath: file)]
+                )
+            }
+        }
+    }
+
+    /// Move a chat to another project: the row leaves this list, the
+    /// open view (if it was this chat) lands on the destination's copy.
+    private func moveChat(_ ref: ChatSessionRef, from project: String, to destination: String) {
+        let wasOpen = chatTarget?.sessionFile == ref.filePath
+        ChatRowActions.move(ref, from: project, to: destination) { moved in
+            guard wasOpen else { return }
+            if let moved {
+                chatTarget = ChatTarget(path: destination, sessionFile: moved)
+            } else {
+                chatTarget = ChatTarget(path: project, sessionFile: nil)
+            }
+        }
     }
 
     /// Archive a chat: it folds under the project's Archived toggle,
@@ -4239,16 +4382,21 @@ struct MainWindowView: View {
         }
     }
 
-    /// Delete a chat: shut its live session down, trash the transcript
-    /// (recoverable), and fall back to the project's chat list if it was
-    /// open.
+    /// Delete a chat for good: confirm, shut its live session down, remove
+    /// the transcript (not trashed — the menu item says permanently, so it
+    /// is), and fall back to the project's chat list if it was open.
     private func deleteChat(project: String, file: String) {
+        let alert = NSAlert()
+        alert.messageText = "Delete this chat permanently?"
+        alert.informativeText = "The transcript is removed from disk. This can't be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         ChatSessionHub.shared.forget(file: file)
         ChatMetaStore.shared.forget(file)
         CapsuleStore.shared.forget(file: file)
-        try? FileManager.default.trashItem(
-            at: URL(fileURLWithPath: file), resultingItemURL: nil
-        )
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: file))
         if chatTarget?.sessionFile == file {
             chatTarget = ChatTarget(path: project, sessionFile: nil)
         }
@@ -4908,6 +5056,13 @@ struct MainWindowView: View {
         }
 
         guard wasSelected else { return }
+        // Closing the workspace's own terminal returns to its chat — never
+        // a jump to some other project's terminal.
+        if chatTarget?.path == path {
+            detailShowsTerminal = false
+            selection = nil
+            return
+        }
         let remaining = order.filter { $0 != path }
         guard !remaining.isEmpty, let index else {
             selection = nil
@@ -5786,6 +5941,9 @@ enum WorkspaceItem: String, CaseIterable {
     case branches, servers, terminals, chats
 }
 
+/// A module card's header (2026-09-23 mock): caps title on the left,
+/// the square controls in the top-right corner — always visible, not a
+/// hover reveal.
 private struct SubSectionHeader: View {
     let title: String
     let addHelp: String
@@ -5793,54 +5951,101 @@ private struct SubSectionHeader: View {
     /// Sends this section back to the top bar.
     var onMoveToBar: (() -> Void)? = nil
 
-    @State private var hovered = false
-
     var body: some View {
         HStack(spacing: 6) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .kerning(0.8)
                 .foregroundStyle(Theme.heading)
-            headerButton(
-                symbol: "plus", help: addHelp, action: onAdd
-            )
+            Spacer(minLength: 8)
+            PanelControlButton(icon: "plus", help: addHelp, action: onAdd)
             if let onMoveToBar {
-                headerButton(
-                    symbol: "dock-top",
-                    help: "Move to the top bar",
+                PanelControlButton(
+                    icon: "dock-top", help: "Move to the top bar",
                     action: onMoveToBar
                 )
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .contentShape(Rectangle())
-        .onHover { inside in
-            withAnimation(Theme.quick) { hovered = inside }
-        }
-    }
-
-    private func headerButton(
-        symbol: String, help: String, action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            LucideIcon(symbol, size: 11)
-                // Full-contrast ink, not the secondary gray — these only
-                // exist on hover and were vanishing into the card.
-                .foregroundStyle(Theme.text)
-                .frame(width: 16, height: 16)
-                .background(Circle().fill(Theme.rowHovered))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .opacity(hovered ? 1 : 0)
+        .padding(.leading, 8)
+        .frame(height: 28)
     }
 }
 
-/// A workspace sub-sidebar row: optional status dot, 13pt title, hover
-/// wash, selected pill.
+/// The module cards' corner control (and the top bar dropdowns' — same
+/// size everywhere): a 24pt rounded square on the control-chip fill,
+/// hover stepping the wash and the glyph up.
+struct PanelControlButton: View {
+    let icon: String
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(Theme.controlChip)
+                if hovered {
+                    RoundedRectangle(cornerRadius: 6).fill(Theme.rowHovered)
+                }
+                LucideIcon(icon, size: 13)
+                    .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
+            }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        // The tip shows the instant the pointer lands — the system
+        // `.help` tooltip waits ~a second, which on a 24pt glyph-only
+        // control reads as "no label". It sits ABOVE the button, clear
+        // of it and of the pointer (an arrow cursor only ever extends
+        // down-right from its hotspot, so nothing above the button can
+        // end up under it), trailing-aligned and growing leftward since
+        // these controls sit at the right edge of their header. The
+        // spacer is the button's height plus the gap — fixed frames, so
+        // the placement can't drift with the card's text height.
+        .overlay(alignment: .bottomTrailing) {
+            if hovered {
+                VStack(alignment: .trailing, spacing: 0) {
+                    TipCard(text: help)
+                    Color.clear.frame(width: 1, height: 24 + 6)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .accessibilityLabel(help)
+    }
+}
+
+/// The floating label the rail and the panel controls share: 11pt medium
+/// on the menu fill with a hairline and a soft shadow.
+struct TipCard: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Theme.text)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(Theme.menuFill)
+                    .shadow(
+                        color: Theme.floatShadowColor,
+                        radius: 4, x: 0, y: 1
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+            )
+    }
+}
+
+/// A workspace sub-sidebar row: optional status dot, 14pt title, hover
+/// wash, selected pill — the mock's airy 34pt pitch.
 private struct SubSidebarRow: View {
     let title: String
     var dot: Color? = nil
@@ -5863,16 +6068,16 @@ private struct SubSidebarRow: View {
                 Circle().fill(Theme.dotActive).frame(width: 6, height: 6)
             }
             Text(title)
-                .font(.system(size: 13))
+                .font(.system(size: 14))
                 .foregroundStyle(muted ? Theme.textSecondary : Theme.text)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
             if hovered, let onClose {
                 Button(action: onClose) {
-                    LucideIcon("x", size: 11)
+                    LucideIcon("x", size: 12)
                         .foregroundStyle(Theme.text)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -5880,7 +6085,7 @@ private struct SubSidebarRow: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 26)
+        .frame(height: 34)
         .background(
             RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .fill(selected
@@ -5890,6 +6095,83 @@ private struct SubSidebarRow: View {
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
         .onTapGesture(perform: action)
+    }
+}
+
+/// The CHATS section's quiet pager: a text-only row in the secondary
+/// ink, brightening on hover — deliberately not a pill, so it reads as a
+/// footnote under the list rather than another chat.
+private struct ShowMoreRow: View {
+    let remaining: Int
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Show more")
+                .font(.system(size: 12))
+                .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help("Show the next \(min(remaining, 10)) chats")
+    }
+}
+
+/// The root's image/file drop, window-wide. `validateDrop` gates on the
+/// drag's flavor AND on a chat surface being visible, so nothing lights
+/// up (and nothing is swallowed) while a terminal or the empty state
+/// shows; the loader is the composer's own, so a drop here stages
+/// exactly like a drop on the composer would.
+private struct WindowImageDropDelegate: DropDelegate {
+    @Binding var targeted: Bool
+    let accepts: () -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        accepts() && info.hasItemsConforming(to: [.image, .fileURL])
+    }
+
+    func dropEntered(info: DropInfo) { targeted = true }
+    func dropExited(info: DropInfo) { targeted = false }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .copy)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        targeted = false
+        return ComposerDropLoader.load(info.itemProviders(for: [.image, .fileURL]))
+    }
+}
+
+/// The chat area's drop hint while an image drag is over the window: a
+/// dashed accent frame inset from the edges, icon + line centered.
+/// Hit-testing is off so it never becomes a drop target of its own.
+private struct ImageDropField: View {
+    var body: some View {
+        ZStack {
+            Theme.emptyStateBackground.opacity(0.72)
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(
+                    Theme.link,
+                    style: StrokeStyle(lineWidth: 1.5, dash: [7, 6])
+                )
+                .padding(18)
+            VStack(spacing: 10) {
+                LucideIcon("image-plus", size: 30)
+                    .foregroundStyle(Theme.link)
+                Text("Drop image anywhere")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("It attaches to your message")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

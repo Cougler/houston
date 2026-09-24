@@ -32,6 +32,10 @@ enum Theme {
     /// `popover`: white on light, zinc-900 on dark (a card on zinc-950
     /// needs the step plus the border to separate).
     static let panelFill = Color(light: 0xFFFFFF, dark: 0x18181B)
+    /// Floating menu/dropdown cards (tasks flyout, bar dropdowns, the
+    /// servers/rail flyouts, hover pills) — a step lighter than
+    /// panelFill in the dark theme so the card separates from the page.
+    static let menuFill = Color(light: 0xFFFFFF, dark: 0x222226)
     /// The git panel / sheet surface: zinc-50 in light, the deep
     /// background in dark.
     static let gitPanelFill = Color(light: 0xFAFAFA, dark: 0x09090B)
