@@ -243,6 +243,9 @@ struct ChatBrowserView: View {
     /// it pops Houston's menu and swallows the event; without one it
     /// passes through untouched (paragraph menu, composer, code cards).
     @State private var contextMonitor: Any?
+    /// Scroll-wheel monitor: a scroll UP over the transcript ends the
+    /// tail-follow (see `installContextMonitor`).
+    @State private var scrollMonitor: Any?
     /// The transcript's frame in global coords, gating the interceptor.
     @State private var transcriptFrame: CGRect = .zero
     /// Live scroll metrics OUTSIDE SwiftUI state: read by growth handlers,
@@ -578,19 +581,22 @@ struct ChatBrowserView: View {
                         }
                         .onPreferenceChange(ChatBottomYKey.self) { y in
                             // Distance of the sentinel below the viewport
-                            // bottom. Wide hysteresis so a growth blip
-                            // never latches "not following": only a real
-                            // scroll-up past 240pt turns it off; returning
-                            // within 80pt turns it back on.
+                            // bottom. Following turns back ON only when
+                            // the user is actually AT the bottom (a few
+                            // points of slack for rounding); it turns OFF
+                            // on scroll-wheel input alone (the monitor in
+                            // installContextMonitor), never on distance —
+                            // a growth blip pushes the sentinel out for a
+                            // frame before the anchor re-pins, and a
+                            // distance rule would read that as the user
+                            // scrolling away.
                             // Guarded writes: this fires per scroll/growth
                             // frame, so the steady state must cost a
                             // comparison, not a state write.
                             let distance = y - geo.size.height
                             scrollMetrics.bottomDistance = distance
-                            if distance <= 80 {
-                                if !stickToBottom { stickToBottom = true }
-                            } else if distance > 240, stickToBottom {
-                                stickToBottom = false
+                            if distance <= 8, !stickToBottom {
+                                stickToBottom = true
                             }
                         }
                         .onChange(of: messages.count) {
@@ -818,6 +824,22 @@ struct ChatBrowserView: View {
 
     private func installContextMonitor() {
         removeContextMonitor()
+        // Scrolling UP over the transcript is the one thing that stops
+        // the tail-follow — user input, not geometry (see the bottom
+        // preference handler). Positive scrollingDeltaY is "toward the
+        // top" after AppKit applies natural-scroll inversion.
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.scrollWheel]
+        ) { event in
+            guard stickToBottom, event.scrollingDeltaY > 0,
+                  let content = event.window?.contentView else { return event }
+            let location = event.locationInWindow
+            let global = CGPoint(
+                x: location.x, y: content.bounds.height - location.y
+            )
+            if transcriptFrame.contains(global) { stickToBottom = false }
+            return event
+        }
         contextMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.rightMouseDown]
         ) { event in
@@ -860,6 +882,8 @@ struct ChatBrowserView: View {
     private func removeContextMonitor() {
         if let contextMonitor { NSEvent.removeMonitor(contextMonitor) }
         contextMonitor = nil
+        if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+        scrollMonitor = nil
     }
 
     // MARK: - Sends
@@ -3116,11 +3140,43 @@ struct MessageView: View {
             )
             if message.role == .assistant, let onThread {
                 let anchor = ChatThread.anchorKey(for: text)
+                // Selection threads split the paragraph around their
+                // quote so the chip sits under the quoted words; whole-
+                // paragraph threads (and quotes that can't be located)
+                // keep the chip under the paragraph.
+                let split = ThreadSplit.segments(
+                    text: text, blockAnchor: anchor,
+                    threads: blockThreads[anchor] ?? []
+                )
                 ThreadableBlock(
                     anchor: anchor,
-                    threads: blockThreads[anchor] ?? [],
+                    threads: split.trailing,
                     onOpen: onThread
-                ) { prose }
+                ) {
+                    if split.segments.isEmpty {
+                        prose
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(split.segments) { segment in
+                                switch segment {
+                                case let .prose(_, body):
+                                    MarkdownBlockView(
+                                        text: body,
+                                        color: isNarration(index)
+                                            ? Theme.textSecondary : Theme.chatProse
+                                    )
+                                case let .quoted(_, body, anchor, count):
+                                    QuotedThreadSegment(
+                                        text: body, anchor: anchor, count: count,
+                                        color: isNarration(index)
+                                            ? Theme.textSecondary : Theme.chatProse,
+                                        onOpen: onThread
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 // Right-click is the reliable route to selection threads:
                 // the selection survives into the menu action, where the
                 // responder-chain capture reads it. (A custom menu does
@@ -3161,6 +3217,142 @@ struct MessageView: View {
         }
     }
 
+}
+
+/// A paragraph split around its selection-thread quotes (2026-09-25):
+/// each located quote becomes its own highlighted block with the reply
+/// chip directly under the quoted words, the prose between them stays
+/// prose. Whole-paragraph threads and quotes that can't be found in the
+/// source stay as chips under the paragraph (`trailing`).
+private enum ThreadSplit {
+    enum Segment: Identifiable {
+        case prose(Int, String)
+        case quoted(Int, String, anchor: String, count: Int)
+
+        var id: Int {
+            switch self {
+            case let .prose(i, _), let .quoted(i, _, _, _): i
+            }
+        }
+    }
+
+    struct Result {
+        var segments: [Segment]
+        var trailing: [(anchor: String, count: Int)]
+    }
+
+    static func segments(
+        text: String, blockAnchor: String,
+        threads: [(anchor: String, count: Int)]
+    ) -> Result {
+        var located: [(range: Range<String.Index>, anchor: String, count: Int)] = []
+        var trailing: [(anchor: String, count: Int)] = []
+        for thread in threads {
+            if thread.anchor != blockAnchor,
+               let range = ChatThread.rawRange(of: thread.anchor, in: text),
+               !located.contains(where: { $0.range.overlaps(range) }) {
+                located.append((range, thread.anchor, thread.count))
+            } else {
+                trailing.append(thread)
+            }
+        }
+        guard !located.isEmpty else { return Result(segments: [], trailing: trailing) }
+        located.sort { $0.range.lowerBound < $1.range.lowerBound }
+        var out: [Segment] = []
+        var cursor = text.startIndex
+        for hit in located {
+            let before = text[cursor..<hit.range.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !before.isEmpty { out.append(.prose(out.count, before)) }
+            out.append(.quoted(
+                out.count, String(text[hit.range]),
+                anchor: hit.anchor, count: hit.count
+            ))
+            cursor = hit.range.upperBound
+        }
+        let after = text[cursor...].trimmingCharacters(in: .whitespacesAndNewlines)
+        if !after.isEmpty { out.append(.prose(out.count, after)) }
+        return Result(segments: out, trailing: trailing)
+    }
+}
+
+/// The quoted run a thread hangs off: the words on a faint accent wash
+/// with an accent rule at the left, the reply chip right beneath them.
+private struct QuotedThreadSegment: View {
+    let text: String
+    let anchor: String
+    let count: Int
+    let color: Color
+    let onOpen: (String) -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            MarkdownBlockView(text: text, color: color)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(Theme.link.opacity(hovered ? 0.15 : 0.09))
+                )
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Theme.link.opacity(0.7))
+                        .frame(width: 2)
+                        .padding(.vertical, 5)
+                        .padding(.leading, 3)
+                }
+                // The whole quoted block opens its thread. A clear layer
+                // on top takes the click (selectable text underneath
+                // would otherwise swallow it for selection) — the quote
+                // is a link to the thread, not prose to select; the full
+                // paragraph is still selectable around it.
+                .overlay {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { onOpen(anchor) }
+                        .onHover { inside in
+                            hovered = inside
+                            if inside { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                        }
+                }
+                .help("Open this thread")
+            ThreadReplyChip(anchor: anchor, count: count, onOpen: onOpen)
+                .padding(.leading, 10)
+        }
+    }
+}
+
+/// One thread's reply-count chip (shared by paragraph chips and the
+/// quoted segments). `sliver` leads with a bit of the quote, for the
+/// case where several threads share one paragraph.
+private struct ThreadReplyChip: View {
+    let anchor: String
+    let count: Int
+    var sliver: Bool = false
+    let onOpen: (String) -> Void
+
+    var body: some View {
+        Button {
+            onOpen(anchor)
+        } label: {
+            HStack(spacing: 4) {
+                LucideIcon("message-square-text", size: 11)
+                if sliver {
+                    Text("\u{201C}\(String(anchor.prefix(22)))…\u{201D}")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                }
+                Text("\(count) \(count == 1 ? "reply" : "replies")")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(Theme.link)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open this thread")
+    }
 }
 
 /// One threadable reply paragraph: hover shows the "ask about this"
@@ -3222,24 +3414,10 @@ private struct ThreadableBlock<Content: View>: View {
     /// several hang off the same paragraph, each leads with a sliver of
     /// its quote so they're tellable apart.
     private func chip(_ thread: (anchor: String, count: Int)) -> some View {
-        Button {
-            onOpen(thread.anchor)
-        } label: {
-            HStack(spacing: 4) {
-                LucideIcon("message-square-text", size: 11)
-                if threads.count > 1 {
-                    Text("\u{201C}\(String(thread.anchor.prefix(22)))…\u{201D}")
-                        .font(.system(size: 11))
-                        .lineLimit(1)
-                }
-                Text("\(thread.count) \(thread.count == 1 ? "reply" : "replies")")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .foregroundStyle(Theme.link)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Open this thread")
+        ThreadReplyChip(
+            anchor: thread.anchor, count: thread.count,
+            sliver: threads.count > 1, onOpen: onOpen
+        )
     }
 }
 

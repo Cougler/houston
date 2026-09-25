@@ -102,6 +102,17 @@ struct MainWindowView: View {
     /// Floating: it overlays the content. Seeded from the last pin choice
     /// (settings.json) so a sheet opens the way the user last left one.
     @State private var rightPanelDocked = HoustonSettings.read().rightPanelDocked
+    /// The thread sheet's width — nil until the user drags its edge, in
+    /// which case it opens at half the window (2026-09-25: a thread is a
+    /// second conversation, not a side note, so it gets real room).
+    @State private var threadSheetWidth: CGFloat?
+    @State private var threadDragStart: CGFloat?
+    /// Window content width, recorded by the sheet layer's GeometryReader
+    /// — the thread sheet's default width and drag clamp derive from it.
+    @State private var windowContentWidth: CGFloat = 0
+    /// Side-panel modules parked in the top bar while a thread is open
+    /// (the thread takes the panel's room); restored when it closes.
+    @State private var stashedWorkspaceItems: Set<WorkspaceItem>?
     /// The project (chats) panel doesn't pin/unpin — it docks always and
     /// COLLAPSES instead (2026-09-22): tucked off the right edge with a
     /// small handle to bring it back.
@@ -1140,14 +1151,39 @@ struct MainWindowView: View {
         if case .chats = rightPanel {
             return chatsPanelCollapsed ? 0 : rightSheetWidth + 24
         }
+        // A thread ALWAYS takes layout room — half the window by default.
+        if case .chatThread = rightPanel { return activeSheetWidth }
         return rightPanelDocked ? rightSheetWidth : 0
     }
 
+    /// Whether the sheet (or the one sliding out) is a chat thread.
+    private var isThreadSheet: Bool {
+        if case .chatThread = effectiveRightPanel { return true }
+        return false
+    }
+
+    /// The sheet's width: the fixed strip for every panel except a
+    /// thread, which opens at half the window and resizes by its edge.
+    private var activeSheetWidth: CGFloat {
+        guard isThreadSheet else { return rightSheetWidth }
+        let half = (windowContentWidth / 2).rounded()
+        return Self.clampThreadWidth(threadSheetWidth ?? half, window: windowContentWidth)
+    }
+
+    /// Never narrower than a readable column, never so wide the chat
+    /// underneath loses its own.
+    private static func clampThreadWidth(_ width: CGFloat, window: CGFloat) -> CGFloat {
+        let upper = max(360, window - 420)
+        return min(max(360, width), upper).rounded()
+    }
+
     /// Docked chrome/geometry for the sheet: the chats panel always
-    /// renders as the floating card (the mock); everything else follows
-    /// the user's pin choice.
+    /// renders as the floating card (the mock); a thread is always
+    /// docked (it owns half the window); everything else follows the
+    /// user's pin choice.
     private var sheetDocked: Bool {
         if case .chats = effectiveRightPanel { return false }
+        if isThreadSheet { return true }
         return rightPanelDocked
     }
 
@@ -1249,6 +1285,11 @@ struct MainWindowView: View {
                     maxWidth: .infinity, maxHeight: .infinity,
                     alignment: .topTrailing
                 )
+                // The thread sheet sizes itself off the window: record
+                // the width here (this reader spans the whole window).
+                .onChange(of: geo.size.width, initial: true) { _, width in
+                    windowContentWidth = width
+                }
         }
         // Slide on WHOLE PIXELS only (the real root of the blur, found
         // 2026-09-21 after three partial fixes): opening fires async work
@@ -1265,7 +1306,7 @@ struct MainWindowView: View {
         // animatable modifier rounds the inset EVERY FRAME, so there is no
         // instant at which a re-render can bake a fractional phase.
         .modifier(WholePixelTrailingInset(
-            inset: open ? 0 : -(rightSheetWidth + 40)))
+            inset: open ? 0 : -(activeSheetWidth + 40)))
         .allowsHitTesting(open)
         // The project sidebar tracks the project view: entering one (any
         // chatTarget — home or a chat) summons it, wherever the target
@@ -1293,16 +1334,60 @@ struct MainWindowView: View {
                 return
             }
         }
+        // A thread takes the side panel's room: its modules park in the
+        // top bar for the thread's lifetime and come back when it
+        // closes. Transient — never persisted, so the user's layout
+        // choice survives. Modules moved INTO the panel while a thread
+        // is up (via a bar dropdown) are kept on restore.
+        .onChange(of: rightPanel) { old, new in
+            let wasThread: Bool = { if case .chatThread = old { true } else { false } }()
+            let isThread: Bool = { if case .chatThread = new { true } else { false } }()
+            if isThread, !wasThread {
+                stashedWorkspaceItems = workspaceItems
+                withAnimation(sheetSpring) { workspaceItems = [] }
+            } else if wasThread, !isThread, let stash = stashedWorkspaceItems {
+                stashedWorkspaceItems = nil
+                withAnimation(sheetSpring) { workspaceItems.formUnion(stash) }
+            }
+        }
         }
     }
 
     /// Click on dead chrome: dismiss a floating sheet, never a docked one.
     /// The project sidebar is exempt while a project view is up — it's
     /// part of that view (no ✕ either); leaving the project closes it.
+    /// A thread is always docked, so it's exempt too.
     private func closeFloatingSheet() {
         guard rightPanel != nil, !rightPanelDocked else { return }
         if case .chats = rightPanel, chatTarget != nil { return }
+        if case .chatThread = rightPanel { return }
         closeRightPanel()
+    }
+
+    /// The thread sheet's leading-edge grip: an 8pt strip with the
+    /// resize cursor. Dragging LEFT widens (the edge moves with the
+    /// pointer); global coordinates, same reason as the sidebar divider —
+    /// the grip itself moves as the width changes.
+    private var threadResizeHandle: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 8)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+            }
+            .gesture(
+                DragGesture(coordinateSpace: .global)
+                    .onChanged { value in
+                        let start = threadDragStart ?? activeSheetWidth
+                        threadDragStart = start
+                        threadSheetWidth = Self.clampThreadWidth(
+                            start - value.translation.width, window: windowContentWidth
+                        )
+                    }
+                    .onEnded { _ in threadDragStart = nil }
+            )
     }
 
     /// The sheet itself: a full-height strip off the right edge — a controls
@@ -1316,16 +1401,20 @@ struct MainWindowView: View {
                 HStack(spacing: 4) {
                     rightSheetTitleView
                     Spacer(minLength: 8)
-                    ControlIconButton(
-                        icon: rightPanelDocked
-                            ? "pin-off" : "pin",
-                        help: rightPanelDocked
-                            ? "Float over the content"
-                            : "Dock beside the content",
-                        bare: true,
-                        circleSize: 32,
-                        action: { toggleRightPanelPinned() }
-                    )
+                    // A thread is always docked at half the window — no
+                    // float/dock choice to offer.
+                    if !isThreadSheet {
+                        ControlIconButton(
+                            icon: rightPanelDocked
+                                ? "pin-off" : "pin",
+                            help: rightPanelDocked
+                                ? "Float over the content"
+                                : "Dock beside the content",
+                            bare: true,
+                            circleSize: 32,
+                            action: { toggleRightPanelPinned() }
+                        )
+                    }
                     ControlIconButton(
                         icon: "x",
                         help: "Close",
@@ -1350,8 +1439,12 @@ struct MainWindowView: View {
                 .padding(.top, serverChromeHidden ? 10 : 0)
                 .padding(.bottom, 10)
         }
-        .frame(width: rightSheetWidth)
+        .frame(width: activeSheetWidth)
         .frame(maxHeight: .infinity)
+        // The thread sheet resizes by its leading edge.
+        .overlay(alignment: .leading) {
+            if isThreadSheet { threadResizeHandle }
+        }
         // Glass, same recipe as the left sidebar: the content behind the
         // floating card reads through the blur, the fill wash keeps the
         // panel's rows legible.

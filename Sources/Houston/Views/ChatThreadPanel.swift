@@ -51,6 +51,41 @@ enum ChatThread {
         return out
     }
 
+    /// Where a quote sits in a paragraph's markdown SOURCE, so the
+    /// paragraph can be split around it and the reply chip drawn under
+    /// the quoted words themselves. The anchor is normalized rendered
+    /// text (quotes flattened to singles, whitespace collapsed, styling
+    /// stripped), so the match is tolerant: any run of whitespace, either
+    /// quote glyph, and markdown tokens (`**`, `__`, backticks, `~~`,
+    /// link brackets/targets) allowed between characters. nil when the
+    /// quote can't be located (a stale anchor, or one that crossed a
+    /// block boundary) — the caller falls back to a paragraph chip.
+    static func rawRange(of anchor: String, in text: String) -> Range<String.Index>? {
+        let needle = normalize(anchor)
+        guard !needle.isEmpty else { return nil }
+        let between = #"(?:\*\*|__|`|~~|\[|\]\([^)]*\))*"#
+        var pieces: [String] = []
+        var lastWasSpace = false
+        for ch in needle {
+            if ch.isWhitespace {
+                if !lastWasSpace { pieces.append(#"\s+"#) }
+                lastWasSpace = true
+                continue
+            }
+            lastWasSpace = false
+            if ch == "'" {
+                pieces.append(#"["'‘’“”]"#)
+            } else {
+                pieces.append(NSRegularExpression.escapedPattern(for: String(ch)))
+            }
+        }
+        let pattern = pieces.joined(separator: between)
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let whole = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: whole) else { return nil }
+        return Range(match.range, in: text)
+    }
+
     /// The paragraph a quote lives in — anchors from arbitrary selections
     /// hang their reply chips off whichever assistant paragraph CONTAINS
     /// the quote. nil when no paragraph matches (a stale quote, or a
