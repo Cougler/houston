@@ -2021,44 +2021,39 @@ private struct ChatComposer: View {
                 }
             }
 
-            // The picker pill, below-left of the card: attach + model +
-            // harness + effort (+ meter), on the recessed tile fill.
+            // The bar under the card, CENTERED: the attach "+" as its own
+            // frosted square, then the picker pill (project + model +
+            // harness + effort + meter) beside it.
             HStack(alignment: .center, spacing: 6) {
                 Button(action: attachImage) {
                     LucideIcon("plus", size: 14)
                         .foregroundStyle(Theme.text)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Circle())
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Attach an image (inserts its path)")
-                if projectChoices != nil { projectMenu }
-                modelMenu
-                harnessMenu
-                // Hidden for local models (the local server decides)
-                // and ACP harnesses (no effort flag — the menu would
-                // be empty).
-                if model.provider == nil,
-                   !ChatModelChoice.efforts(for: model.harness).isEmpty {
-                    effortMenu
+                .background(pickerFill)
+                HStack(alignment: .center, spacing: 6) {
+                    if projectChoices != nil { projectMenu }
+                    modelMenu
+                    harnessMenu
+                    // Hidden for local models (the local server decides)
+                    // and ACP harnesses (no effort flag — the menu would
+                    // be empty).
+                    if model.provider == nil,
+                       !ChatModelChoice.efforts(for: model.harness).isEmpty {
+                        effortMenu
+                    }
+                    if let runningSession {
+                        ContextMeter(session: runningSession)
+                    }
                 }
-                if let runningSession {
-                    ContextMeter(session: runningSession)
-                }
+                .padding(.horizontal, 9)
+                .frame(height: 30)
+                .background(pickerFill)
             }
-            .padding(.horizontal, 9)
-            .frame(height: 30)
-            // 8px radius, not a capsule — same frosted fill as the
-            // input card above, not the recessed tile gray.
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Theme.sidebarFill.opacity(0.6))
-                }
-            )
-            // Indented off the card's left edge (mock).
-            .padding(.leading, 12)
+            .frame(maxWidth: .infinity)
         }
         // Text only (capsule/fragment chips, plain text): the ring is
         // the target hint for those. Images and files are the WINDOW's
@@ -2560,6 +2555,17 @@ private struct ChatComposer: View {
         onSend(text, model.applying(
             effort: activeEffort?.arg, permission: activePermission
         ))
+    }
+
+    /// The bar's frosted fill — 8px radius, not a capsule; the same
+    /// glass as the input card above, not the recessed tile gray. Shared
+    /// by the attach square and the picker pill so they read as a set.
+    private var pickerFill: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Theme.sidebarFill.opacity(0.6))
+        }
     }
 
     private func attachImage() {
