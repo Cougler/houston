@@ -484,13 +484,14 @@ private struct ThreadLiveSection: View {
                             .accessibilityHidden(true)
                         Group {
                             if let tokens = session.thinkingTokens {
-                                Text(tokens > 0
-                                    ? "Thinking… \(formatTokens(tokens)) tokens"
-                                    : "Thinking…")
+                                Text(session.thinkingLabel ?? "Thinking…")
+                                    + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
+                                        .foregroundColor(Theme.textSecondary.opacity(0.7))
                             } else {
                                 Text("Working…")
                             }
                         }
+                        .lineLimit(2)
                         .font(Theme.Fonts.body)
                         .foregroundStyle(Theme.textSecondary)
                         .monospacedDigit()

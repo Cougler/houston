@@ -304,24 +304,41 @@ struct MainWindowView: View {
     }
 
     private var chromeBackground: Color {
+        // A terminal on screen paints the WHOLE content area in its
+        // theme's background (2026-09-27): no card, no window — the
+        // terminal is the surface, and the top bar, panels and status bar
+        // float on it.
+        if terminalSurfaceShowing {
+            return TerminalSessionManager.themeBackgroundColor(named: settings.terminalTheme)
+        }
         // Chat mode's chrome matches the chat page, which matches the
         // empty state (2026-09-21) — one content surface everywhere.
-        if chatTarget != nil { return Theme.emptyStateBackground }
-        if let path = selection?.projectPath, terminals.hasPane(for: path) {
-            // Terminal mode's page matches the sidebar (the rounded
-            // terminal card carries the theme color; the chrome around it
-            // reads as one surface with the sidebar).
-            return Theme.sidebarFill
-        }
         return Theme.emptyStateBackground
+    }
+
+    /// A terminal is the visible surface: a plain terminal selection
+    /// (no workspace), or the workspace showing its project's terminal.
+    private var terminalSurfaceShowing: Bool {
+        guard let path = selection?.projectPath, terminals.hasPane(for: path) else {
+            return false
+        }
+        if let chatTarget {
+            return detailShowsTerminal && chatTarget.path == path
+        }
+        return true
     }
 
     /// Whether that surface is dark — the fixed collapse toggle sits on it
     /// (not on the sidebar panel), so its glyph flips appearance with it.
-    /// Every chrome surface now tracks the appearance (the sky included),
-    /// so this is just the system scheme.
+    /// Chrome surfaces track the appearance; a terminal surface reads its
+    /// theme's actual background instead.
     private var chromeIsDark: Bool {
-        systemScheme == .dark
+        if terminalSurfaceShowing {
+            return TerminalSessionManager.themeBackgroundIsDark(
+                named: settings.terminalTheme, darkAppearance: systemScheme == .dark
+            )
+        }
+        return systemScheme == .dark
     }
 
     /// Sidebar width, dragged by the divider below.
@@ -2762,7 +2779,12 @@ struct MainWindowView: View {
                     PanelControlButton(
                         icon: "plus", help: addHelp(item),
                         action: {
-                            withAnimation(Theme.quick) { barDropdown = nil }
+                            // Tasks adds IN the dropdown (its input is
+                            // at the bottom), so it stays open; every
+                            // other add leaves for its surface.
+                            if item != .tasks {
+                                withAnimation(Theme.quick) { barDropdown = nil }
+                            }
                             addAction(item, path: path)
                         }
                     )
@@ -2889,13 +2911,7 @@ struct MainWindowView: View {
                 }
             }
         case .tasks:
-            ProjectTaskRows(
-                store: AnnotationStores.store(for: path),
-                onOpen: {
-                    withAnimation(Theme.quick) { barDropdown = nil }
-                    openProjectTasks(path)
-                }
-            )
+            ProjectTaskRows(store: AnnotationStores.store(for: path), projectPath: path)
         }
     }
 
@@ -3609,23 +3625,17 @@ struct MainWindowView: View {
     /// The terminal as a rounded card on the page chrome (2026-09-14):
     /// the terminal theme's background fills only the card.
     private func terminalCard(_ path: String) -> some View {
+        // No card (2026-09-27): the chrome behind is already the theme's
+        // background (`chromeBackground`), so the terminal reads as the
+        // whole content area. The insets below are text gutters on that
+        // one surface, not a window edge — and the top one clears the
+        // floating top bar (24 + 40 + a little air) so the first prompt
+        // line starts under it, not behind it.
         TerminalHostView(path: path, tabID: selection?.tabID)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(TerminalSessionManager.themeBackgroundColor(
-                named: settings.terminalTheme))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            // Collapsed drops the leading gap so the card sits
-            // flush against the thin rail. Balanced in the workspace
-            // (2026-09-27): the side panel's slot already keeps 14pt of
-            // air before its card, so the terminal's own trailing gap
-            // goes to zero while the panel is open — left and right
-            // read the same (they were 12 vs 30). Without the panel the
-            // trailing gap matches the leading one.
             .padding(.leading, sidebarCollapsed ? 0 : terminalCardGap)
             .padding(.trailing, workspacePanelOpen ? 0 : terminalCardGap + 2)
-            // In the workspace the top bar floats OVER the card, so the
-            // card's top gap matches its sides.
-            .padding(.top, chatTarget == nil ? 2 : terminalCardGap)
+            .padding(.top, chatTarget == nil ? 2 : 74)
             .padding(.bottom, 10)
     }
 
@@ -3814,9 +3824,10 @@ struct MainWindowView: View {
                 sessionFile: liveChatFile(in: path) ?? mostRecentChatFile(in: path)
             )
         }
-        // A project click always lands with the side panel up and the
-        // Chats module in it — even if Chats was pinned to the top bar.
-        moveToPanel(.chats)
+        // The user's module layout is the user's (2026-09-27): whatever
+        // they docked to the bar stays there, whatever they put in the
+        // panel shows — a project click never rearranges it. (It used to
+        // force Chats into the panel every time.)
         chatIndex.refresh(path, force: true)
         // No chat needs the user but a terminal pane does ("needs you"
         // rose wash): the workspace opens on that pane instead.
@@ -4070,7 +4081,8 @@ struct MainWindowView: View {
         case .servers: startProjectDevServer(path)
         case .terminals: newTerminal(in: path)
         case .chats: newChat(in: path)
-        case .tasks: openProjectTasks(path)
+        case .tasks:
+            NotificationCenter.default.post(name: .houstonFocusTaskInput, object: path)
         }
     }
 
@@ -4080,7 +4092,7 @@ struct MainWindowView: View {
         case .servers: "Start the dev server"
         case .terminals: "Open a terminal in this project"
         case .chats: "Start a new chat"
-        case .tasks: "Open this project's tasks"
+        case .tasks: "Add a task"
         }
     }
 
@@ -4481,14 +4493,13 @@ struct MainWindowView: View {
     private func subTasksSection(_ path: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             SubSectionHeader(
-                title: "TASKS", addHelp: "Open this project's tasks",
-                onAdd: { openProjectTasks(path) },
+                title: "TASKS", addHelp: "Add a task",
+                onAdd: {
+                    NotificationCenter.default.post(name: .houstonFocusTaskInput, object: path)
+                },
                 onMoveToBar: { moveToBar(.tasks) }
             )
-            ProjectTaskRows(
-                store: AnnotationStores.store(for: path),
-                onOpen: { openProjectTasks(path) }
-            )
+            ProjectTaskRows(store: AnnotationStores.store(for: path), projectPath: path)
         }
     }
 
@@ -4818,9 +4829,6 @@ struct MainWindowView: View {
     /// visible as a row there — and `select` keeps the top bar + side
     /// panel on screen, swapping only the surface underneath.
     private func newTerminal(in path: String) {
-        if chatTarget?.path == path {
-            moveToPanel(.terminals)
-        }
         if terminals.hasPane(for: path) {
             if let tab = terminals.newTab(in: path) {
                 select(.shell(path: path, tab: tab.id))
@@ -6554,47 +6562,64 @@ private struct ShowMoreRow: View {
 /// here on the next poll.
 private struct ProjectTaskRows: View {
     @ObservedObject var store: AnnotationStore
-    let onOpen: () -> Void
+    let projectPath: String
+
+    @State private var newTask = ""
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         Group {
-            if store.open.isEmpty {
-                Text("No open tasks")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 8)
-                    .frame(height: 26)
-            }
-            ForEach(store.open.prefix(10)) { task in
+            ForEach(store.open) { task in
                 WorkspaceTaskRow(
                     text: task.comment.isEmpty ? task.summaryText : task.comment,
                     onDone: { store.markDone(task.id) },
-                    onOpen: onOpen
+                    onEdit: { store.updateComment(task.id, comment: $0) },
+                    onDelete: { store.remove(task.id) }
                 )
             }
-            if store.open.count > 10 {
-                Button(action: onOpen) {
-                    Text("Show all \(store.open.count)")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textSecondary)
-                        .padding(.horizontal, 8)
-                        .frame(height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+            // The add field, always at the bottom (2026-09-27: project
+            // tasks live HERE now, not in the drawer). Return adds and
+            // keeps focus for the next one; the section's "+" focuses it.
+            HStack(spacing: 8) {
+                LucideIcon("plus", size: 14)
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 18, height: 18)
+                TextField("Add a task…", text: $newTask)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .focused($inputFocused)
+                    .onSubmit {
+                        let text = newTask.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { return }
+                        store.add(comment: text)
+                        newTask = ""
+                    }
             }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
         }
         .onAppear { store.start() }
+        .onReceive(NotificationCenter.default.publisher(for: .houstonFocusTaskInput)) { note in
+            guard note.object as? String == projectPath else { return }
+            inputFocused = true
+        }
     }
 }
 
-/// One task row: a check circle that completes it, then the text (two
-/// lines max) — same 34pt pitch and hover wash as `SubSidebarRow`.
+/// One task row: a check circle that completes it, the text (two lines
+/// max; click to edit in place, Return commits, Escape cancels), and a
+/// hover ✕ that deletes — same 34pt pitch and hover wash as
+/// `SubSidebarRow`.
 private struct WorkspaceTaskRow: View {
     let text: String
     let onDone: () -> Void
-    let onOpen: () -> Void
+    let onEdit: (String) -> Void
+    let onDelete: () -> Void
+
     @State private var hovered = false
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var editFocused: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -6607,11 +6632,40 @@ private struct WorkspaceTaskRow: View {
             .buttonStyle(.plain)
             .help("Mark done")
             .padding(.top, 1)
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.text)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if editing {
+                TextField("", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(1...4)
+                    .focused($editFocused)
+                    .onSubmit { commit() }
+                    .onExitCommand { editing = false }
+                    .onChange(of: editFocused) { _, focused in
+                        if !focused, editing { commit() }
+                    }
+            } else {
+                Text(text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        draft = text
+                        editing = true
+                        editFocused = true
+                    }
+            }
+            if hovered, !editing {
+                Button(action: onDelete) {
+                    LucideIcon("x", size: 12)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Delete task")
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
@@ -6620,10 +6674,20 @@ private struct WorkspaceTaskRow: View {
             RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .fill(hovered ? Theme.rowHovered : .clear)
         )
-        .contentShape(Rectangle())
         .onHover { hovered = $0 }
-        .onTapGesture(perform: onOpen)
     }
+
+    private func commit() {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        editing = false
+        guard !trimmed.isEmpty, trimmed != text else { return }
+        onEdit(trimmed)
+    }
+}
+
+extension Notification.Name {
+    /// Focus the task input in the project's TASKS rows (object = path).
+    static let houstonFocusTaskInput = Notification.Name("houstonFocusTaskInput")
 }
 
 /// The root's image/file drop, window-wide. `validateDrop` gates on the

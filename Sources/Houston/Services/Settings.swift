@@ -131,6 +131,10 @@ struct HoustonSettings {
     /// `pinnedProjects` order; the rest keep their normal order below.
     /// (`pinnedProjects` is the older name for "in the sidebar at all".)
     var starredProjects: [String] = []
+    /// Per-project default chat model (project path → harness / arg /
+    /// provider), set from the composer's model menu. A new chat in the
+    /// project opens on it; chats keep their own model once started.
+    var projectDefaultModels: [String: [String: String]] = [:]
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -318,6 +322,9 @@ struct HoustonSettings {
         if let starred = json["starredProjects"] as? [String] {
             s.starredProjects = starred
         }
+        if let defaults = json["projectDefaultModels"] as? [String: [String: String]] {
+            s.projectDefaultModels = defaults
+        }
         return s
     }
 
@@ -359,6 +366,7 @@ struct HoustonSettings {
         obj["recentServers"] = s.recentServers
         obj["knownServerPaths"] = s.knownServerPaths
         obj["starredProjects"] = s.starredProjects
+        obj["projectDefaultModels"] = s.projectDefaultModels
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

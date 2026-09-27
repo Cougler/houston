@@ -730,8 +730,19 @@ enum ChatArchive {
                             name: name,
                             detail: toolDetail(input: block["input"] as? [String: Any])
                         ))
+                    case "thinking":
+                        // A thinking block is a STEP like a tool call
+                        // (2026-09-27): its summary's first line becomes
+                        // the chip, so the run reads "Thinking · Planning
+                        // the wave physics" instead of hiding the work.
+                        if let text = block["thinking"] as? String {
+                            let brief = thinkingBrief(text)
+                            if !brief.isEmpty {
+                                blocks.append(.tool(name: "Thinking", detail: brief))
+                            }
+                        }
                     default:
-                        break // thinking et al.
+                        break
                     }
                 }
                 if !blocks.isEmpty { append(.assistant, blocks: blocks, into: &messages) }
@@ -741,6 +752,33 @@ enum ChatArchive {
             return true
         }
         return messages
+    }
+
+    /// A thinking summary reduced to one line for a chip or the working
+    /// row: the first sentence (or line), whitespace collapsed, capped at
+    /// 110 characters. The API streams thinking as SUMMARIES (verified
+    /// 2026-09-24: a two-minute think delivered ~130 chars), so the first
+    /// sentence is a real description of the step, not a fragment.
+    static func thinkingBrief(_ text: String) -> String {
+        let collapsed = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !collapsed.isEmpty else { return "" }
+        var first = collapsed
+        if let end = collapsed.firstIndex(where: { ".!?".contains($0) }) {
+            let candidate = collapsed[...end]
+            // Skip abbreviation-length "sentences" ("e.g." / "1.").
+            if candidate.count > 12 { first = String(candidate) }
+        }
+        let trimmed = first.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "#", with: "")
+        if trimmed.count > 110 {
+            return String(trimmed.prefix(107)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return trimmed
     }
 
     private static func codexTranscript(path: String) -> [ChatMessage] {

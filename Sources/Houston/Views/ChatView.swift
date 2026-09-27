@@ -191,6 +191,65 @@ struct ChatModelChoice: Hashable {
         )
     }
 
+    // MARK: Per-project default
+
+    /// The project's default model (composer menu ▸ "Default for
+    /// <project>"), resolved against the CURRENT catalogs so a refreshed
+    /// list or a signed-out provider can't hand back a dead choice. nil
+    /// when none is set or it no longer resolves.
+    @MainActor
+    static func projectDefault(for path: String) -> ChatModelChoice? {
+        guard let stored = HoustonSettings.read().projectDefaultModels[path],
+              let harnessRaw = stored["harness"],
+              let harness = ChatHarness(rawValue: harnessRaw),
+              let arg = stored["arg"] else { return nil }
+        return resolve(harness: harness, arg: arg, provider: stored["provider"])
+    }
+
+    @MainActor
+    static func setProjectDefault(_ choice: ChatModelChoice?, for path: String) {
+        var s = HoustonSettings.read()
+        if let choice, let arg = choice.arg {
+            var stored = ["harness": choice.harness.rawValue, "arg": arg]
+            if let provider = choice.provider { stored["provider"] = provider }
+            s.projectDefaultModels[path] = stored
+        } else {
+            s.projectDefaultModels.removeValue(forKey: path)
+        }
+        HoustonSettings.write(s)
+    }
+
+    /// Whether `choice` IS the project's default — arg + harness +
+    /// provider identity, not the whole value (effort and permission are
+    /// per-message and never part of the default).
+    func matchesDefault(_ other: ChatModelChoice) -> Bool {
+        harness == other.harness && arg == other.arg && provider == other.provider
+    }
+
+    /// The live catalog entry for a stored (harness, arg, provider).
+    @MainActor
+    private static func resolve(
+        harness: ChatHarness, arg: String, provider: String?
+    ) -> ChatModelChoice? {
+        if let provider {
+            if provider == LocalModelStore.mlxProviderID {
+                return LocalModelStore.shared.mlxModels.contains(arg) ? .mlx(arg) : nil
+            }
+            guard let cloud = ChatProvider.cloud.first(where: { $0.id == provider }),
+                  let m = cloud.models.first(where: { $0.arg == arg }) else { return nil }
+            return ChatModelChoice(
+                label: m.label, harness: cloud.harness, arg: m.arg, provider: cloud.id
+            )
+        }
+        let list: [ChatModelChoice] = switch harness {
+        case .claude: claude
+        case .codex: openAI
+        case .pi: claude.compactMap(\.piEquivalent) + openAI.compactMap(\.piEquivalent)
+        case .gemini, .grok: []
+        }
+        return list.first { $0.arg == arg && $0.harness == harness }
+    }
+
     /// The flags this choice adds to its CLI invocation. Codex takes
     /// effort as a config override; the unquoted value reaches it intact
     /// (a non-TOML value is used as a literal string).
@@ -661,6 +720,7 @@ struct ChatBrowserView: View {
             ghostContext: ref.harness == .claude ? ghostContext : nil,
             runningSession: hub.sessions[ref.filePath],
             draftKey: ref.filePath,
+            projectPath: activeProject,
             onSend: { text, model in
                 handleSend(ref, text: text, model: model)
             }
@@ -690,13 +750,15 @@ struct ChatBrowserView: View {
                     .offset(y: skyRevealed ? 0 : 8)
                 ChatComposer(
                     placeholder: "Let's do it…",
-                    initialModel: .fallback(for: .claude),
+                    initialModel: ChatModelChoice.projectDefault(for: activeProject)
+                        ?? .fallback(for: .claude),
                     ghostContext: nil,
                     projectChoices: projects,
                     selectedProject: activeProject,
                     onSelectProject: { chosenProject = $0 },
                     attached: false,
                     draftKey: "new:\(activeProject)",
+                    projectPath: activeProject,
                     onSend: { text, model in
                         hub.draft(in: activeProject, harness: model.harness)
                             .send(text: text, model: model)
@@ -754,6 +816,7 @@ struct ChatBrowserView: View {
                 // Same key as the new-chat composer: a draft chat is that
                 // conversation continuing, pre-promotion.
                 draftKey: "new:\(activeProject)",
+                projectPath: activeProject,
                 onSend: { text, model in
                     hub.draft(in: activeProject, harness: model.harness)
                         .send(text: text, model: model)
@@ -1499,15 +1562,19 @@ private struct LiveTurnView: View {
                         .accessibilityHidden(true)
                     Group {
                         if let tokens = session.thinkingTokens {
-                            Text(tokens > 0
-                                ? "Thinking… \(formatTokens(tokens)) tokens"
-                                : "Thinking…")
+                            // The summary's first sentence names the step
+                            // ("Planning the wave physics"); the token
+                            // count rides beside it as progress.
+                            Text(session.thinkingLabel ?? "Thinking…")
+                                + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
+                                    .foregroundColor(Theme.textSecondary.opacity(0.7))
                         } else {
                             Text("Working…")
                         }
                     }
                     .font(Theme.Fonts.body)
                     .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                 }
@@ -1925,6 +1992,9 @@ private struct ChatComposer: View {
     /// composer unmounting (navigate away, come back) under this key,
     /// for as long as the app runs. nil = no persistence.
     var draftKey: String? = nil
+    /// The project this composer belongs to — the model menu's "Default
+    /// for <project>" writes the per-project default here. nil hides it.
+    var projectPath: String? = nil
     let onSend: (String, ChatModelChoice) -> Void
 
     @ObservedObject private var localModels = LocalModelStore.shared
@@ -2240,6 +2310,25 @@ private struct ChatComposer: View {
                         Text(mode.label)
                         Text(mode.detail)
                     }
+                }
+            }
+            if let projectPath {
+                Divider()
+                // The picked model becomes what NEW chats in this project
+                // open on. Unchecking clears it (back to the harness
+                // default). Reads settings on each menu build — cheap,
+                // and it's the one source of truth.
+                Toggle(isOn: Binding(
+                    get: {
+                        ChatModelChoice.projectDefault(for: projectPath)
+                            .map { $0.matchesDefault(model) } ?? false
+                    },
+                    set: { on in
+                        ChatModelChoice.setProjectDefault(on ? model : nil, for: projectPath)
+                    }
+                )) {
+                    Text("Default for \((projectPath as NSString).lastPathComponent)")
+                    Text("New chats here start on \(model.label)")
                 }
             }
             Divider()
@@ -3131,7 +3220,8 @@ struct MessageView: View {
 
     private func toolChip(_ tool: (name: String, detail: String)) -> some View {
         HStack(spacing: 6) {
-            LucideIcon("wrench", size: 12)
+            // Thinking steps wear a brain, tool calls the wrench.
+            LucideIcon(tool.name == "Thinking" ? "brain" : "wrench", size: 12)
             Text(tool.detail.isEmpty ? tool.name : "\(tool.name) · \(tool.detail)")
                 .font(Theme.Fonts.mono)
                 .lineLimit(1)

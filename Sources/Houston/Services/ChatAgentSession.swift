@@ -253,6 +253,11 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// climbing counter, and without this the chat showed a bare
     /// "Working…" and read as frozen.
     @Published private(set) var thinkingTokens: Int?
+    /// What the open thinking block is about — the first sentence of the
+    /// summary streamed so far (`thinking_delta`), shown in place of a
+    /// bare "Thinking…" (2026-09-27). nil until the first delta lands.
+    @Published private(set) var thinkingLabel: String?
+    private var thinkingText = ""
     /// Exchanges superseded by a newer send before the transcript
     /// re-read absorbed them — rendered ahead of the pending message so
     /// back-to-back sends never make the earlier one vanish.
@@ -694,11 +699,24 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 // the first token estimate; any other block ends the phase.
                 let kind = (event["content_block"] as? [String: Any])?["type"] as? String
                 thinkingTokens = kind == "thinking" ? (thinkingTokens ?? 0) : nil
+                thinkingText = ""
+                thinkingLabel = nil
             case "content_block_delta":
-                guard let delta = event["delta"] as? [String: Any],
-                      delta["type"] as? String == "text_delta",
-                      let text = delta["text"] as? String else { return }
-                streamText += text
+                guard let delta = event["delta"] as? [String: Any] else { return }
+                switch delta["type"] as? String {
+                case "text_delta":
+                    if let text = delta["text"] as? String { streamText += text }
+                case "thinking_delta":
+                    // The summary streams in; its first sentence is the
+                    // live description of what this step is doing.
+                    if let text = delta["thinking"] as? String, !text.isEmpty {
+                        thinkingText += text
+                        let brief = ChatArchive.thinkingBrief(thinkingText)
+                        if !brief.isEmpty, brief != thinkingLabel { thinkingLabel = brief }
+                    }
+                default:
+                    break
+                }
             default:
                 break
             }
@@ -722,6 +740,16 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                         name: name,
                         detail: Self.toolDetail(block["input"] as? [String: Any])
                     ))
+                case "thinking":
+                    // A finished thinking block becomes a step in the
+                    // run (same as the transcript parser), so the
+                    // accordion shows what each think was about.
+                    if let text = block["thinking"] as? String {
+                        let brief = ChatArchive.thinkingBrief(text)
+                        if !brief.isEmpty {
+                            liveBlocks.append(.tool(name: "Thinking", detail: brief))
+                        }
+                    }
                 default:
                     break
                 }
@@ -1424,6 +1452,8 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         interrupting = false
         approval = nil
         thinkingTokens = nil
+        thinkingLabel = nil
+        thinkingText = ""
         currentTurnID = nil
         lastUsed = Date()
         if let error { lastError = error }
