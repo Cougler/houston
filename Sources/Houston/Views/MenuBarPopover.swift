@@ -45,7 +45,7 @@ final class MenuBarPopover: NSObject {
         statusWindow = buttonWindow
 
         let host = NSHostingController(
-            rootView: MenuBarServersView(
+            rootView: MenuBarPopoverView(
                 onDismiss: { [weak self] in self?.close() },
                 onHeightChange: { [weak self] height in self?.resize(to: height) }
             )
@@ -120,8 +120,104 @@ private final class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-/// Root of the popover: the servers list, drilling into the live or off
-/// server page in place.
+/// Root of the popover (2026-09-27): a Tasks / Servers switcher on top,
+/// the chosen page under it. Tasks is the window's own `TasksMenuList`
+/// on a popover-local `TrackedStore`; Servers is the list + pages below.
+/// The chosen page sticks for the app's run.
+struct MenuBarPopoverView: View {
+    enum Page: String, CaseIterable {
+        case tasks = "Tasks", servers = "Servers"
+    }
+    /// Last page shown — reopening lands where the user left off.
+    @MainActor private static var lastPage: Page = .tasks
+
+    var onDismiss: () -> Void = {}
+    var onHeightChange: (CGFloat) -> Void = { _ in }
+
+    @State private var page: Page = MenuBarPopoverView.lastPage
+    @StateObject private var tracked = TrackedStore()
+    /// The servers page's own clamped height, reported up from its
+    /// content measurement.
+    @State private var serversHeight: CGFloat = MenuBarServersView.initialHeight
+
+    private static let switcherHeight: CGFloat = 46
+    private static let tasksHeight: CGFloat = 440
+
+    var body: some View {
+        VStack(spacing: 0) {
+            switcher
+                .padding(.horizontal, 14)
+                .frame(height: Self.switcherHeight)
+            switch page {
+            case .tasks:
+                TasksMenuList(tracked: tracked, maxHeight: Self.tasksHeight)
+                    .frame(width: MenuBarServersView.size.width)
+                    .padding(.bottom, 8)
+            case .servers:
+                MenuBarServersView(
+                    onDismiss: onDismiss,
+                    onHeightChange: { serversHeight = $0 }
+                )
+            }
+        }
+        .frame(width: MenuBarServersView.size.width)
+        .frame(height: totalHeight, alignment: .top)
+        .background(Theme.background)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous)
+                .stroke(Theme.buttonStroke, lineWidth: 1)
+        )
+        .onAppear {
+            tracked.start()
+            onHeightChange(totalHeight)
+        }
+        .onChange(of: page) { _, new in
+            Self.lastPage = new
+            onHeightChange(totalHeight)
+        }
+        .onChange(of: serversHeight) { _, _ in onHeightChange(totalHeight) }
+    }
+
+    private var totalHeight: CGFloat {
+        switch page {
+        case .tasks: Self.switcherHeight + Self.tasksHeight + 8
+        case .servers: Self.switcherHeight + serversHeight
+        }
+    }
+
+    /// A two-segment pill: the selected page wears the raised fill.
+    private var switcher: some View {
+        HStack(spacing: 2) {
+            ForEach(Page.allCases, id: \.self) { candidate in
+                Button {
+                    withAnimation(Theme.quick) { page = candidate }
+                } label: {
+                    Text(candidate.rawValue)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(page == candidate ? Theme.text : Theme.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                .fill(page == candidate ? Theme.buttonFill : .clear)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.gitPanelFill)
+        )
+    }
+}
+
+/// The popover's Servers page: the servers list, drilling into the live
+/// or off server page in place. Sized by its content; the root above
+/// draws the popover chrome.
 struct MenuBarServersView: View {
     /// Matches the window's right sheet width so the reused panels lay out
     /// identically. Height is just the pre-measurement placeholder — the
@@ -162,12 +258,6 @@ struct MenuBarServersView: View {
         }
         .frame(width: Self.size.width)
         .frame(height: clampedHeight, alignment: .top)
-        .background(Theme.background)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusFloat, style: .continuous)
-                .stroke(Theme.buttonStroke, lineWidth: 1)
-        )
         .onPreferenceChange(PopoverHeightKey.self) { height in
             contentHeight = height
             onHeightChange(clamp(height))

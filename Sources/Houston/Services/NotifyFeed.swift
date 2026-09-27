@@ -314,13 +314,37 @@ final class NotifyStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
             Task { @MainActor in NotifyStore.shared.poll() }
         }
+        // Hooks installed but macOS never asked (an install that predates
+        // the permission request, or a dialog dismissed by a relaunch):
+        // the consent already covers "notify me", so ask the system now.
+        // Anything else just refreshes the cached status.
+        refreshAuthorization { [weak self] status in
+            if status == .notDetermined, NotifyFeed.isInstalled {
+                self?.requestAuthorization()
+            }
+        }
+        // The user may flip Houston's switch in System Settings while
+        // we're in the background — re-read on every return.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in NotifyStore.shared.refreshAuthorization() }
+        }
     }
 
-    /// The user is looking at this project — its attention is spent.
+    /// The user is looking at this project — its attention is spent, and
+    /// its banners leave Notification Center too.
     func markSeen(projectPath: String?) {
         guard let projectPath else { return }
-        let remaining = attention.filter { $0.value.projectPath != projectPath }
-        if remaining.count != attention.count { attention = remaining }
+        let spent = attention.filter { $0.value.projectPath == projectPath }
+        guard !spent.isEmpty else { return }
+        attention = attention.filter { $0.value.projectPath != projectPath }
+        if Self.canBanner {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(
+                withIdentifiers: spent.keys.map(Self.bannerIdentifier)
+            )
+        }
     }
 
     /// Single-flight, like the detector stores — a slow disk pass must
@@ -386,6 +410,7 @@ final class NotifyStore: ObservableObject {
                     projectPath: location.path
                 )
                 deliverBanner(
+                    paneID: event.paneID,
                     title: projectName(location.path),
                     body: event.message,
                     path: location.path
@@ -411,6 +436,7 @@ final class NotifyStore: ObservableObject {
                     projectPath: location.path
                 )
                 deliverBanner(
+                    paneID: event.paneID,
                     title: projectName(location.path),
                     body: new.message,
                     path: location.path
@@ -448,25 +474,99 @@ final class NotifyStore: ObservableObject {
 
     /// `UNUserNotificationCenter` aborts without a bundle — debug builds
     /// (`swift run`) get badges only.
-    private static var canBanner: Bool { Bundle.main.bundleIdentifier != nil }
+    static var canBanner: Bool { Bundle.main.bundleIdentifier != nil }
 
-    static func requestAuthorization() {
-        guard canBanner else { return }
-        UNUserNotificationCenter.current().requestAuthorization(
-            options: [.alert, .sound]
-        ) { _, _ in }
+    /// macOS's answer to "may Houston notify?" — nil until the first read
+    /// (and forever in a debug build, which has no notification center).
+    /// The gear menu and the consent flow read it to tell "never asked"
+    /// from "switched off in System Settings" — the two need different
+    /// remedies (ask again vs. open System Settings).
+    @Published private(set) var authorization: UNAuthorizationStatus?
+
+    /// Hooks are feeding events but macOS won't show them — the one state
+    /// where Houston can't fix itself and has to send the user to System
+    /// Settings.
+    var bannersBlocked: Bool { Self.canBanner && authorization == .denied }
+
+    func refreshAuthorization(
+        _ completion: (@MainActor (UNAuthorizationStatus) -> Void)? = nil
+    ) {
+        guard Self.canBanner else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            Task { @MainActor in
+                NotifyStore.shared.authorization = status
+                completion?(status)
+            }
+        }
     }
 
-    private func deliverBanner(title: String, body: String, path: String) {
-        guard Self.canBanner else { return }
+    /// Puts up the system permission dialog when macOS hasn't asked yet;
+    /// otherwise just reports the standing answer. `granted` is false when
+    /// the user declined the system dialog or had already switched Houston
+    /// off in System Settings — the caller offers the settings pane then.
+    func requestAuthorization(_ completion: (@MainActor (Bool) -> Void)? = nil) {
+        guard Self.canBanner else { completion?(false); return }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            // Copy the status out: `UNNotificationSettings` isn't Sendable,
+            // so it can't ride into the main-actor hop.
+            let status = settings.authorizationStatus
+            switch status {
+            case .notDetermined:
+                // `current()` again rather than a captured center — the
+                // center isn't Sendable either.
+                UNUserNotificationCenter.current().requestAuthorization(
+                    options: [.alert, .sound]
+                ) { granted, _ in
+                    Task { @MainActor in
+                        NotifyStore.shared.authorization = granted ? .authorized : .denied
+                        completion?(granted)
+                    }
+                }
+            case .authorized, .provisional, .ephemeral:
+                Task { @MainActor in
+                    NotifyStore.shared.authorization = status
+                    completion?(true)
+                }
+            default:
+                Task { @MainActor in
+                    NotifyStore.shared.authorization = status
+                    completion?(false)
+                }
+            }
+        }
+    }
+
+    /// Houston's row in System Settings ▸ Notifications — where a denied
+    /// permission gets turned back on.
+    static func openSystemNotificationSettings() {
+        let id = Bundle.main.bundleIdentifier ?? "com.cougler.houston"
+        let deepLink = URL(string:
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)"
+        )
+        let pane = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        if let deepLink, NSWorkspace.shared.open(deepLink) { return }
+        if let pane { NSWorkspace.shared.open(pane) }
+    }
+
+    /// One banner per pane: a re-fired state replaces its predecessor
+    /// instead of stacking, and `markSeen` can pull it back by id.
+    private static func bannerIdentifier(_ paneID: String) -> String {
+        "needs-you-" + paneID
+    }
+
+    private func deliverBanner(paneID: String, title: String, body: String, path: String) {
+        guard Self.canBanner, authorization != .denied else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
         content.userInfo = ["path": path]
+        // Grouped per project in Notification Center.
+        content.threadIdentifier = path
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(
-                identifier: UUID().uuidString,
+                identifier: Self.bannerIdentifier(paneID),
                 content: content,
                 trigger: nil
             )

@@ -132,6 +132,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         MainWindowController.present()
     }
 
+    /// Without this, macOS swallows every banner while Houston is the
+    /// frontmost app — but "frontmost" isn't "watching": the user may be
+    /// in project A while project B's Claude asks for a permission.
+    /// `NotifyStore.handle` already drops events for the pane on screen,
+    /// so whatever reaches here is for a pane they can't see.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,

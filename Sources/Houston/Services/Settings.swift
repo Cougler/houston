@@ -59,6 +59,9 @@ struct HoustonSettings {
     /// The user said "Not Now" to the status-bar offer — never re-prompt;
     /// enabling stays available from the footer gear.
     var statusLinePromptDeclined: Bool
+    /// The user said "Not Now" to the needs-you notifications offer —
+    /// never re-prompt; enabling stays available from the footer gear.
+    var notifyPromptDeclined: Bool
     /// The status bar is turned off entirely.
     var statusBarDisabled: Bool
     /// The status bar is collapsed to just the model.
@@ -123,6 +126,11 @@ struct HoustonSettings {
     /// `projectsDirs` folder — the recents list alone can't carry this,
     /// because a recent is deleted the moment its server comes back up.
     var knownServerPaths: [String]
+    /// Projects the user pinned to the top of the sidebar's Projects
+    /// section (right-click ▸ Pin). Listed above a divider, in
+    /// `pinnedProjects` order; the rest keep their normal order below.
+    /// (`pinnedProjects` is the older name for "in the sidebar at all".)
+    var starredProjects: [String] = []
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -135,6 +143,7 @@ struct HoustonSettings {
             terminalTheme: "",
             recentTerminalThemes: [],
             statusLinePromptDeclined: false,
+            notifyPromptDeclined: false,
             statusBarDisabled: false,
             statusBarCollapsed: false,
             statusBarHiddenItems: [],
@@ -230,6 +239,9 @@ struct HoustonSettings {
         if let declined = json["statusLinePromptDeclined"] as? Bool {
             s.statusLinePromptDeclined = declined
         }
+        if let declined = json["notifyPromptDeclined"] as? Bool {
+            s.notifyPromptDeclined = declined
+        }
         if let disabled = json["statusBarDisabled"] as? Bool {
             s.statusBarDisabled = disabled
         }
@@ -303,6 +315,9 @@ struct HoustonSettings {
         if let known = json["knownServerPaths"] as? [String] {
             s.knownServerPaths = known
         }
+        if let starred = json["starredProjects"] as? [String] {
+            s.starredProjects = starred
+        }
         return s
     }
 
@@ -321,6 +336,7 @@ struct HoustonSettings {
         obj["terminalTheme"] = s.terminalTheme
         obj["recentTerminalThemes"] = s.recentTerminalThemes
         obj["statusLinePromptDeclined"] = s.statusLinePromptDeclined
+        obj["notifyPromptDeclined"] = s.notifyPromptDeclined
         obj["statusBarDisabled"] = s.statusBarDisabled
         obj["statusBarCollapsed"] = s.statusBarCollapsed
         obj["statusBarHiddenItems"] = s.statusBarHiddenItems
@@ -342,6 +358,7 @@ struct HoustonSettings {
         obj["chatTextColor"] = s.chatTextColor
         obj["recentServers"] = s.recentServers
         obj["knownServerPaths"] = s.knownServerPaths
+        obj["starredProjects"] = s.starredProjects
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

@@ -264,6 +264,12 @@ private struct ParallaxSpace: View {
         Feature(id: 11, fx: 0.87, fy: 0.47, depth: 0.50, home: 5, kind: .planet(Color(hex: 0xD9C27E), 11)),
         Feature(id: 12, fx: 0.23, fy: 0.87, depth: 0.40, home: 6, kind: .planet(Color(hex: 0x4A90D9), 8)),
         Feature(id: 13, fx: 0.85, fy: 0.78, depth: 0.30, home: 6, kind: .glow(Color(hex: 0xD97757), 120)),
+        Feature(id: 14, fx: 0.12, fy: 0.30, depth: 0.65, home: 7, kind: .planet(Color(hex: 0xE0C084), 13)),
+        Feature(id: 15, fx: 0.88, fy: 0.20, depth: 0.35, home: 7, kind: .glow(Color(hex: 0x5069D9), 140)),
+        Feature(id: 16, fx: 0.18, fy: 0.75, depth: 0.80, home: 8, kind: .ringed(Color(hex: 0x8FD3D9), 20)),
+        Feature(id: 17, fx: 0.86, fy: 0.62, depth: 0.45, home: 8, kind: .planet(Color(hex: 0xD9603B), 10)),
+        Feature(id: 18, fx: 0.14, fy: 0.16, depth: 0.30, home: 9, kind: .glow(Color(hex: 0xD97757), 130)),
+        Feature(id: 19, fx: 0.84, fy: 0.85, depth: 0.70, home: 9, kind: .planet(Color(hex: 0x4A90D9), 16)),
     ]
 
     /// Points of horizontal travel per page step, at depth 1.
@@ -355,62 +361,92 @@ extension View {
 
 private struct OnboardingPage {
     enum Stage {
-        case terminals, servers, share, projects, statusBar, reminders, themes
+        case projects, workspace, docking, terminals, threads, servers, share,
+             statusBar, reminders, themes
     }
 
     let stage: Stage
     let title: String
     let copy: String
 
+    /// Copy is matter-of-fact (2026-09-27): what the thing is and what a
+    /// click does, no pitch. The three workspace pages (chat/terminal
+    /// surfaces, the side panel's docking, threads) are demos that play
+    /// on their own and also answer clicks; a pulsing dot marks the next
+    /// click, nothing else explains it.
     static let all: [OnboardingPage] = [
+        OnboardingPage(
+            stage: .projects,
+            title: "Projects",
+            copy: "Pin a project or a folder of them. The list is ordered by "
+                + "what you opened most recently. Clicking a project opens its "
+                + "workspace; if a chat there is mid-turn or waiting on you, it "
+                + "opens on that chat."
+        ),
+        OnboardingPage(
+            stage: .workspace,
+            title: "Chat and Terminal",
+            copy: "A project workspace is a top bar, a side panel, and one "
+                + "surface: the chat or the terminal. Terminals in the bar "
+                + "switches to the terminal. A chat in the panel switches back. "
+                + "Both keep running."
+        ),
+        OnboardingPage(
+            stage: .docking,
+            title: "The Side Panel",
+            copy: "Chats, terminals, branches, and servers each live in the side "
+                + "panel or as a chip in the top bar. The dock control moves one "
+                + "between the two. A window too narrow for the panel moves them "
+                + "all to the bar."
+        ),
         OnboardingPage(
             stage: .terminals,
             title: "Terminals",
-            copy: "Real terminals, right inside Houston. Click a project to open "
-                + "a shell in its directory, run Claude Code or any other coding "
-                + "agent, and split panes with ⌘D."
+            copy: "A terminal opens in the project's directory with your own "
+                + "shell and dotfiles, on libghostty. Run claude, codex, or any "
+                + "CLI in it. ⌘D splits a pane."
+        ),
+        OnboardingPage(
+            stage: .threads,
+            title: "Threads",
+            copy: "Hover a paragraph of a reply and click the thread control. A "
+                + "panel opens with that paragraph quoted; questions asked there "
+                + "are answered there. The main conversation stays put."
         ),
         OnboardingPage(
             stage: .servers,
             title: "Servers",
-            copy: "Dev servers running on your Mac appear automatically. Check "
-                + "their health at a glance, open one in the browser, or kill a "
-                + "stray process. No hunting for pids."
+            copy: "Dev servers running on your Mac are listed with their port "
+                + "and health. A server row opens its page: open in the browser, "
+                + "share, inspect, or stop."
         ),
         OnboardingPage(
             stage: .share,
-            title: "Share Your Work",
-            copy: "Reach a running dev server from any device on your Wi-Fi at "
-                + "project.local. Public live URLs that anyone can open from "
-                + "anywhere are coming soon."
-        ),
-        OnboardingPage(
-            stage: .projects,
-            title: "Projects",
-            copy: "Add a single project or a whole folder of them. Clicking a "
-                + "project starts a terminal already sitting in the right "
-                + "directory."
+            title: "Sharing",
+            copy: "A running dev server is reachable from any device on your "
+                + "Wi-Fi at project.local, with a QR code for phones. Public "
+                + "links are part of Houston Live."
         ),
         OnboardingPage(
             stage: .statusBar,
             title: "The Status Bar",
             copy: "While a Claude session runs, the bar under the terminal shows "
-                + "the model, context remaining, MCP health, and your rate "
-                + "limits, live from Claude's own statusline."
+                + "the model, context used, MCP health, and rate limits, read "
+                + "from Claude's own statusline."
         ),
         OnboardingPage(
             stage: .reminders,
             title: "Reminders",
-            copy: "Track dated obligations like cert renewals, domain expiries, "
-                + "and secret rotations with the /track skill or by hand. "
-                + "Houston reminds you before they're due."
+            copy: "Dated obligations like cert renewals and domain expiries, "
+                + "tracked with the /track skill or by hand. The bell reminds "
+                + "you before they are due."
         ),
         OnboardingPage(
             stage: .themes,
-            title: "Make It Yours",
+            title: "Themes",
             copy: "The terminal ships design-matched to Houston in light and "
-                + "dark. Or pick from ~500 ghostty themes in the footer gear, "
-                + "searchable with your recents on top."
+                + "dark. About 500 ghostty themes are in the footer gear, "
+                + "searchable, recents on top."
         ),
     ]
 }
@@ -423,10 +459,13 @@ private struct OnboardingStage: View {
     var body: some View {
         Group {
             switch kind {
+            case .projects: ProjectsVignette()
+            case .workspace: WorkspaceVignette()
+            case .docking: DockingVignette()
             case .terminals: TerminalVignette()
+            case .threads: ThreadVignette()
             case .servers: ServersVignette()
             case .share: ShareVignette()
-            case .projects: ProjectsVignette()
             case .statusBar: StatusBarVignette()
             case .reminders: RemindersVignette()
             case .themes: ThemesVignette()
@@ -435,6 +474,501 @@ private struct OnboardingStage: View {
         .frame(maxWidth: .infinity)
         .frame(height: 250)
         .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(Theme.panelFill))
+    }
+}
+
+// MARK: - Wordless "click here"
+
+/// A pulsing dot over the control a demo wants clicked next: a solid dot
+/// with two rings swelling out of it. Never intercepts the click.
+private struct PulseHint: View {
+    @State private var on = false
+
+    var body: some View {
+        ZStack {
+            ring(delay: 0)
+            ring(delay: 0.6)
+            Circle()
+                .fill(Theme.link)
+                .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
+        }
+        .frame(width: 9, height: 9)
+        .allowsHitTesting(false)
+        .onAppear { on = true }
+    }
+
+    private func ring(delay: Double) -> some View {
+        Circle()
+            .stroke(Theme.link, lineWidth: 1.5)
+            .scaleEffect(on ? 2.8 : 0.6)
+            .opacity(on ? 0 : 0.9)
+            .animation(
+                .easeOut(duration: 1.8).repeatForever(autoreverses: false).delay(delay),
+                value: on
+            )
+    }
+}
+
+// MARK: - Workspace mini chrome
+
+/// The vignettes' shared pieces: a mini workspace bar chip, the square
+/// panel control, a module card — the app's own grammar at half scale.
+private enum Mini {
+    static let bar = Color(light: 0xFFFFFF, dark: 0x18181B)
+    static let page = Color(light: 0xF4F4F5, dark: 0x0B0B0D)
+    static let term = Color(light: 0xE0E0E0, dark: 0x181818)
+    static let bubble = Color(light: 0x7E4340, dark: 0x8F5350)
+
+    static func chip(
+        _ icon: String, _ label: String, dot: Color? = nil, hint: Bool = false
+    ) -> some View {
+        HStack(spacing: 5) {
+            LucideIcon(icon, size: 11)
+                .foregroundStyle(Theme.textSecondary)
+            if let dot {
+                Circle().fill(dot).frame(width: 4, height: 4)
+            }
+            Text(label)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Theme.text)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .contentShape(Rectangle())
+        .overlay(alignment: .leading) {
+            if hint { PulseHint().offset(x: 12) }
+        }
+    }
+
+    static func control(_ icon: String, hint: Bool = false) -> some View {
+        LucideIcon(icon, size: 10)
+            .foregroundStyle(Theme.textSecondary)
+            .frame(width: 18, height: 18)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Theme.buttonFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Theme.borderSidebar, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+            .overlay { if hint { PulseHint() } }
+    }
+
+    static func caps(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .semibold))
+            .kerning(0.8)
+            .foregroundStyle(Theme.heading)
+    }
+
+    static func bar<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 2) { content() }
+            .padding(.horizontal, 6)
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 9).fill(bar))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+    }
+
+    static func projectChip(_ name: String) -> some View {
+        HStack(spacing: 4) {
+            Text(name)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.text)
+            LucideIcon("chevron-down", size: 9)
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.horizontal, 6)
+    }
+
+    /// The chat surface: one user bubble and a short reply.
+    static func chatSurface(_ prompt: String, _ reply: String) -> some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            Text(prompt)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(bubble))
+            Text(reply)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Theme.text)
+                .lineSpacing(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// The terminal surface: a prompt, a command, output, a cursor.
+    static func terminalSurface() -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 0) {
+                Text("hierarch % ").foregroundStyle(Theme.textSecondary)
+                Text("npm run dev").foregroundStyle(Theme.text)
+            }
+            Text("VITE v6.0.3  ready in 412 ms").foregroundStyle(Theme.textSecondary)
+            Text("➜  Local:   http://localhost:5173/").foregroundStyle(Theme.textSecondary)
+            HStack(spacing: 2) {
+                Text("hierarch % ").foregroundStyle(Theme.textSecondary)
+                Rectangle().fill(Theme.text.opacity(0.8)).frame(width: 6, height: 11)
+            }
+        }
+        .font(.system(size: 9.5, design: .monospaced))
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(term))
+    }
+
+    /// A module card's rows.
+    static func chatRow(_ title: String, selected: Bool, hint: Bool = false) -> some View {
+        Text(title)
+            .font(.system(size: 9.5))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(selected ? Theme.rowSelected : .clear)
+            )
+            .contentShape(Rectangle())
+            .overlay(alignment: .leading) {
+                if hint { PulseHint().offset(x: 4) }
+            }
+    }
+
+    static let chats = [
+        "Align sidebar icons with projects",
+        "Retry logic for the webhook worker",
+        "Why the calendar re-renders",
+    ]
+}
+
+/// One project workspace: bar on top, chat or terminal as the surface,
+/// the CHATS card beside it. Plays on its own; clicks jump ahead.
+private struct WorkspaceVignette: View {
+    @State private var terminal = false
+    @State private var chat = 0
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Mini.bar {
+                Mini.projectChip("Hierarch")
+                Mini.chip("git-branch", "main", dot: Theme.dotActive)
+                Mini.chip("square-terminal", "Terminals", hint: !terminal)
+                    .onTapGesture { withAnimation(Theme.quick) { terminal = true } }
+            }
+            HStack(spacing: 8) {
+                Group {
+                    if terminal {
+                        Mini.terminalSurface()
+                    } else {
+                        Mini.chatSurface(
+                            Mini.chats[chat],
+                            "Moved the top rows onto the table's 6pt cell inset "
+                                + "and matched the icon-to-label gap, so both columns "
+                                + "share one left edge."
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Mini.caps("CHATS")
+                        Spacer(minLength: 0)
+                        Mini.control("plus")
+                        Mini.control("panel-right-close")
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.top, 7)
+                    .padding(.bottom, 3)
+                    ForEach(Mini.chats.indices, id: \.self) { index in
+                        Mini.chatRow(
+                            Mini.chats[index],
+                            selected: !terminal && index == chat,
+                            hint: terminal && index == 1
+                        )
+                        .onTapGesture {
+                            withAnimation(Theme.quick) {
+                                chat = index
+                                terminal = false
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 3)
+                .frame(width: 128)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Mini.bar))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+            }
+        }
+        .padding(10)
+        .frame(width: 400, height: 210)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Mini.page))
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2.8))
+                withAnimation(Theme.quick) {
+                    if terminal {
+                        chat = 1
+                        terminal = false
+                    } else {
+                        terminal = true
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The side panel's items moving between the panel and the bar: the dock
+/// control sends CHATS to the bar; its chip's dropdown brings it back.
+private struct DockingVignette: View {
+    @State private var docked = true
+    @State private var dropdown = false
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            VStack(spacing: 8) {
+                Mini.bar {
+                    Mini.projectChip("Hierarch")
+                    Mini.chip("git-branch", "main", dot: Theme.dotActive)
+                    Mini.chip("square-terminal", "Terminals")
+                    if !docked {
+                        Mini.chip("message-square-text", "Chats", hint: !dropdown)
+                            .onTapGesture { withAnimation(Theme.quick) { dropdown = true } }
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    }
+                }
+                HStack(spacing: 8) {
+                    Mini.chatSurface(
+                        Mini.chats[0],
+                        "Moved the top rows onto the table's 6pt cell inset and "
+                            + "matched the icon-to-label gap."
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if docked {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Mini.caps("CHATS")
+                                Spacer(minLength: 0)
+                                Mini.control("plus")
+                                Mini.control("panel-right-close", hint: true)
+                                    .onTapGesture {
+                                        withAnimation(.spring(duration: 0.4, bounce: 0.1)) { docked = false }
+                                    }
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.top, 7)
+                            .padding(.bottom, 3)
+                            ForEach(Mini.chats.indices, id: \.self) { index in
+                                Mini.chatRow(Mini.chats[index], selected: index == 0)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 3)
+                        .frame(width: 128)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Mini.bar))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+            }
+            .padding(10)
+
+            // The bar chip's dropdown, straight down from the bar.
+            if !docked && dropdown {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Mini.caps("CHATS")
+                        Spacer(minLength: 0)
+                        Mini.control("plus")
+                        Mini.control("panel-right-open", hint: true)
+                            .onTapGesture {
+                                withAnimation(.spring(duration: 0.4, bounce: 0.1)) {
+                                    dropdown = false
+                                    docked = true
+                                }
+                            }
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.top, 7)
+                    .padding(.bottom, 3)
+                    ForEach(Mini.chats.indices, id: \.self) { index in
+                        Mini.chatRow(Mini.chats[index], selected: index == 0)
+                    }
+                }
+                .padding(.horizontal, 3)
+                .padding(.bottom, 5)
+                .frame(width: 170)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.menuFill))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
+                .offset(x: 70, y: 46)
+                .transition(.opacity.combined(with: .offset(y: -4)))
+            }
+        }
+        .frame(width: 400, height: 210)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Mini.page))
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2.4))
+                withAnimation(.spring(duration: 0.4, bounce: 0.1)) {
+                    if docked {
+                        docked = false
+                    } else if !dropdown {
+                        dropdown = true
+                    } else {
+                        dropdown = false
+                        docked = true
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A reply's paragraphs, the thread control on one, and the thread panel
+/// that opens with that paragraph quoted.
+private struct ThreadVignette: View {
+    @State private var open = false
+    @State private var sent = false
+
+    private let paragraphs = [
+        "The booking card renders a skeleton while availability loads, matching the final layout so nothing shifts.",
+        "Availability is fetched stale-while-revalidate: the cached range shows first and the refresh replaces it.",
+        "A test renders the card with a pending promise and asserts the skeleton stays until it resolves.",
+    ]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(paragraphs.indices, id: \.self) { index in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(paragraphs[index])
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Theme.text)
+                            .lineSpacing(2)
+                            .opacity(open && index != 1 ? 0.5 : 1)
+                        if index == 1 {
+                            VStack(spacing: 3) {
+                                Mini.control("reply", hint: !open)
+                                    .onTapGesture {
+                                        withAnimation(.spring(duration: 0.4, bounce: 0.1)) { open = true }
+                                    }
+                                if sent {
+                                    Text("1")
+                                        .font(.system(size: 8, weight: .semibold))
+                                        .foregroundStyle(Theme.text)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(Capsule().fill(Theme.buttonFill))
+                                        .transition(.opacity)
+                                }
+                            }
+                        } else {
+                            Color.clear.frame(width: 18, height: 18)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            if open {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Mini.caps("THREAD")
+                        Spacer(minLength: 0)
+                        Mini.control("x", hint: sent)
+                            .onTapGesture {
+                                withAnimation(.spring(duration: 0.4, bounce: 0.1)) {
+                                    open = false
+                                    sent = false
+                                }
+                            }
+                    }
+                    Text("Availability is fetched stale-while-revalidate…")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                        .padding(.leading, 6)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(Theme.link).frame(width: 2)
+                        }
+                    if sent {
+                        Text("What happens if the refresh fails?")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(Mini.bubble))
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .transition(.opacity)
+                        Text("The cached range stays on screen and the failure is logged.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.text)
+                            .transition(.opacity)
+                    }
+                    Spacer(minLength: 0)
+                    HStack(spacing: 6) {
+                        Text(sent ? "" : "What happens if the refresh fails?")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Circle()
+                            .fill(sent ? Theme.buttonFill : Mini.bubble)
+                            .frame(width: 16, height: 16)
+                            .overlay(
+                                LucideIcon("arrow-up", size: 9)
+                                    .foregroundStyle(sent ? Theme.textSecondary : .white)
+                            )
+                            .overlay { if !sent { PulseHint() } }
+                            .onTapGesture {
+                                withAnimation(Theme.quick) { sent = true }
+                            }
+                    }
+                    .padding(.horizontal, 7)
+                    .frame(height: 24)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Mini.page))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+                }
+                .padding(8)
+                .frame(width: 160)
+                .frame(maxHeight: .infinity)
+                .background(Mini.bar)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(Theme.borderSidebar).frame(width: 1)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .frame(width: 400, height: 210)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Mini.page))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2.4))
+                withAnimation(.spring(duration: 0.4, bounce: 0.1)) {
+                    if !open {
+                        open = true
+                    } else if !sent {
+                        sent = true
+                    } else {
+                        open = false
+                        sent = false
+                    }
+                }
+            }
+        }
     }
 }
 

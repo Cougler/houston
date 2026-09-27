@@ -347,6 +347,28 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   (which also makes the old interrupted-`.move` freeze land sharp). Any
   NEW animation that moves text horizontally needs the same treatment.
 
+- **Banners need BOTH permissions and a `willPresent` delegate (2026-09-27).**
+  Installing the hooks never asked macOS — `requestAuthorization` only ran
+  on the consent alert's Enable, so an install predating it (or a system
+  dialog lost to a relaunch) fed events into a center that had never been
+  authorized. `NotifyStore.start` now asks when hooks are installed and
+  the status is `.notDetermined`, tracks `authorization` (refreshed on
+  every app activation — the user can flip the switch in System Settings),
+  and the consent alert is auto-offered when a Claude session appears,
+  chained behind the status-bar alert (SwiftUI shows one alert at a time).
+  `.denied` can't be fixed in-app: the alert / gear item deep-link to
+  `x-apple.systempreferences:com.apple.Notifications-Settings.extension?
+  id=<bundle id>`. Separately, macOS SWALLOWS every banner from the
+  frontmost app unless `UNUserNotificationCenterDelegate.willPresent`
+  answers — without it a needs-you in project B never showed while the
+  user sat in project A. Banners are keyed `needs-you-<paneID>` so a
+  re-fired state replaces its predecessor and `markSeen` can pull them out
+  of Notification Center. None of this is testable in `swift run`: no
+  bundle id means no notification center at all — package to verify.
+  Layout note: the root body's `.onReceive`/`.onChange`/`.alert` links now
+  live on `consentDialogs` (a `Color.clear` in `.background`, like
+  `shortcutListeners`) — the root is at the type-checker's limit, and
+  any new observer goes there, not on the root chain.
 - **A refused backend connect surfaces as `.waiting`, not `.failed`.**
   Network.framework retries a refused localhost connection forever, so
   ShareProxy treats `.waiting` as down (server died since the lsof scan) and

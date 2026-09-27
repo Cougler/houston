@@ -205,8 +205,15 @@ struct MainWindowView: View {
     @State private var notifyInstalled = NotifyFeed.isInstalled
     /// Consent dialog for installing the notification hooks.
     @State private var showNotifyPrompt = false
-    /// The automatic offer fires at most once per launch.
+    /// Hooks are on but macOS has Houston's notifications switched off —
+    /// the only fix is System Settings, so this alert offers the pane.
+    @State private var showNotifyDenied = false
+    /// The automatic offers fire at most once per launch each.
     @State private var statusPromptOffered = false
+    @State private var notifyPromptOffered = false
+    /// The notify offer was due while the status-bar alert was up; SwiftUI
+    /// shows one alert at a time, so it waits for that one to close.
+    @State private var notifyPromptQueued = false
     /// First-launch onboarding: a full-window takeover on the empty-state
     /// sky (sidebar hidden underneath), until dismissed once.
     @State private var showOnboarding = !HoustonSettings.read().onboardingSeen
@@ -503,94 +510,149 @@ struct MainWindowView: View {
         // view: seven more onReceive links on the root chain pushed the
         // type-checker past its time limit.
         .background(shortcutListeners)
-        // Clicking into a terminal pane dismisses a floating sheet — ghostty
-        // eats the click, so it arrives as a notification instead.
-        .onReceive(NotificationCenter.default.publisher(for: .houstonTerminalClicked)) { _ in
-            closeFloatingSheet()
-        }
-        // A nested shell closing (⇧⌘W, context menu) must not strand the
-        // selection on a dead tab — fall back to the project's main
-        // terminal. Same fallback when the selected tab still lives but got
-        // promoted to the main row (the first tab closed): its `.shell` row
-        // no longer exists in the sidebar, `.project` now names it.
-        .onChange(of: allTabIDs) { _, ids in
-            guard case let .shell(path, tab) = selection else { return }
-            if !ids.contains(tab) {
-                // The workspace's terminal surface closed: back to the
-                // chat, not to whichever sibling terminal survived.
-                if chatTarget?.path == path { detailShowsTerminal = false }
-                selection = terminals.hasPane(for: path) ? .project(path) : nil
-            } else if terminals.tabs[path]?.first?.id == tab {
-                selection = .project(path)
-            }
-        }
-        // Keep the launch selection pointing at something that exists.
-        .onChange(of: terminals.installedAgents) { _, installed in
-            if !installed.contains(launchAgent), let first = installed.first {
-                launchAgent = first
-            }
-        }
-        // The menu-bar Settings menu writes the settings file directly —
-        // re-read and apply whatever changed.
-        .onReceive(NotificationCenter.default.publisher(for: .houstonSettingsChanged)) { _ in
-            let new = HoustonSettings.read()
-            if new.terminalTheme != settings.terminalTheme {
-                terminals.applyTerminalTheme(named: new.terminalTheme)
-            }
-            settings = new
-            statusFeedInstalled = StatusLineFeed.state == .houston
-            store.settingsChanged()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .houstonShowStatusFeedPrompt)) { _ in
-            showStatusPrompt = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .houstonShowThemePicker)) { _ in
-            setThemePicker(true)
-        }
-        // A claude session appearing is the moment the status bar becomes
-        // relevant — offer the takeover once, unless previously declined.
-        .onChange(of: terminals.agents) { _, agents in
-            guard agents.values.contains(.claude),
-                  !statusFeedInstalled,
-                  !settings.statusLinePromptDeclined,
-                  !statusPromptOffered else { return }
+        .background(consentDialogs)
+    }
+
+    /// A Claude session appearing is the moment both offers become
+    /// relevant: the status-bar takeover and needs-you notifications. Each
+    /// fires at most once per launch and never after "Not Now". The
+    /// notifications offer is packaged-builds only (a debug build has no
+    /// notification center to ask) and waits its turn behind the status
+    /// alert — SwiftUI shows one alert at a time.
+    private func offerConsentPrompts(_ agents: [String: CodingAgent]) {
+        guard agents.values.contains(.claude) else { return }
+        if !statusFeedInstalled,
+           !settings.statusLinePromptDeclined,
+           !statusPromptOffered {
             statusPromptOffered = true
             showStatusPrompt = true
         }
-        .alert("Show Claude's status in Houston?", isPresented: $showStatusPrompt) {
-            Button("Enable") {
-                statusFeedInstalled = StatusLineFeed.install()
+        if NotifyStore.canBanner,
+           !notifyInstalled,
+           !settings.notifyPromptDeclined,
+           !notifyPromptOffered {
+            notifyPromptOffered = true
+            if showStatusPrompt {
+                notifyPromptQueued = true
+            } else {
+                showNotifyPrompt = true
             }
-            Button("Not Now", role: .cancel) {
-                updateSettings { $0.statusLinePromptDeclined = true }
-            }
-        } message: {
-            Text(
-                "Houston can show each Claude session's model, context and cost in a "
-                + "native bar under the terminal — and blank out Claude's own status "
-                + "line inside it.\n\nThis replaces the statusLine command in "
-                + "~/.claude/settings.json. Your current one is backed up and can be "
-                + "restored anytime from the sidebar's gear menu. Running sessions "
-                + "switch over at their next response."
-            )
         }
-        .alert("Notify when Claude needs you?", isPresented: $showNotifyPrompt) {
-            Button("Enable") {
-                notifyInstalled = NotifyFeed.install()
-                NotifyStore.requestAuthorization()
+    }
+
+    /// Root observers and the consent alerts (status bar, notifications,
+    /// notifications-denied) hang off a background anchor rather than the
+    /// body's modifier chain — the root is at the type-checker's limit
+    /// (see shortcutListeners), and an alert presents from the window
+    /// wherever it's attached. The anchor is always mounted, so its
+    /// onReceive/onChange links fire exactly as they did on the root.
+    private var consentDialogs: some View {
+        Color.clear
+            // Clicking into a terminal pane dismisses a floating sheet — ghostty
+            // eats the click, so it arrives as a notification instead.
+            .onReceive(NotificationCenter.default.publisher(for: .houstonTerminalClicked)) { _ in
+                closeFloatingSheet()
             }
-            Button("Not Now", role: .cancel) {}
-        } message: {
-            Text(
-                "Houston can tell you the moment a session is waiting — a "
-                + "permission request, idle waiting for input, or a finished "
-                + "response — with a notification, a menubar dot, and a badge "
-                + "on the project's row.\n\nThis adds a Houston entry to the "
-                + "hooks in ~/.claude/settings.json. Your own hooks are left "
-                + "untouched, and Disable removes exactly Houston's entry. "
-                + "Sessions already running pick it up on their next turn."
-            )
-        }
+            // A nested shell closing (⇧⌘W, context menu) must not strand the
+            // selection on a dead tab — fall back to the project's main
+            // terminal. Same fallback when the selected tab still lives but got
+            // promoted to the main row (the first tab closed): its `.shell` row
+            // no longer exists in the sidebar, `.project` now names it.
+            .onChange(of: allTabIDs) { _, ids in
+                guard case let .shell(path, tab) = selection else { return }
+                if !ids.contains(tab) {
+                    // The workspace's terminal surface closed: back to the
+                    // chat, not to whichever sibling terminal survived.
+                    if chatTarget?.path == path { detailShowsTerminal = false }
+                    selection = terminals.hasPane(for: path) ? .project(path) : nil
+                } else if terminals.tabs[path]?.first?.id == tab {
+                    selection = .project(path)
+                }
+            }
+            // Keep the launch selection pointing at something that exists.
+            .onChange(of: terminals.installedAgents) { _, installed in
+                if !installed.contains(launchAgent), let first = installed.first {
+                    launchAgent = first
+                }
+            }
+            // The menu-bar Settings menu writes the settings file directly —
+            // re-read and apply whatever changed.
+            .onReceive(NotificationCenter.default.publisher(for: .houstonSettingsChanged)) { _ in
+                let new = HoustonSettings.read()
+                if new.terminalTheme != settings.terminalTheme {
+                    terminals.applyTerminalTheme(named: new.terminalTheme)
+                }
+                settings = new
+                statusFeedInstalled = StatusLineFeed.state == .houston
+                store.settingsChanged()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .houstonShowStatusFeedPrompt)) { _ in
+                showStatusPrompt = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .houstonShowThemePicker)) { _ in
+                setThemePicker(true)
+            }
+            // A claude session appearing is the moment the status bar becomes
+            // relevant — offer the takeover once, unless previously declined.
+            .onChange(of: terminals.agents) { _, agents in offerConsentPrompts(agents) }
+            .onChange(of: showStatusPrompt) { _, showing in
+                guard !showing, notifyPromptQueued else { return }
+                notifyPromptQueued = false
+                showNotifyPrompt = true
+            }
+            .alert("Show Claude's status in Houston?", isPresented: $showStatusPrompt) {
+                Button("Enable") {
+                    statusFeedInstalled = StatusLineFeed.install()
+                }
+                Button("Not Now", role: .cancel) {
+                    updateSettings { $0.statusLinePromptDeclined = true }
+                }
+            } message: {
+                Text(
+                    "Houston can show each Claude session's model, context and cost in a "
+                    + "native bar under the terminal — and blank out Claude's own status "
+                    + "line inside it.\n\nThis replaces the statusLine command in "
+                    + "~/.claude/settings.json. Your current one is backed up and can be "
+                    + "restored anytime from the sidebar's gear menu. Running sessions "
+                    + "switch over at their next response."
+                )
+            }
+            .alert("Notify when Claude needs you?", isPresented: $showNotifyPrompt) {
+                Button("Enable") {
+                    notifyInstalled = NotifyFeed.install()
+                    // Houston's consent first, then macOS's: the system
+                    // permission dialog follows straight after this one.
+                    notify.requestAuthorization { granted in
+                        if !granted && NotifyStore.canBanner { showNotifyDenied = true }
+                    }
+                }
+                Button("Not Now", role: .cancel) {
+                    updateSettings { $0.notifyPromptDeclined = true }
+                }
+            } message: {
+                Text(
+                    "Houston can tell you the moment a session is waiting — a "
+                    + "permission request, idle waiting for input, or a finished "
+                    + "response — with a notification, a menubar dot, and a badge "
+                    + "on the project's row. macOS will ask next whether Houston "
+                    + "may send notifications.\n\nThis adds a Houston entry to the "
+                    + "hooks in ~/.claude/settings.json. Your own hooks are left "
+                    + "untouched, and Disable removes exactly Houston's entry. "
+                    + "Sessions already running pick it up on their next turn."
+                )
+            }
+            .alert("Notifications are off for Houston", isPresented: $showNotifyDenied) {
+                Button("Open System Settings") {
+                    NotifyStore.openSystemNotificationSettings()
+                }
+                Button("Later", role: .cancel) {}
+            } message: {
+                Text(
+                    "The menubar dot and sidebar badges still work, but macOS won't "
+                    + "show Houston's banners until notifications are allowed in "
+                    + "System Settings ▸ Notifications ▸ Houston."
+                )
+            }
     }
 
     /// Draggable split handle — invisible now (no line between sidebar and
@@ -1269,6 +1331,17 @@ struct MainWindowView: View {
         // "open" in state — the handle brings it back instantly.
         let open = rightPanel != nil
         ZStack(alignment: .topTrailing) {
+        // The window's content width, for the thread sheet's sizing and
+        // the workspace panel breakpoint. Its own reader, on a view that
+        // is ALWAYS present — hung off the sheet's content it went quiet
+        // whenever the sheet was closed and rendering nothing.
+        GeometryReader { geo in
+            Color.clear
+                .onChange(of: geo.size.width, initial: true) { _, width in
+                    windowContentWidth = width
+                }
+        }
+        .allowsHitTesting(false)
         // Floating: a detached card hugging the window's top-right
         // corner (12px insets, 2026-09-22 — was 32px and 80% height).
         // Docked: the full-height strip, part of the page. The
@@ -1285,11 +1358,6 @@ struct MainWindowView: View {
                     maxWidth: .infinity, maxHeight: .infinity,
                     alignment: .topTrailing
                 )
-                // The thread sheet sizes itself off the window: record
-                // the width here (this reader spans the whole window).
-                .onChange(of: geo.size.width, initial: true) { _, width in
-                    windowContentWidth = width
-                }
         }
         // Slide on WHOLE PIXELS only (the real root of the blur, found
         // 2026-09-21 after three partial fixes): opening fires async work
@@ -2492,13 +2560,19 @@ struct MainWindowView: View {
     /// path until the composer's chip sets one); New Terminal opens the
     /// home shell — the standing affordance now that an empty Terminals
     /// section no longer renders.
+    /// Horizontal inset NSTableView's `.fullWidth` style puts on each cell.
+    private static let tableCellInset: CGFloat = 6
+
     private var sidebarTopCluster: some View {
         VStack(spacing: 2) {
             TopListRow(
                 icon: "square-pen",
                 label: "New Chat",
+                // The home terminal shares the home-path workspace; only
+                // the CHAT surface on it is "New Chat" (2026-09-27).
                 active: chatTarget == ChatTarget(
-                    path: NSHomeDirectory(), sessionFile: nil),
+                    path: NSHomeDirectory(), sessionFile: nil)
+                    && !detailShowsTerminal,
                 help: "Start a new chat",
                 action: {
                     chatTarget = ChatTarget(
@@ -2534,8 +2608,12 @@ struct MainWindowView: View {
                 ["servers": $0]
             }
         }
-        // No cluster padding — RowChrome's own `rowInset` is the only
-        // horizontal inset, so these align exactly with the table's rows.
+        // The table's `.fullWidth` style insets every cell 6pt from the
+        // scroll view's edges before RowChrome's own `rowInset` applies
+        // (measured: the PROJECTS header, padded 10, lands at x=16). A
+        // free-standing row gets no such inset, so match it here — icons
+        // and labels line up with the project rows below (2026-09-25).
+        .padding(.horizontal, Self.tableCellInset)
         // One section gap's worth before the table — the same 20pt a
         // header box puts between the table's own sections.
         .padding(.bottom, 20)
@@ -2688,15 +2766,19 @@ struct MainWindowView: View {
                             addAction(item, path: path)
                         }
                     )
-                    PanelControlButton(
-                        icon: "dock-right", help: "Move into the side panel",
-                        action: {
-                            withAnimation(sheetSpring) {
-                                barDropdown = nil
-                                moveToPanel(item)
+                    // No panel to move into while the window is too
+                    // narrow for one.
+                    if !workspacePanelSuppressed {
+                        PanelControlButton(
+                            icon: "panel-right-open", help: "Move into the side panel",
+                            action: {
+                                withAnimation(sheetSpring) {
+                                    barDropdown = nil
+                                    moveToPanel(item)
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
                 }
                 .frame(height: 28)
                 ScrollView {
@@ -2704,6 +2786,7 @@ struct MainWindowView: View {
                         dropdownRows(item, path: path)
                     }
                 }
+                .hiddenScrollbar()
                 .frame(maxHeight: 340)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -2805,6 +2888,14 @@ struct MainWindowView: View {
                     openChat(project: path, file: ref.filePath)
                 }
             }
+        case .tasks:
+            ProjectTaskRows(
+                store: AnnotationStores.store(for: path),
+                onOpen: {
+                    withAnimation(Theme.quick) { barDropdown = nil }
+                    openProjectTasks(path)
+                }
+            )
         }
     }
 
@@ -3074,6 +3165,18 @@ struct MainWindowView: View {
                 Button("Disable Needs-You Notifications") {
                     NotifyFeed.restore()
                     notifyInstalled = false
+                }
+                // Hooks are feeding events but macOS is holding the banners.
+                if notify.bannersBlocked {
+                    Button("Allow Notifications in System Settings…") {
+                        NotifyStore.openSystemNotificationSettings()
+                    }
+                } else if notify.authorization == .notDetermined {
+                    Button("Allow Notifications…") {
+                        notify.requestAuthorization { granted in
+                            if !granted { showNotifyDenied = true }
+                        }
+                    }
                 }
             } else {
                 Button("Notify When Claude Needs You…") {
@@ -3466,14 +3569,20 @@ struct MainWindowView: View {
             // The project workspace: top bar + (via the root HStack) the
             // side panel, with EITHER the chat or the selected terminal
             // as the surface underneath — two surfaces, one window.
-            VStack(spacing: 0) {
-                chatHeaderBar(chatTarget.path)
-                if detailShowsTerminal,
-                   let path = selection?.projectPath,
-                   path == chatTarget.path,
-                   terminals.hasPane(for: path) {
+            if detailShowsTerminal,
+               let path = selection?.projectPath,
+               path == chatTarget.path,
+               terminals.hasPane(for: path) {
+                // The terminal runs to the top with the same gap it has
+                // on its other edges; the top bar FLOATS over it
+                // (2026-09-27) instead of pushing it down.
+                ZStack(alignment: .top) {
                     terminalCard(path)
-                } else {
+                    chatHeaderBar(chatTarget.path)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    chatHeaderBar(chatTarget.path)
                     ChatBrowserView(
                         projectPath: chatTarget.path,
                         initialSessionFile: chatTarget.sessionFile,
@@ -3506,13 +3615,25 @@ struct MainWindowView: View {
                 named: settings.terminalTheme))
             .clipShape(RoundedRectangle(cornerRadius: 12))
             // Collapsed drops the leading gap so the card sits
-            // flush against the thin rail. The trailing gap runs
-            // wider to visually match the left (the window's right
-            // chrome eats a few points otherwise).
-            .padding(.leading, sidebarCollapsed ? 0 : 12)
-            .padding(.trailing, 16)
-            .padding(.top, 2)
+            // flush against the thin rail. Balanced in the workspace
+            // (2026-09-27): the side panel's slot already keeps 14pt of
+            // air before its card, so the terminal's own trailing gap
+            // goes to zero while the panel is open — left and right
+            // read the same (they were 12 vs 30). Without the panel the
+            // trailing gap matches the leading one.
+            .padding(.leading, sidebarCollapsed ? 0 : terminalCardGap)
+            .padding(.trailing, workspacePanelOpen ? 0 : terminalCardGap + 2)
+            // In the workspace the top bar floats OVER the card, so the
+            // card's top gap matches its sides.
+            .padding(.top, chatTarget == nil ? 2 : terminalCardGap)
             .padding(.bottom, 10)
+    }
+
+    private var terminalCardGap: CGFloat { chatTarget == nil ? 12 : 14 }
+
+    /// The workspace's side panel is actually showing beside the surface.
+    private var workspacePanelOpen: Bool {
+        chatTarget != nil && !shownPanelItems.isEmpty
     }
 
     @ViewBuilder
@@ -3626,11 +3747,41 @@ struct MainWindowView: View {
         // beneath them — clicking a project opens its chat list in the
         // right sheet (`openProjectChats`), so the sidebar stays a short
         // project index however many conversations pile up.
+        // Normal order (2026-09-27 — recency ordering tried and dropped:
+        // rows that reshuffle under the pointer cost more than they
+        // save). Pinned projects (right-click ▸ Pin) sit above a hairline
+        // in the same section, everything else in its stored order below.
         out.append(.header("Projects"))
-        for path in store.pinnedProjects {
+        let starred = store.pinnedProjects.filter { settings.starredProjects.contains($0) }
+        let rest = store.pinnedProjects.filter { !settings.starredProjects.contains($0) }
+        for path in starred {
+            out.append(.folder(path: path, name: name(of: path)))
+        }
+        if !starred.isEmpty, !rest.isEmpty {
+            out.append(.divider("projects-pinned"))
+        }
+        for path in rest {
             out.append(.folder(path: path, name: name(of: path)))
         }
         return out
+    }
+
+    private func isStarred(_ path: String) -> Bool {
+        settings.starredProjects.contains(path)
+    }
+
+    /// Right-click ▸ Pin / Unpin: hoists the project above the divider
+    /// (or drops it back). The list order within each group stays the
+    /// sidebar's stored order — pinning never reorders anything else.
+    private func toggleStar(_ path: String) {
+        updateSettings {
+            if $0.starredProjects.contains(path) {
+                $0.starredProjects.removeAll { $0 == path }
+            } else {
+                $0.starredProjects.append(path)
+            }
+        }
+        store.settingsChanged()
     }
 
     private func name(of path: String) -> String {
@@ -3650,14 +3801,67 @@ struct MainWindowView: View {
     private func openProjectChats(_ path: String) {
         // Already inside one of this project's chats: keep it; the click
         // just summons the workspace panel.
-        if chatTarget?.path != path {
-            chatTarget = ChatTarget(path: path, sessionFile: nil)
+        let entering = chatTarget?.path != path
+        if entering {
+            // Coming back to a project lands ON a chat, not the blank
+            // chat home: the one mid-turn or waiting on the user first
+            // (2026-09-26 — clicking away and back shows the work), else
+            // the most recent one (2026-09-27 — a project click resumes
+            // where you were; "+" is for starting fresh). A project with
+            // no chats yet still opens the new-chat sky.
+            chatTarget = ChatTarget(
+                path: path,
+                sessionFile: liveChatFile(in: path) ?? mostRecentChatFile(in: path)
+            )
         }
         // A project click always lands with the side panel up and the
         // Chats module in it — even if Chats was pinned to the top bar.
         moveToPanel(.chats)
-        detailShowsTerminal = false
         chatIndex.refresh(path, force: true)
+        // No chat needs the user but a terminal pane does ("needs you"
+        // rose wash): the workspace opens on that pane instead.
+        if entering, chatTarget?.sessionFile == nil,
+           let tab = attentionTab(in: path) {
+            let isMain = terminals.tabs[path]?.first?.id == tab
+            // `select` keeps the workspace (chatTarget is this project)
+            // and flips the surface to the terminal.
+            select(isMain ? .project(path) : .shell(path: path, tab: tab))
+            return
+        }
+        detailShowsTerminal = false
+    }
+
+    /// The chat a project click should land on: one of its sessions
+    /// that is working, settling (reply landed, not yet seen), or holding
+    /// a permission request. Waiting on the user outranks working; ties
+    /// go to the most recently used. Nil when every chat is idle.
+    /// The project's most recently touched chat that's still listed (not
+    /// archived, dismissed, or superseded by a rollover) — what a project
+    /// click opens when nothing is live. nil for a project with no chats.
+    private func mostRecentChatFile(in path: String) -> String? {
+        listedChats(for: path)
+            .filter { !chatMeta.archived.contains($0.filePath) }
+            .max { $0.modified < $1.modified }?
+            .filePath
+    }
+
+    private func liveChatFile(in path: String) -> String? {
+        func rank(_ s: ChatAgentSession) -> Int {
+            if s.approval != nil { return 3 }
+            if s.phase == .settling { return 2 }
+            return s.phase == .working ? 1 : 0
+        }
+        return chatHub.sessions
+            .filter { $0.value.projectPath == path && rank($0.value) > 0 }
+            .max { a, b in
+                (rank(a.value), a.value.lastUsed) < (rank(b.value), b.value.lastUsed)
+            }?
+            .key
+    }
+
+    /// A terminal tab in the project whose agent is waiting on the user.
+    private func attentionTab(in path: String) -> UUID? {
+        terminals.tabs[path]?.first { notify.hasAttention(path: path, tab: $0.id) }?.id
     }
 
     /// The project panel (2026-09-21 mock): its own header — folder glyph
@@ -3821,6 +4025,33 @@ struct MainWindowView: View {
             .compactMap(WorkspaceItem.init)
     )
 
+    /// The narrowest chat/terminal surface worth keeping the side panel
+    /// for. Below it the panel's fixed 294pt came straight out of the
+    /// surface — the terminal was squeezed to a handful of columns, and
+    /// zsh's prompt re-wrapped at that width left fragments strewn
+    /// across the line once the window grew back (2026-09-27).
+    private static let minWorkspaceSurface: CGFloat = 560
+    /// The panel column's full slot: card + its air on both sides.
+    private static let workspacePanelSlot: CGFloat = subSidebarWidth + 24 + 14
+
+    /// The window is too narrow for the side panel: the items are forced
+    /// back into the top bar without touching the user's saved layout —
+    /// widen the window and they return. Measured against what the
+    /// surface would actually have left (window minus the sidebar and
+    /// the right sheet's reservation), not a fixed window width.
+    private var workspacePanelSuppressed: Bool {
+        guard windowContentWidth > 0 else { return false }
+        let sidebar = sidebarRevealed ? (sidebarCollapsed ? railWidth : sidebarWidth) : 0
+        let available = windowContentWidth - sidebar - 1 - rightPanelReservedWidth
+        return available - Self.workspacePanelSlot < Self.minWorkspaceSurface
+    }
+
+    /// Items actually shown in the side panel right now — the saved
+    /// choice, unless the breakpoint forces them all into the bar.
+    private var shownPanelItems: Set<WorkspaceItem> {
+        workspacePanelSuppressed ? [] : workspaceItems
+    }
+
     private func moveToPanel(_ item: WorkspaceItem) {
         withAnimation(sheetSpring) { _ = workspaceItems.insert(item) }
         persistWorkspaceItems()
@@ -3839,6 +4070,7 @@ struct MainWindowView: View {
         case .servers: startProjectDevServer(path)
         case .terminals: newTerminal(in: path)
         case .chats: newChat(in: path)
+        case .tasks: openProjectTasks(path)
         }
     }
 
@@ -3848,6 +4080,7 @@ struct MainWindowView: View {
         case .servers: "Start the dev server"
         case .terminals: "Open a terminal in this project"
         case .chats: "Start a new chat"
+        case .tasks: "Open this project's tasks"
         }
     }
 
@@ -3864,7 +4097,7 @@ struct MainWindowView: View {
     /// the width animates — opening reads as a leftward reveal, and no
     /// frame can rasterize the rows at a fractional offset.
     private func workspacePanelColumn(_ path: String?) -> some View {
-        let open = path != nil && !workspaceItems.isEmpty
+        let open = path != nil && !shownPanelItems.isEmpty
         return GeometryReader { geo in
             if let path {
                 workspaceCard(path, maxHeight: geo.size.height - 36)
@@ -3893,17 +4126,20 @@ struct MainWindowView: View {
     private func workspaceCard(_ path: String, maxHeight: CGFloat) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if workspaceItems.contains(.branches) {
+                if shownPanelItems.contains(.branches) {
                     moduleCard { subBranchesSection(path) }
                 }
-                if workspaceItems.contains(.servers) {
+                if shownPanelItems.contains(.servers) {
                     moduleCard { subServersSection(path) }
                 }
-                if workspaceItems.contains(.terminals) {
+                if shownPanelItems.contains(.terminals) {
                     moduleCard { subTerminalsSection(path) }
                 }
-                if workspaceItems.contains(.chats) {
+                if shownPanelItems.contains(.chats) {
                     moduleCard { subChatsSection(path) }
+                }
+                if shownPanelItems.contains(.tasks) {
+                    moduleCard { subTasksSection(path) }
                 }
             }
             .background(GeometryReader { proxy in
@@ -3913,6 +4149,10 @@ struct MainWindowView: View {
                 )
             })
         }
+        // No scrollbar (2026-09-27): the card's content scrolls past the
+        // cap, but an indicator over the module cards read as a glitch —
+        // and a stray one appeared when a module was docked to the bar.
+        .hiddenScrollbar()
         .frame(width: Self.subSidebarWidth)
         .frame(height: min(max(workspaceContentHeight, 120), maxHeight))
         .onPreferenceChange(WorkspacePanelHeightKey.self) {
@@ -3975,7 +4215,7 @@ struct MainWindowView: View {
             let liveServers = servers.devServers.contains { $0.cwd == path }
             ForEach(
                 WorkspaceItem.allCases.filter {
-                    !workspaceItems.contains($0) && ($0 != .servers || liveServers)
+                    !shownPanelItems.contains($0) && ($0 != .servers || liveServers)
                 },
                 id: \.self
             ) { item in
@@ -4058,6 +4298,12 @@ struct MainWindowView: View {
                     icon: "message-square-text",
                     label: "Chats",
                     dotColor: busy ? Theme.dotActive : Theme.dotIdle
+                ) { toggleBarDropdown(item) }
+            case .tasks:
+                let open = AnnotationStores.store(for: path).open.count
+                headerChip(
+                    icon: "list-checks",
+                    label: open > 0 ? "Tasks · \(open)" : "Tasks"
                 ) { toggleBarDropdown(item) }
             }
         }
@@ -4227,7 +4473,24 @@ struct MainWindowView: View {
         }
     }
 
-    private static let chatsPageSize = 10
+    private static let chatsPageSize = 5
+
+    /// The project's open tasks, as a module card: the same rows the bar
+    /// dropdown shows (check to complete, click to open the tasks sheet).
+    @ViewBuilder
+    private func subTasksSection(_ path: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            SubSectionHeader(
+                title: "TASKS", addHelp: "Open this project's tasks",
+                onAdd: { openProjectTasks(path) },
+                onMoveToBar: { moveToBar(.tasks) }
+            )
+            ProjectTaskRows(
+                store: AnnotationStores.store(for: path),
+                onOpen: { openProjectTasks(path) }
+            )
+        }
+    }
 
     /// Start the project's own dev server: a terminal plus the detected
     /// dev command (plain terminal when the project declares none).
@@ -4592,6 +4855,9 @@ struct MainWindowView: View {
         case .folder:
             // 26 of content + 4 of in-row vertical padding.
             return 30
+        case .divider:
+            // A hairline with a little air either side.
+            return 11
         case let .action(key, _):
             // "New" stands in for the first terminal row — same height as one
             // (28pt), so the sections below don't jump when it's swapped out.
@@ -4606,6 +4872,13 @@ struct MainWindowView: View {
     @ViewBuilder
     private func row(for entry: SidebarEntry, hovered: Bool) -> some View {
         switch entry {
+        case .divider:
+            Rectangle()
+                .fill(Theme.borderSidebar)
+                .frame(height: 1)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 10)
+                .frame(maxHeight: .infinity)
         case let .header(title):
             HStack(alignment: .bottom, spacing: 0) {
                 Text(title.uppercased())
@@ -4763,6 +5036,8 @@ struct MainWindowView: View {
         case let .header(title):
             // Hover is content here: the Terminals "+" reveals on it.
             return "h:\(title)|\(hovered ? "h" : "-")"
+        case let .divider(key):
+            return "d:\(key)"
         case let .action(key, title):
             return "a:\(key)|\(title)|\(hovered ? "h" : "-")"
         case let .folder(path, folderName):
@@ -4816,12 +5091,18 @@ struct MainWindowView: View {
                 Actions.revealInFinder(path: path)
             })
             menu.addItem(.separator())
+            if store.pinnedProjects.contains(path) {
+                menu.addItem(ClosureMenuItem(isStarred(path) ? "Unpin" : "Pin") {
+                    toggleStar(path)
+                })
+            }
             menu.addItem(ClosureMenuItem("Remove from Sidebar") {
                 // Project rows come from pinnedProjects; parent folder
                 // groups from projectsDirs — clear the path from both.
                 updateSettings {
                     $0.pinnedProjects.removeAll { $0 == path }
                     $0.projectsDirs.removeAll { $0 == path }
+                    $0.starredProjects.removeAll { $0 == path }
                 }
                 store.settingsChanged()
             })
@@ -4906,8 +5187,14 @@ struct MainWindowView: View {
             })
             if store.pinnedProjects.contains(path) {
                 menu.addItem(.separator())
+                menu.addItem(ClosureMenuItem(isStarred(path) ? "Unpin" : "Pin") {
+                    toggleStar(path)
+                })
                 menu.addItem(ClosureMenuItem("Remove from Sidebar") {
-                    updateSettings { $0.pinnedProjects.removeAll { $0 == path } }
+                    updateSettings {
+                        $0.pinnedProjects.removeAll { $0 == path }
+                        $0.starredProjects.removeAll { $0 == path }
+                    }
                     store.settingsChanged()
                 })
             }
@@ -4927,16 +5214,18 @@ struct MainWindowView: View {
         if case let .project(path) = target {
             terminals.pane(for: path)
         }
-        // Selecting a terminal in the CURRENT project keeps the
-        // workspace (top bar + side panel) and swaps the surface to the
-        // terminal; any other selection leaves the workspace entirely.
-        if let target {
-            if let path = target.projectPath, chatTarget?.path == path {
-                detailShowsTerminal = true
-            } else {
-                chatTarget = nil
-                detailShowsTerminal = false
+        // A terminal always opens INSIDE the project workspace (top bar
+        // + side panel) with the terminal as the surface (2026-09-27 —
+        // the bare terminal page is gone from the sidebar path: a
+        // Terminals row or New Terminal used to land on the old chrome-
+        // less layout). Same project: just swap the surface; another
+        // project: retarget the workspace to it first.
+        if let target, let path = target.projectPath {
+            if chatTarget?.path != path {
+                chatTarget = ChatTarget(path: path, sessionFile: nil)
+                chatIndex.refresh(path, force: true)
             }
+            detailShowsTerminal = true
         }
         selection = target
         // Selecting a terminal row means "type here now": focus follows the
@@ -4958,7 +5247,9 @@ struct MainWindowView: View {
     /// is untouched (git watch, status bar, and the return click's target
     /// all still need it).
     private var highlightedSelection: SidebarSelection? {
-        chatTarget == nil ? selection : nil
+        // The terminal surface inside the workspace is a terminal on
+        // screen too — its row lights; only the chat surface hides it.
+        chatTarget == nil || detailShowsTerminal ? selection : nil
     }
 
     /// `$selection` for the table, routed through `select(_:)`.
@@ -5506,7 +5797,9 @@ private struct TopListRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            // Spacing 9 matches the project rows' icon-to-label gap, so
+            // the labels share one left edge with the table below.
+            HStack(spacing: 9) {
                 Group {
                     if serverIcon {
                         ServerGlyph(color: Theme.textSecondary, size: 15)
@@ -6070,7 +6363,7 @@ struct StatusDot: View {
 /// (as a labeled chip) or the side panel (as a section). Order here is
 /// the display order in both.
 enum WorkspaceItem: String, CaseIterable {
-    case branches, servers, terminals, chats
+    case branches, servers, terminals, chats, tasks
 }
 
 /// A module card's header (2026-09-23 mock): caps title on the left,
@@ -6253,6 +6546,86 @@ private struct ShowMoreRow: View {
     }
 }
 
+/// A project's open tasks as compact workspace rows — the side panel's
+/// TASKS card and the bar's Tasks dropdown share it. Check completes
+/// the task in place; clicking the text opens the project's tasks sheet
+/// (add, edit, send live there). Observes the project's store directly,
+/// so a task checked in the sheet or added by an inspect capture shows
+/// here on the next poll.
+private struct ProjectTaskRows: View {
+    @ObservedObject var store: AnnotationStore
+    let onOpen: () -> Void
+
+    var body: some View {
+        Group {
+            if store.open.isEmpty {
+                Text("No open tasks")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+            }
+            ForEach(store.open.prefix(10)) { task in
+                WorkspaceTaskRow(
+                    text: task.comment.isEmpty ? task.summaryText : task.comment,
+                    onDone: { store.markDone(task.id) },
+                    onOpen: onOpen
+                )
+            }
+            if store.open.count > 10 {
+                Button(action: onOpen) {
+                    Text("Show all \(store.open.count)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .onAppear { store.start() }
+    }
+}
+
+/// One task row: a check circle that completes it, then the text (two
+/// lines max) — same 34pt pitch and hover wash as `SubSidebarRow`.
+private struct WorkspaceTaskRow: View {
+    let text: String
+    let onDone: () -> Void
+    let onOpen: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Button(action: onDone) {
+                LucideIcon("circle", size: 15)
+                    .foregroundStyle(hovered ? Theme.text : Theme.textSecondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Mark done")
+            .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.text)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(minHeight: 34)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                .fill(hovered ? Theme.rowHovered : .clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .onTapGesture(perform: onOpen)
+    }
+}
+
 /// The root's image/file drop, window-wide. `validateDrop` gates on the
 /// drag's flavor AND on a chat surface being visible, so nothing lights
 /// up (and nothing is swallowed) while a terminal or the empty state
@@ -6266,16 +6639,68 @@ private struct WindowImageDropDelegate: DropDelegate {
         accepts() && info.hasItemsConforming(to: [.image, .fileURL])
     }
 
-    func dropEntered(info: DropInfo) { targeted = true }
-    func dropExited(info: DropInfo) { targeted = false }
+    func dropEntered(info: DropInfo) {
+        ImageDragHold.shared.cancel()
+        targeted = true
+    }
+
+    /// "Exited" also fires when a NESTED drop target under the cursor
+    /// (the composer's text — an image drag from a browser carries its
+    /// URL as text too — or a selectable reply's AppKit text layer) takes
+    /// the session while the drag is still inside the window. The cue
+    /// used to vanish over text (2026-09-27). Hold it up until the drag
+    /// truly leaves the window or the button releases.
+    func dropExited(info: DropInfo) {
+        let binding = $targeted
+        ImageDragHold.shared.begin { binding.wrappedValue = false }
+    }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .copy)
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        ImageDragHold.shared.cancel()
         targeted = false
         return ComposerDropLoader.load(info.itemProviders(for: [.image, .fileURL]))
+    }
+}
+
+/// Keeps the window-wide drop cue alive across a nested target's capture
+/// of the drag: polls the global mouse state (the only signal an app gets
+/// while another app's drag is over a subview it doesn't own) and clears
+/// the cue once the button lifts or the pointer leaves our windows.
+@MainActor
+private final class ImageDragHold {
+    static let shared = ImageDragHold()
+    private var timer: Timer?
+    private var clear: (() -> Void)?
+
+    func begin(clear: @escaping () -> Void) {
+        self.clear = clear
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+    }
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+        clear = nil
+    }
+
+    private func tick() {
+        let pressed = NSEvent.pressedMouseButtons & 1 != 0
+        let inside = NSApp.windows.contains {
+            $0.isVisible && $0.frame.contains(NSEvent.mouseLocation)
+        }
+        guard !pressed || !inside else { return }
+        let clear = self.clear
+        cancel()
+        // A drop that a nested target performed lands on the next
+        // runloop turn; clearing after it keeps the fade in order.
+        DispatchQueue.main.async { clear?() }
     }
 }
 
@@ -6405,6 +6830,8 @@ struct ServerFlyoutCard: View {
     var onMoveToPanel: (() -> Void)? = nil
 
     @State private var stopHovered = false
+    /// The Wi-Fi link's QR popover.
+    @State private var showQR = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -6424,7 +6851,7 @@ struct ServerFlyoutCard: View {
                 Spacer(minLength: 0)
                 if let onMoveToPanel {
                     PanelControlButton(
-                        icon: "dock-right", help: "Move into the side panel",
+                        icon: "panel-right-open", help: "Move into the side panel",
                         action: onMoveToPanel
                     )
                 }
@@ -6441,13 +6868,32 @@ struct ServerFlyoutCard: View {
             ) { PreviewWindowController.present(server: server) }
                 .padding(.bottom, 14)
             hairline
+            // The QR + copy controls the right-sheet page carries came
+            // off this card in the 2026-09-22 rebuild — restored
+            // (2026-09-25): once the proxy answers, the Wi-Fi row gets
+            // the phone-scannable QR and a copy; a live link gets copy.
             toggleRow(
                 "Local WiFi sharing", subtitle: wifiSubtitle,
                 isOn: Binding(
                     get: { share.enabled },
                     set: { share.setEnabled($0) }
                 )
-            )
+            ) {
+                if let lanURL {
+                    Button(action: { showQR = true }) {
+                        LucideIcon("qr-code", size: 15)
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show a QR code phones can scan")
+                    .popover(isPresented: $showQR, arrowEdge: .bottom) {
+                        QRCodePopover(url: lanURL)
+                    }
+                    CopyIconButton(text: lanURL, help: "Copy link")
+                }
+            }
             .padding(.vertical, 14)
             hairline
             toggleRow(
@@ -6457,7 +6903,11 @@ struct ServerFlyoutCard: View {
                     set: { relay.setEnabled(projectLabel, $0) }
                 ),
                 disabled: relay.token.isEmpty
-            )
+            ) {
+                if let liveURL {
+                    CopyIconButton(text: liveURL, help: "Copy link")
+                }
+            }
             .padding(.top, 14)
             .padding(.bottom, 18)
             Button(action: { Actions.killPid(server.pid) }) {
@@ -6495,12 +6945,22 @@ struct ServerFlyoutCard: View {
         ShareProxyStore.label(for: server.project ?? server.command)
     }
 
+    /// The full `.local` share link, once the proxy is actually answering.
+    private var lanURL: String? {
+        guard share.enabled, share.running else { return nil }
+        return share.lanURL(forProjectNamed: server.project ?? server.command)
+    }
+
+    /// The public relay link, once the tunnel reports it online.
+    private var liveURL: String? {
+        guard !relay.token.isEmpty, relay.isEnabled(projectLabel),
+              case let .online(url)? = relay.states[projectLabel]
+        else { return nil }
+        return url
+    }
+
     private var wifiSubtitle: String {
-        if share.enabled && share.running {
-            return share.lanURL(forProjectNamed: server.project ?? server.command)
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-        }
+        if let lanURL { return Self.bare(lanURL) }
         return projectLabel + ".local"
     }
 
@@ -6508,15 +6968,18 @@ struct ServerFlyoutCard: View {
         if relay.token.isEmpty { return "Needs a Houston Pro token" }
         if relay.isEnabled(projectLabel) {
             switch relay.states[projectLabel] {
-            case let .online(url):
-                return url
-                    .replacingOccurrences(of: "https://", with: "")
-                    .replacingOccurrences(of: "http://", with: "")
+            case let .online(url): return Self.bare(url)
             case .offline: return "Waiting for the dev server…"
             case .connecting, nil: return "Connecting…"
             }
         }
         return projectLabel + "." + RelayTunnelStore.relayHost
+    }
+
+    /// A URL without its scheme, for display.
+    private static func bare(_ url: String) -> String {
+        url.replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
     }
 
     private var hairline: some View {
@@ -6553,9 +7016,12 @@ struct ServerFlyoutCard: View {
         .onTapGesture(perform: action)
     }
 
-    private func toggleRow(
+    /// A labeled switch row; `accessory` sits between the text and the
+    /// switch (QR / copy controls, shown only once there's a link).
+    private func toggleRow<Accessory: View>(
         _ title: String, subtitle: String,
-        isOn: Binding<Bool>, disabled: Bool = false
+        isOn: Binding<Bool>, disabled: Bool = false,
+        @ViewBuilder accessory: () -> Accessory = { EmptyView() }
     ) -> some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
@@ -6569,6 +7035,7 @@ struct ServerFlyoutCard: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            HStack(spacing: 2) { accessory() }
             Toggle("", isOn: isOn)
                 .toggleStyle(PanelSwitchStyle())
                 .disabled(disabled)

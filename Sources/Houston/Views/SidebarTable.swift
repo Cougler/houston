@@ -17,12 +17,16 @@ enum SidebarEntry: Identifiable, Hashable {
     /// A clickable affordance inside a section (e.g. "New Terminal" while no
     /// terminal is open) — like a folder, tappable but never *selected*.
     case action(key: String, title: String)
+    /// A hairline between groups inside one section (pinned projects
+    /// above the rest). Inert: no hover, no click, no selection.
+    case divider(String)
 
     var id: String {
         switch self {
         case let .header(title): "header:\(title)"
         case let .folder(path, _): "folder:\(path)"
         case let .action(key, _): "action:\(key)"
+        case let .divider(key): "divider:\(key)"
         case let .row(id, _):
             switch id {
             case let .project(path): "project:\(path)"

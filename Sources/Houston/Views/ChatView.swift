@@ -2084,10 +2084,15 @@ private struct ChatComposer: View {
         // drop (`MainWindowView`'s root onDrop + its "Drop image
         // anywhere" field) — declaring them here too made the window
         // target flicker off whenever the drag crossed the composer.
-        .onDrop(
-            of: [.plainText], isTargeted: $dropTargeted,
-            perform: handleDrop
-        )
+        // A delegate, not the closure form: a browser image drag carries
+        // its URL as text too, and the closure form took those on the
+        // text flavor alone — stealing the session from the window's
+        // target and dropping the "Drop image anywhere" cue over the
+        // composer (2026-09-27). validateDrop declines anything with an
+        // image/file flavor so the window's delegate keeps it.
+        .onDrop(of: [.plainText], delegate: ComposerTextDropDelegate(
+            targeted: $dropTargeted, perform: handleDrop
+        ))
         // Draft persistence: restore on mount, mirror every edit into the
         // in-memory store. Send clears `draft`, and the mirror removes
         // the entry with it — so only genuinely unsent text survives.
@@ -2714,6 +2719,31 @@ private struct ChatComposer: View {
     /// browser or a screenshot thumbnail) is saved to a temp PNG first;
     /// dropped text stages capsules/fragments as chips, else appends to
     /// the draft.
+    /// Text-only drops (capsule/fragment chips, plain text) for the
+    /// composer; image and file flavors are declined so they fall through
+    /// to the window-wide image drop.
+    private struct ComposerTextDropDelegate: DropDelegate {
+        @Binding var targeted: Bool
+        let perform: ([NSItemProvider]) -> Bool
+
+        func validateDrop(info: DropInfo) -> Bool {
+            !info.hasItemsConforming(to: [.image, .fileURL])
+                && info.hasItemsConforming(to: [.plainText])
+        }
+
+        func dropEntered(info: DropInfo) { targeted = true }
+        func dropExited(info: DropInfo) { targeted = false }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: .copy)
+        }
+
+        func performDrop(info: DropInfo) -> Bool {
+            targeted = false
+            return perform(info.itemProviders(for: [.plainText]))
+        }
+    }
+
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         // Delegated to a FILE-SCOPE nonisolated type on purpose: closure
         // literals born anywhere inside this MainActor view keep getting
