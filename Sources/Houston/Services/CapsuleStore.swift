@@ -53,6 +53,11 @@ extension Notification.Name {
     /// The main window retargets `chatTarget` so the sidebar highlight
     /// follows the conversation instead of pointing at the sealed file.
     static let houstonChatRekeyed = Notification.Name("houstonChatRekeyed")
+    /// A chat's permission mode changed outside its composer (the approval
+    /// card's "Auto"). Object: the `ChatAgentSession`; userInfo "mode":
+    /// the `ChatPermissionMode` raw value. The composer on that session
+    /// adopts it so its chip reads true.
+    static let houstonChatPermissionChanged = Notification.Name("houstonChatPermissionChanged")
 }
 
 /// The capsule shelf, persisted to

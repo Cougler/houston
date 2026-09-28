@@ -219,6 +219,37 @@ struct ChatModelChoice: Hashable {
         HoustonSettings.write(s)
     }
 
+    // MARK: Per-chat memory
+
+    /// The model this chat was last sent on or picked in, resolved
+    /// against the current catalogs (same rule as the project default),
+    /// with its effort and permission restored.
+    @MainActor
+    static func remembered(for file: String) -> ChatModelChoice? {
+        guard let stored = ChatMetaStore.shared.models[file],
+              let harnessRaw = stored["harness"],
+              let harness = ChatHarness(rawValue: harnessRaw),
+              let arg = stored["arg"],
+              let base = resolve(harness: harness, arg: arg, provider: stored["provider"])
+        else { return nil }
+        return base.applying(
+            effort: stored["effort"],
+            permission: stored["permission"].flatMap(ChatPermissionMode.init) ?? .ask
+        )
+    }
+
+    @MainActor
+    static func remember(_ choice: ChatModelChoice, for file: String) {
+        guard let arg = choice.arg else { return }
+        var stored = [
+            "harness": choice.harness.rawValue, "arg": arg,
+            "permission": choice.permission.rawValue,
+        ]
+        if let provider = choice.provider { stored["provider"] = provider }
+        if let effort = choice.effort { stored["effort"] = effort }
+        ChatMetaStore.shared.setModel(stored, for: file)
+    }
+
     /// Whether `choice` IS the project's default — arg + harness +
     /// provider identity, not the whole value (effort and permission are
     /// per-message and never part of the default).
@@ -715,12 +746,16 @@ struct ChatBrowserView: View {
     private func transcriptComposer(_ ref: ChatSessionRef) -> some View {
         ChatComposer(
             placeholder: "What's next?",
-            initialModel: hub.sessions[ref.filePath]?.lastModel
+            // The remembered pick outranks the session's last send: a pick
+            // made after that send (and never sent) is the newer intent.
+            initialModel: ChatModelChoice.remembered(for: ref.filePath)
+                ?? hub.sessions[ref.filePath]?.lastModel
                 ?? .fallback(for: ref.harness),
             ghostContext: ref.harness == .claude ? ghostContext : nil,
             runningSession: hub.sessions[ref.filePath],
             draftKey: ref.filePath,
             projectPath: activeProject,
+            rememberKey: ref.filePath,
             onSend: { text, model in
                 handleSend(ref, text: text, model: model)
             }
@@ -1547,6 +1582,8 @@ private struct LiveTurnView: View {
                 ApprovalCard(
                     request: approval,
                     onAllow: { session.respond(to: approval, allow: true) },
+                    onAuto: session.canSwitchToAuto
+                        ? { session.allowAndSwitchToAuto(approval) } : nil,
                     onDeny: { session.respond(to: approval, allow: false) }
                 )
             }
@@ -1889,10 +1926,14 @@ private struct ContextMeter: View {
 }
 
 /// The agent asked to use a tool — the same decision the terminal would
-/// prompt for, rendered as a card in the chat.
+/// prompt for, rendered in the chat. Deliberately light (2026-09-28): no
+/// border, just the composer's own wash behind it. "Auto" allows this one
+/// and moves the chat to Auto edits, so the next edit doesn't ask.
 private struct ApprovalCard: View {
     let request: ChatAgentSession.ApprovalRequest
     let onAllow: () -> Void
+    /// nil when the harness's permission mode isn't Houston's to set.
+    let onAuto: (() -> Void)?
     let onDeny: () -> Void
 
     var body: some View {
@@ -1907,7 +1948,7 @@ private struct ApprovalCard: View {
                     .lineLimit(6)
                     .textSelection(.enabled)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Button(action: onAllow) {
                     Text("Allow")
                         .font(.system(size: 11, weight: .semibold))
@@ -1917,23 +1958,45 @@ private struct ApprovalCard: View {
                         .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.ctaFill))
                 }
                 .buttonStyle(.plain)
-                Button(action: onDeny) {
-                    Text("Deny")
+                if let onAuto {
+                    Button(action: onAuto) {
+                        HStack(spacing: 4) {
+                            LucideIcon("zap", size: 11)
+                            Text("Auto")
+                        }
                         .font(Theme.Fonts.secondaryMedium)
                         .foregroundStyle(Theme.text)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(
                             RoundedRectangle(cornerRadius: Theme.radiusControl)
-                                .fill(Theme.buttonFill)
+                                .fill(Theme.rowHovered)
                         )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Allow, and switch this chat to \(ChatPermissionMode.edits.label): "
+                        + ChatPermissionMode.edits.detail.lowercased())
+                }
+                Button(action: onDeny) {
+                    Text("Deny")
+                        .font(Theme.Fonts.secondaryMedium)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
+            .padding(.top, 2)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Theme.radiusSurface).fill(Theme.panelFill))
+        // The composer's wash, no stroke — it reads as part of the turn,
+        // not a dialog dropped into it.
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.sidebarFill.opacity(0.6))
+        )
     }
 }
 
@@ -1995,6 +2058,10 @@ private struct ChatComposer: View {
     /// The project this composer belongs to — the model menu's "Default
     /// for <project>" writes the per-project default here. nil hides it.
     var projectPath: String? = nil
+    /// The chat file whose model this composer remembers: a pick is
+    /// written through the moment it's made, so it survives navigating
+    /// away unsent. nil (new chat, draft) = picks are view state only.
+    var rememberKey: String? = nil
     let onSend: (String, ChatModelChoice) -> Void
 
     @ObservedObject private var localModels = LocalModelStore.shared
@@ -2043,6 +2110,14 @@ private struct ChatComposer: View {
                 $0.arg == ChatModelChoice.defaultEffort(for: model.harness)
             }
             ?? levels[0]
+    }
+
+    private func rememberPick() {
+        guard let key = rememberKey else { return }
+        ChatModelChoice.remember(
+            model.applying(effort: activeEffort?.arg, permission: activePermission),
+            for: key
+        )
     }
 
     /// A drop that couldn't become an attachment (unreadable image data)
@@ -2176,6 +2251,19 @@ private struct ChatComposer: View {
             guard let key = draftKey else { return }
             ComposerDraftStore.texts[key] = text.isEmpty ? nil : text
         }
+        .onChange(of: picked) { rememberPick() }
+        // The approval card's "Auto" switched this chat's mode — follow it.
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonChatPermissionChanged)
+        ) { note in
+            guard let session = note.object as? ChatAgentSession,
+                  session === runningSession,
+                  let raw = note.userInfo?["mode"] as? String,
+                  let mode = ChatPermissionMode(rawValue: raw) else { return }
+            permission = mode
+        }
+        .onChange(of: effort) { rememberPick() }
+        .onChange(of: permission) { rememberPick() }
         // Capsule-view insert buttons route here; drags land via onDrop
         // instead.
         .onReceive(

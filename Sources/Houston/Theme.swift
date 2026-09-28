@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Design tokens. Retheme 2026-09-22: values follow shadcn's zinc design
 /// system (surfaces/borders/muted text on the Tailwind zinc scale, light =
-/// white-on-zinc, dark = zinc-950), with Houston's brand rose surviving as
+/// white-on-zinc, dark = zinc-950), with Houston's brand violet surviving as
 /// the accent (`buttonActive*`, `ctaFill`, `link`). Every token is a
 /// dynamic color, so switching the app appearance restyles everything live.
 enum Theme {
@@ -75,14 +75,14 @@ enum Theme {
 
     /// Secondary button fill — shadcn `secondary` (zinc-100 / zinc-800).
     static let buttonFill = Color(light: 0xF4F4F5, dark: 0x27272A)
-    /// Header button while its menu/panel is open: the brand rose accent —
+    /// Header button while its menu/panel is open: the brand violet accent —
     /// deliberately the one non-neutral in the chrome (shadcn's `accent`
     /// slot, in Houston's color).
     static let buttonActiveFill = Color(
-        light: NSColor(hex: 0xAD7370).withAlphaComponent(0.12),
-        dark: NSColor(hex: 0xC79491).withAlphaComponent(0.15)
+        light: NSColor(hex: 0x7C66E8).withAlphaComponent(0.12),
+        dark: NSColor(hex: 0xA99BFF).withAlphaComponent(0.15)
     )
-    static let buttonActiveStroke = Color(light: 0xAD7370, dark: 0xC79491)
+    static let buttonActiveStroke = Color(light: 0x7C66E8, dark: 0xA99BFF)
     /// Input/control border — shadcn `input` (zinc-200 / zinc-700).
     static let buttonStroke = Color(light: 0xE4E4E7, dark: 0x3F3F46)
     /// Close button glyph — shadcn `destructive` red, both appearances.
@@ -127,9 +127,9 @@ enum Theme {
     static let dotActive = Color(light: 0x15803D, dark: 0x22C55E)
     /// The sidebar status dot's idle state — a quiet gray, non-signal.
     static let dotIdle = Color(light: 0xA1A1AA, dark: 0x52525B)
-    /// The chat view's user bubble — the brand rose (deepened; white text
-    /// clears 4.5:1 in both modes — don't lighten without rechecking).
-    static let chatUserFill = Color(light: 0x7E4340, dark: 0x8F5350)
+    /// The chat view's user bubble — the brand violet (white text clears
+    /// 4.5:1 in both modes — don't lighten without rechecking).
+    static let chatUserFill = Color(light: 0x5B3FE0, dark: 0x6E54F0)
     /// Assistant chat prose. Dark mode steps down from full foreground —
     /// full-brightness paragraphs glare at 16pt reading size; zinc-300
     /// still clears 10:1 on the chat background.
@@ -143,9 +143,10 @@ enum Theme {
     /// and 4.5:1 when it colors small text.
     static let dotDegraded = Color(light: 0xB45309, dark: 0xD97706)
 
-    /// Inline text links — the brand rose, now that the chrome is
-    /// neutral zinc (light deepened until text clears 4.5:1 on white).
-    static let link = Color(light: 0x7E4340, dark: 0xC79491)
+    /// Inline text links — the brand violet (2026-09-28, was a muted rose),
+    /// the chrome being neutral zinc. Light clears 4.5:1 on white; dark is
+    /// lifted to clear it on zinc-950.
+    static let link = Color(light: 0x5B3FE0, dark: 0xA99BFF)
     /// The switch's off-state track (zinc-200 / zinc-800); the knob is
     /// white in both states.
     static let switchTrack = Color(light: 0xE4E4E7, dark: 0x27272A)
@@ -159,11 +160,11 @@ enum Theme {
             ? NSColor.white.withAlphaComponent(0.05)
             : NSColor.black.withAlphaComponent(0.05)
     })
-    /// Filled CTA buttons carrying white text (onboarding's Take the Tour /
-    /// Next). The brand rose deepened until white clears 4.5:1 in both modes:
-    /// `link` is tuned for text *on* the chrome, and its dark value (#C79491,
-    /// ~2:1 behind white) is far too light to sit under white text.
-    static let ctaFill = Color(light: 0x7E4340, dark: 0x8F5350)
+    /// Filled CTA buttons carrying white text (the composer's send button,
+    /// onboarding's Continue). The brand violet, deep enough that white
+    /// clears 4.5:1 in both modes: `link`'s dark value (#A99BFF) is tuned
+    /// for text *on* the chrome and is far too light under white text.
+    static let ctaFill = Color(light: 0x5B3FE0, dark: 0x6E54F0)
     /// Red *text* (deleted-line counts, destructive commands). `closeRed`
     /// stays for glyphs and fills, but as small text it read 2.4:1 on the
     /// light chrome.

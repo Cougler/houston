@@ -273,6 +273,20 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// snapping back to the harness default (the pick must survive the
     /// empty state → draft → transcript view changes).
     @Published private(set) var lastModel: ChatModelChoice?
+    /// The chat file sends are remembered under (`ChatMetaStore.models`)
+    /// — set by the hub once the session is keyed to a file, nil while
+    /// it's a draft. Setting it seeds `lastModel` from that memory, so
+    /// a re-created (TTL-swept, relaunched) session opens on its model.
+    var modelMemoryKey: String? {
+        didSet {
+            guard let modelMemoryKey else { return }
+            if let lastModel {
+                ChatModelChoice.remember(lastModel, for: modelMemoryKey)
+            } else {
+                lastModel = ChatModelChoice.remembered(for: modelMemoryKey)
+            }
+        }
+    }
 
     private var transport: AgentTransport?
     /// The claude process is pinned to its launch model/effort; a change
@@ -356,6 +370,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// turn end — no view needs to be mounted.
     func send(text: String, model: ChatModelChoice) {
         lastModel = model
+        if let modelMemoryKey { ChatModelChoice.remember(model, for: modelMemoryKey) }
         lastUsed = Date()
         queued.append(QueuedSend(text: text, model: model))
         drainQueue()
@@ -462,6 +477,38 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 "params": ["sessionId": sessionID],
             ])
         }
+    }
+
+    /// Whether the approval card can offer "Auto": the harnesses whose
+    /// permission mode Houston drives (the ACP agents own theirs).
+    var canSwitchToAuto: Bool { harness == .claude || harness == .codex }
+
+    /// The approval card's "Auto": allow this request AND move the chat to
+    /// Auto edits from here on. Claude flips the LIVE process with the
+    /// `set_permission_mode` control request (in the CLI's own control
+    /// schema), so the rest of this turn stops asking, and the spawn key
+    /// follows so the next send doesn't respawn over it. Codex takes the
+    /// mode per turn, so it lands on the next send. Either way the new
+    /// mode is remembered for the chat and broadcast to its composer.
+    func allowAndSwitchToAuto(_ request: ApprovalRequest) {
+        respond(to: request, allow: true)
+        guard var model = lastModel, model.permission != .edits else { return }
+        model.permission = .edits
+        lastModel = model
+        if let modelMemoryKey { ChatModelChoice.remember(model, for: modelMemoryKey) }
+        if harness == .claude, transport?.isRunning == true {
+            controlCounter += 1
+            transport?.write([
+                "type": "control_request",
+                "request_id": "houston-\(controlCounter)",
+                "request": ["subtype": "set_permission_mode", "mode": "acceptEdits"],
+            ])
+            claudeModelKey = Self.claudeKey(model)
+        }
+        NotificationCenter.default.post(
+            name: .houstonChatPermissionChanged, object: self,
+            userInfo: ["mode": ChatPermissionMode.edits.rawValue]
+        )
     }
 
     func respond(to request: ApprovalRequest, allow: Bool) {
@@ -640,10 +687,13 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// model/effort/permission — it can't change those mid-flight, so a
     /// mismatch respawns with --resume). Shared by `sendClaude` and
     /// `warmUp`.
+    private static func claudeKey(_ model: ChatModelChoice) -> String {
+        (model.arg ?? "") + "|" + (model.effort ?? "") + "|" + model.permission.rawValue
+    }
+
     @discardableResult
     private func ensureClaudeTransport(model: ChatModelChoice) -> Bool {
-        let key = (model.arg ?? "") + "|" + (model.effort ?? "")
-            + "|" + model.permission.rawValue
+        let key = Self.claudeKey(model)
         if transport == nil || claudeModelKey != key || transport?.isRunning != true {
             transport?.terminate()
             guard let binary = AgentTransport.resolveBinary("claude") else {
@@ -1605,6 +1655,7 @@ final class ChatSessionHub: ObservableObject {
         let session = ChatAgentSession(
             harness: ref.harness, projectPath: project, resumeID: id
         )
+        session.modelMemoryKey = ref.filePath
         sessions[ref.filePath] = session
         seedContext(session, transcript: ref.filePath)
         return session
@@ -1647,6 +1698,7 @@ final class ChatSessionHub: ObservableObject {
         let session = ChatAgentSession(
             harness: harness, projectPath: project, resumeID: id
         )
+        session.modelMemoryKey = file
         sessions[file] = session
         seedContext(session, transcript: file)
         return session
@@ -1658,6 +1710,7 @@ final class ChatSessionHub: ObservableObject {
         if let displaced = sessions[file], displaced !== draft {
             displaced.shutdown()
         }
+        draft.modelMemoryKey = file
         sessions[file] = draft
     }
 

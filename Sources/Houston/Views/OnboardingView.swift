@@ -2,11 +2,12 @@ import SwiftUI
 
 /// First-launch onboarding: a full-window takeover on the empty-state sky.
 /// The window opens with no chrome at all: just the solar system and a
-/// welcome headline. Continuing flies past the solar system into four
-/// paginated steps on one shadcn-style card (2026-09-27 restyle): Connect
-/// Your AI, Projects, Threads, Sharing — each a large live demo that
-/// plays on its own and answers clicks, the next click marked by a ring
-/// around the control (never a dot over it). Shown until dismissed once
+/// welcome headline. Continuing flies past the solar system into six
+/// paginated steps laid open on the sky, two columns (2026-09-28): the
+/// step's title and copy top-left, its live demo floating to the right —
+/// Connect Your AI, Projects, Threads, Quick Tasks, Sharing, Live URL.
+/// Each demo plays on its own, an animated pointer gliding to each control
+/// and clicking it, and answers the user's own clicks. Shown until dismissed once
 /// (`onboardingSeen`), replayable from the footer gear.
 struct OnboardingView: View {
     let onDismiss: () -> Void
@@ -55,7 +56,7 @@ struct OnboardingView: View {
             .allowsHitTesting(false)
 
             if pastWelcome {
-                stepCard
+                stepPage
                     .transition(.opacity.combined(with: .offset(y: 18)))
             } else {
                 welcome
@@ -99,63 +100,123 @@ struct OnboardingView: View {
         .padding(.bottom, 80)
     }
 
-    // MARK: Step card
+    // MARK: Step page
 
-    /// One card for every step (shadcn dialog grammar: card fill, hairline,
-    /// soft shadow): the demo stage on top, title and copy under it, dots
-    /// and controls in the footer. Fixed width and stage height so the
-    /// card never resizes between steps.
-    private var stepCard: some View {
-        let step = steps[max(0, min(page, steps.count - 1))]
-        return VStack(spacing: 0) {
-            Spacer(minLength: 24)
-            VStack(spacing: 0) {
-                OnboardingStage(step: step, onDismiss: onDismiss)
-                    .frame(height: 380)
-                    .clipShape(UnevenRoundedRectangle(
-                        topLeadingRadius: 16, topTrailingRadius: 16
-                    ))
-                VStack(spacing: 8) {
-                    Text(step.title)
-                        .font(.system(size: 22, weight: .semibold))
-                        .tracking(-0.3)
-                        .foregroundStyle(Theme.text)
-                    Text(step.copy)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .lineSpacing(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 560)
-                        .frame(height: 44, alignment: .top)
-                }
-                .padding(.top, 22)
-                .padding(.horizontal, 32)
-                Divider()
-                    .overlay(Theme.borderSidebar)
-                    .padding(.top, 20)
-                footer
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-            }
-            .id(page)
-            .transition(.asymmetric(
-                insertion: .opacity.combined(with: .offset(x: 32)),
-                removal: .opacity.combined(with: .offset(x: -32))
-            ))
-            .frame(width: 800)
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Theme.menuFill)
-                    .shadow(color: Color.black.opacity(0.35), radius: 40, x: 0, y: 20)
+    /// The smallest size a demo is laid out at — below it the stage
+    /// scales down whole instead of squeezing the vignette's layout.
+    private static let stageMin = CGSize(width: 600, height: 400)
+    private static let stageMax = CGSize(width: 780, height: 460)
+
+    /// Two open columns on the sky, no enclosing card: the step's title
+    /// and copy top-left, its demo floating to the right as its own
+    /// window, controls along the bottom. Responsive to the window: under
+    /// ~1060pt wide the text shrinks and stacks over the demo, and a
+    /// window too small for the demo's minimum scales the demo down.
+    private var stepPage: some View {
+        GeometryReader { geo in
+            let wide = geo.size.width >= 1060
+            let hPad: CGFloat = wide ? 56 : 32
+            let content = min(geo.size.width - hPad * 2, 1200 - hPad * 2)
+            let textWidth: CGFloat = wide ? (geo.size.width >= 1200 ? 320 : 280) : content
+            // Vertical budget: titlebar clearance, footer band, and (when
+            // stacked) the text block above the stage — kicker, title, ~3
+            // lines of copy, and the gap.
+            let chrome: CGFloat = 56 + 34 + 32 + 32
+            let stackedText: CGFloat = 150
+            let stage = CGSize(
+                width: max(160, min(Self.stageMax.width,
+                                    wide ? content - textWidth - 48 : content)),
+                height: max(120, min(Self.stageMax.height,
+                                     geo.size.height - chrome - (wide ? 0 : stackedText)))
             )
+            VStack(spacing: 0) {
+                Spacer(minLength: 56)
+                Group {
+                    if wide {
+                        HStack(alignment: .top, spacing: 48) {
+                            stepText(stacked: false).frame(width: textWidth, alignment: .leading)
+                            stepStage(stage)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 22) {
+                            stepText(stacked: true)
+                            stepStage(stage)
+                        }
+                        .frame(width: Self.stageFit(stage).width)
+                    }
+                }
+                .id(page)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(x: 32)),
+                    removal: .opacity.combined(with: .offset(x: -32))
+                ))
+                Spacer(minLength: 32)
+                footer.frame(width: content)
+            }
+            .padding(.bottom, 32)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    /// The demo's layout size (never under `stageMin`) and the uniform
+    /// scale that fits it into `size`.
+    private static func stageLayout(_ size: CGSize) -> (layout: CGSize, scale: CGFloat) {
+        let layout = CGSize(
+            width: max(size.width, stageMin.width),
+            height: max(size.height, stageMin.height)
+        )
+        return (layout, min(1, size.width / layout.width, size.height / layout.height))
+    }
+
+    /// What the stage actually occupies on screen at `size`.
+    private static func stageFit(_ size: CGSize) -> CGSize {
+        let (layout, scale) = stageLayout(size)
+        return CGSize(width: layout.width * scale, height: layout.height * scale)
+    }
+
+    private func stepText(stacked: Bool) -> some View {
+        let step = steps[max(0, min(page, steps.count - 1))]
+        return VStack(alignment: .leading, spacing: stacked ? 8 : 14) {
+            Text("STEP \(page + 1) OF \(steps.count)")
+                .font(.system(size: stacked ? 10.5 : 11.5, weight: .semibold))
+                .kerning(1)
+                .foregroundStyle(Theme.link)
+            Text(step.title)
+                .font(.system(size: stacked ? 26 : 38, weight: .semibold))
+                .tracking(stacked ? -0.6 : -1)
+                .foregroundStyle(Theme.skyText)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(step.copy)
+                .font(.system(size: stacked ? 13.5 : 15.5))
+                .foregroundStyle(Theme.skyTextSecondary)
+                .lineSpacing(stacked ? 3 : 5)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: stacked ? 620 : .infinity, alignment: .leading)
+                .padding(.top, stacked ? 0 : 4)
+        }
+        .padding(.top, stacked ? 0 : 6)
+    }
+
+    /// The demo window at `size`: laid out at no less than `stageMin`,
+    /// scaled uniformly to fit when the window is smaller than that.
+    private func stepStage(_ size: CGSize) -> some View {
+        let step = steps[max(0, min(page, steps.count - 1))]
+        let (layout, scale) = Self.stageLayout(size)
+        return OnboardingStage(step: step, onDismiss: onDismiss)
+            .frame(width: layout.width, height: layout.height)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
                     .strokeBorder(Theme.borderSidebar, lineWidth: 1)
             )
-            Spacer(minLength: 24)
-        }
-        .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Theme.panelFill)
+                    .shadow(color: Color.black.opacity(0.4), radius: 48, x: 0, y: 24)
+            )
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: layout.width * scale, height: layout.height * scale,
+                   alignment: .topLeading)
     }
 
     private var footer: some View {
@@ -179,7 +240,7 @@ struct OnboardingView: View {
         HStack(spacing: 6) {
             ForEach(steps.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index == page ? Theme.link : Theme.textSecondary.opacity(0.3))
+                    .fill(index == page ? Theme.link : Theme.skyTextSecondary.opacity(0.35))
                     .frame(width: index == page ? 18 : 6, height: 6)
                     .contentShape(Rectangle())
                     .onTapGesture { go(to: index) }
@@ -267,14 +328,16 @@ private struct OnbQuiet: View {
 // MARK: - Steps
 
 private enum OnboardingStep: CaseIterable {
-    case connect, projects, threads, share
+    case connect, projects, threads, tasks, share, live
 
     var title: String {
         switch self {
         case .connect: "Connect Your AI"
         case .projects: "Projects"
         case .threads: "Threads"
+        case .tasks: "Quick Tasks"
         case .share: "Sharing"
+        case .live: "Live URL"
         }
     }
 
@@ -285,17 +348,23 @@ private enum OnboardingStep: CaseIterable {
             "Sign in with the subscriptions you already have, or run models "
                 + "on your Mac. Change any of this later from a chat's model menu."
         case .projects:
-            "Pin a project or a folder of them. Right-click a project to pin "
-                + "it above the divider. Clicking a project opens its most recent "
-                + "chat, or the one waiting on you."
+            "Add a project from your file browser, then open a chat or a terminal "
+                + "in it. Move on while the agent works: Houston notifies you the "
+                + "moment a chat needs your attention."
         case .threads:
             "Select any part of a reply and right-click to ask about just "
                 + "that. The quote stays highlighted with its reply count, and "
                 + "the thread opens beside the chat while the conversation stays put."
+        case .tasks:
+            "Highlight any text and press \u{2318}S to save it as a task. It "
+                + "lands under the open project, and the tasks menu opens to show it."
         case .share:
             "A running dev server is reachable from any device on your Wi-Fi "
-                + "at project.local, with a QR code for phones. Public links are "
-                + "part of Houston Live."
+                + "at project.local, with a QR code for phones."
+        case .live:
+            "Turn on Live URL and a running dev server gets its own public https "
+                + "link, like \(LiveURLVignette.host). Open it on cellular or send it "
+                + "to anyone. Live URLs are part of Houston Pro."
         }
     }
 }
@@ -312,7 +381,9 @@ private struct OnboardingStage: View {
             case .connect: ConnectAIStep(onLeaveForSignIn: onDismiss)
             case .projects: ProjectsVignette()
             case .threads: ThreadVignette()
+            case .tasks: QuickTaskVignette()
             case .share: ShareVignette()
+            case .live: LiveURLVignette()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -389,6 +460,9 @@ private struct ConnectAIStep: View {
         .padding(.vertical, 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            // Nothing else scans for MLX Core until a chat's model menu
+            // opens, so without this the row sat at "unknown" forever.
+            localModels.refresh()
             let probed = await Task.detached(priority: .userInitiated) {
                 var out: [String: Bool] = [:]
                 for name in ["claude", "codex", "gemini", "grok"] {
@@ -457,12 +531,14 @@ private struct ConnectProviderRow: View {
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.textPositive)
+            } else if installed == nil {
+                Text("Checking…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
             } else if installed == false {
                 OnbButton(installHint) { Actions.openExternal(installURL) }
             } else {
                 OnbButton("Sign in", action: signIn)
-                    .disabled(installed == nil)
-                    .opacity(installed == nil ? 0.5 : 1)
             }
         }
         .padding(.horizontal, 14)
@@ -478,24 +554,145 @@ private struct ConnectProviderRow: View {
     }
 }
 
-// MARK: - Click-here ring
+// MARK: - Demo cursor
 
-/// The "click this next" mark: a pulsing accent ring hugging the control
-/// with a soft glow — the control stays fully readable underneath (the
-/// old pulsing dot sat on top of it). Never intercepts the click.
-private struct HintRing: View {
-    var cornerRadius: CGFloat = 6
-    @State private var on = false
+/// Where the demo cursor can go: each vignette tags its clickable bits
+/// with `.demoTarget(id)`, and the cursor glides to the tagged view's
+/// center — anchors, not hard-coded offsets, so it lands true at every
+/// stage size.
+private struct DemoTargetKey: PreferenceKey {
+    static var defaultValue: [String: Anchor<CGRect>] { [:] }
+    static func reduce(
+        value: inout [String: Anchor<CGRect>],
+        nextValue: () -> [String: Anchor<CGRect>]
+    ) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+extension View {
+    fileprivate func demoTarget(_ id: String) -> some View {
+        anchorPreference(key: DemoTargetKey.self, value: .bounds) { [id: $0] }
+    }
+
+    /// The pointer over a vignette: aimed at `target` (a `.demoTarget`
+    /// id anywhere inside, overlays included), pressing on each `clicks`
+    /// bump. Never intercepts a click.
+    fileprivate func demoCursor(_ target: String?, clicks: Int) -> some View {
+        overlayPreferenceValue(DemoTargetKey.self) { anchors in
+            GeometryReader { geo in
+                DemoCursor(
+                    target: target.flatMap { anchors[$0] }.map { anchor in
+                        let rect = geo[anchor]
+                        return CGPoint(x: rect.midX, y: rect.midY)
+                    },
+                    clicks: clicks,
+                    rest: CGPoint(x: geo.size.width * 0.78, y: geo.size.height * 0.86)
+                )
+            }
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+/// A macOS arrow pointer that glides between targets and shows each click
+/// as a quick press plus an accent ripple at the tip.
+private struct DemoCursor: View {
+    let target: CGPoint?
+    let clicks: Int
+    let rest: CGPoint
+
+    @State private var point: CGPoint?
+    @State private var ripple: CGFloat = 1
+    @State private var pressed = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius + 3)
-            .strokeBorder(Theme.link, lineWidth: 1.5)
-            .padding(-3)
-            .shadow(color: Theme.link.opacity(0.7), radius: on ? 8 : 2)
-            .opacity(on ? 1 : 0.45)
-            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: on)
-            .allowsHitTesting(false)
-            .onAppear { on = true }
+        let at = point ?? rest
+        ZStack {
+            Circle()
+                .stroke(Theme.link, lineWidth: 2)
+                .frame(width: 34, height: 34)
+                .scaleEffect(0.25 + ripple * 0.85)
+                .opacity(Double(1 - ripple) * 0.9)
+                .position(at)
+            CursorArrow()
+                .fill(Color.black)
+                .overlay(CursorArrow().stroke(Color.white, lineWidth: 1.3))
+                .frame(width: 13, height: 20)
+                .scaleEffect(pressed ? 0.84 : 1, anchor: .topLeading)
+                .shadow(color: .black.opacity(0.35), radius: 2.5, x: 0, y: 1.5)
+                // The frame's top-left corner is the arrow's tip.
+                .position(x: at.x + 6.5, y: at.y + 10)
+        }
+        .onAppear {
+            // Start at rest and glide in, rather than popping onto the
+            // first target.
+            if let target {
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.8)) { point = target }
+                }
+            }
+        }
+        .onChange(of: target) { _, new in
+            guard let new else { return }
+            withAnimation(.easeInOut(duration: 0.75)) { point = new }
+        }
+        .onChange(of: clicks) {
+            ripple = 0
+            withAnimation(.easeOut(duration: 0.12)) { pressed = true }
+            withAnimation(.easeOut(duration: 0.55)) { ripple = 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                withAnimation(.easeOut(duration: 0.14)) { pressed = false }
+            }
+        }
+    }
+}
+
+/// The classic arrow, drawn in a 13×20 box with the tip at the origin.
+private struct CursorArrow: Shape {
+    func path(in rect: CGRect) -> Path {
+        let sx = rect.width / 13, sy = rect.height / 20
+        let pts: [(CGFloat, CGFloat)] = [
+            (0.5, 0.5), (0.5, 16.5), (4.3, 12.9), (6.8, 18.9),
+            (9.2, 17.9), (6.7, 12.0), (12.0, 12.0),
+        ]
+        var path = Path()
+        path.move(to: CGPoint(x: pts[0].0 * sx, y: pts[0].1 * sy))
+        for p in pts.dropFirst() { path.addLine(to: CGPoint(x: p.0 * sx, y: p.1 * sy)) }
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// A vignette's autoplay: per phase, linger `dwell`, glide the cursor
+/// through that phase's waypoints (hovering each, clicking the LAST),
+/// then advance. A phase with no waypoints just advances after its dwell
+/// — things that happen on their own. A user click that advances first
+/// wins: the loop sees the phase moved and starts over from the new one.
+@MainActor
+private func runDemo(
+    phase: () -> Int,
+    beat: (Int) -> (dwell: Double, path: [String]),
+    aim: (String) -> Void,
+    click: () -> Void,
+    advance: () -> Void
+) async {
+    while !Task.isCancelled {
+        let current = phase()
+        let (dwell, path) = beat(current)
+        try? await Task.sleep(for: .seconds(dwell))
+        for id in path {
+            guard phase() == current, !Task.isCancelled else { break }
+            aim(id)
+            try? await Task.sleep(for: .seconds(0.85))
+        }
+        guard phase() == current, !Task.isCancelled else { continue }
+        if !path.isEmpty {
+            click()
+            try? await Task.sleep(for: .seconds(0.22))
+            guard phase() == current else { continue }
+        }
+        advance()
     }
 }
 
@@ -505,18 +702,17 @@ private struct HintRing: View {
 private enum Mini {
     static let page = Color(light: 0xF4F4F5, dark: 0x0B0B0D)
     static let bar = Color(light: 0xFFFFFF, dark: 0x18181B)
-    static let bubble = Color(light: 0x7E4340, dark: 0x8F5350)
+    static let bubble = Theme.chatUserFill
     /// Text selection wash (the system's, near enough) for the demo.
     static let selection = Color(light: 0xB4D5FE, dark: 0x3B5A8A)
 
-    static func control(_ icon: String, hint: Bool = false) -> some View {
+    static func control(_ icon: String) -> some View {
         LucideIcon(icon, size: 13)
             .foregroundStyle(Theme.textSecondary)
             .frame(width: 24, height: 24)
             .background(RoundedRectangle(cornerRadius: 6).fill(Theme.buttonFill))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.borderSidebar, lineWidth: 1))
             .contentShape(Rectangle())
-            .overlay { if hint { HintRing(cornerRadius: 6) } }
     }
 
     static func caps(_ text: String) -> some View {
@@ -548,7 +744,6 @@ private enum Mini {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 5).fill(hint ? Theme.rowHovered : .clear))
             .contentShape(Rectangle())
-            .overlay { if hint { HintRing(cornerRadius: 5) } }
             .onTapGesture(perform: action)
     }
 
@@ -559,106 +754,426 @@ private enum Mini {
 
 // MARK: - Projects
 
-/// The sidebar's Projects section, large: right-click a row → Pin → it
-/// lifts above the divider. Plays on its own; clicks jump ahead.
+/// Add a project → open a chat from its row's hover icons → the chat's
+/// workspace (top bar + side panel, adding a terminal from the panel) →
+/// move on → get called back → answer with Auto. Plays on its own with
+/// the pointer doing the clicking; clicks jump ahead.
 private struct ProjectsVignette: View {
-    /// 0 idle · 1 menu open on "showcase" · 2 showcase pinned.
+    /// 0 idle · 1 folder picker · 2 showcase added, hovered (row icons) ·
+    /// 3 new chat open, working · 4 terminal added from the side panel ·
+    /// 5 user elsewhere · 6 needs-you banner · 7 back on the approval ·
+    /// 8 answered with Auto.
     @State private var phase = 0
+    @State private var aim: String?
+    @State private var clicks = 0
 
-    private var pinned: [String] { phase == 2 ? ["hierarch", "showcase"] : ["hierarch"] }
-    private var rest: [String] { phase == 2 ? ["portfolio", "spicy-resume"] : ["portfolio", "showcase", "spicy-resume"] }
+    private var projects: [String] {
+        phase >= 2 ? ["hierarch", "portfolio", "showcase"] : ["hierarch", "portfolio"]
+    }
+    /// The project on screen.
+    private var shown: String { [3, 4, 7, 8].contains(phase) ? "showcase" : "hierarch" }
+    /// showcase's chat has a turn running.
+    private var working: Bool { (3...5).contains(phase) }
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Mini.caps("PROJECTS").padding(.leading, 10).padding(.bottom, 6)
-                ForEach(pinned, id: \.self) { name in row(name, pinned: true) }
-                Rectangle().fill(Theme.borderSidebar).frame(height: 1)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                ForEach(rest, id: \.self) { name in row(name, pinned: false) }
-                HStack(spacing: 8) {
-                    LucideIcon("plus", size: 13).foregroundStyle(Theme.textSecondary)
-                    Text("Add a project").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                }
-                .padding(.horizontal, 12).frame(height: 32)
-                Spacer(minLength: 0)
-            }
-            .padding(.top, 18)
-            .frame(width: 260)
-            .frame(maxHeight: .infinity)
-            .background(Mini.bar)
-            .overlay(alignment: .trailing) { Rectangle().fill(Theme.borderSidebar).frame(width: 1) }
-
-            // The page beside the sidebar: a chat opening on click.
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Text("Hierarch").font(.system(size: 15, weight: .medium)).foregroundStyle(Theme.text)
-                    LucideIcon("chevron-down", size: 12).foregroundStyle(Theme.textSecondary)
-                }
-                .padding(.horizontal, 14).frame(height: 36)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Mini.bar))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.borderSidebar, lineWidth: 1))
-                .frame(maxWidth: .infinity)
-                Spacer(minLength: 0)
-                Text("Retry logic for the webhook worker")
-                    .font(.system(size: 12.5)).foregroundStyle(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Mini.bubble))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                Text("The worker retries with exponential backoff and gives up after five attempts, logging the payload.")
-                    .font(.system(size: 12.5)).foregroundStyle(Theme.text).lineSpacing(3)
-                Spacer(minLength: 0)
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            sidebar
+            page
         }
         .background(Mini.page)
-        .overlay(alignment: .topLeading) {
-            if phase == 1 {
-                Mini.menu {
-                    Mini.menuRow("Open Terminal Here") {}
-                    Mini.menuRow("Pin", hint: true) { advance() }
-                    Mini.menuDivider()
-                    Mini.menuRow("Reveal in Finder") {}
-                    Mini.menuRow("Remove from Sidebar") {}
-                }
-                .frame(width: 190)
-                .offset(x: 118, y: 158)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
+        .overlay { if phase == 1 { picker.transition(.opacity.combined(with: .scale(scale: 0.97))) } }
+        .overlay(alignment: .topTrailing) {
+            if phase == 6 {
+                banner
+                    .padding(12)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .demoCursor(aim, clicks: clicks)
         .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2.2))
-                advance()
-            }
+            await runDemo(
+                phase: { phase },
+                beat: { p in
+                    switch p {
+                    case 0: (1.0, ["add"])
+                    case 1: (0.5, ["open"])
+                    case 2: (0.4, ["row-showcase", "new-chat"])
+                    case 3: (1.3, ["add-terminal"])
+                    case 4: (1.2, ["row-hierarch"])
+                    case 5: (1.8, [])
+                    case 6: (0.7, ["banner"])
+                    case 7: (0.9, ["auto"])
+                    default: (2.4, [])
+                    }
+                },
+                aim: { aim = $0 },
+                click: { clicks += 1 },
+                advance: advance
+            )
         }
     }
 
-    private func row(_ name: String, pinned: Bool) -> some View {
-        HStack(spacing: 8) {
-            LucideIcon("package", size: 13).foregroundStyle(Theme.textSecondary)
-            Text(name).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Mini.caps("PROJECTS").padding(.leading, 10).padding(.bottom, 6)
+            ForEach(projects, id: \.self) { row($0) }
+            HStack(spacing: 8) {
+                LucideIcon("folder-plus", size: 14).foregroundStyle(Theme.textSecondary)
+                Text("Add a project").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .padding(.horizontal, 6)
+            .contentShape(Rectangle())
+            .demoTarget("add")
+            .onTapGesture { if phase == 0 { advance() } }
             Spacer(minLength: 0)
-            if pinned { LucideIcon("pin", size: 11).foregroundStyle(Theme.textSecondary) }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 32)
+        .padding(.top, 18)
+        .frame(width: 184)
+        .frame(maxHeight: .infinity)
+        .background(Mini.bar)
+        .overlay(alignment: .trailing) { Rectangle().fill(Theme.borderSidebar).frame(width: 1) }
+    }
+
+    /// A project row as the sidebar draws it: package glyph, name, and on
+    /// hover the two quick actions — "+" New chat, terminal New terminal.
+    private func row(_ name: String) -> some View {
+        let hovered = name == "showcase" && phase == 2
+        let waiting = name == "showcase" && phase == 6
+        return HStack(spacing: 9) {
+            LucideIcon("package", size: 14).foregroundStyle(Theme.textSecondary)
+            Text(name).font(.system(size: 13.5)).foregroundStyle(Theme.text.opacity(0.85))
+            Spacer(minLength: 0)
+            if hovered {
+                HStack(spacing: 1) {
+                    LucideIcon("plus", size: 14)
+                        .foregroundStyle(Theme.text)
+                        .frame(width: 20, height: 20)
+                        .demoTarget("new-chat")
+                        .onTapGesture { advance() }
+                    LucideIcon("square-terminal", size: 14)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 20, height: 20)
+                }
+                .transition(.opacity)
+            } else if name == "showcase", working {
+                Circle().fill(Theme.dotActive).frame(width: 6, height: 6)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 30)
         .background(
             RoundedRectangle(cornerRadius: 7)
-                .fill(name == "hierarch" ? Theme.rowSelected
-                    : (name == "showcase" && phase == 1) ? Theme.rowHovered : .clear)
+                .fill(name == shown ? Theme.rowSelected
+                    : hovered ? Theme.rowHovered
+                    : waiting ? Theme.buttonActiveFill : .clear)
         )
         .padding(.horizontal, 6)
         .contentShape(Rectangle())
-        .overlay { if name == "showcase", phase == 0 { HintRing(cornerRadius: 7).padding(.horizontal, 6) } }
-        .onTapGesture { if name == "showcase", phase == 0 { advance() } }
+        .demoTarget("row-\(name)")
+        .transition(.opacity.combined(with: .offset(y: -6)))
+        .onTapGesture {
+            if name == "hierarch", phase == 4 { advance() }
+            if waiting { advance() }
+        }
+    }
+
+    // MARK: Page
+
+    /// The project's workspace: the floating top bar, the chat, and the
+    /// side panel hanging on the right.
+    private var page: some View {
+        VStack(spacing: 12) {
+            topBar
+            HStack(alignment: .top, spacing: 12) {
+                chat
+                sidePanel
+            }
+        }
+        .padding(.top, 14)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The pill over every workspace: project ▾, the branch chip, Tasks.
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 5) {
+                Text(shown.capitalized).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
+                LucideIcon("chevron-down", size: 11).foregroundStyle(Theme.textSecondary)
+            }
+            HStack(spacing: 5) {
+                LucideIcon("git-branch", size: 12)
+                Circle().fill(Theme.dotActive).frame(width: 5, height: 5)
+                Text("main").font(.system(size: 12))
+            }
+            .foregroundStyle(Theme.textSecondary)
+            HStack(spacing: 5) {
+                LucideIcon("list-checks", size: 12)
+                Text("Tasks").font(.system(size: 12))
+            }
+            .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 32)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Mini.bar))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+        .animation(nil, value: shown)
+    }
+
+    // MARK: Chat
+
+    @ViewBuilder
+    private var chat: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if shown == "hierarch" {
+                bubble("Tighten the empty state copy")
+                Text("Done. The headline is shorter and the button says what it does.")
+                    .font(.system(size: 12.5)).foregroundStyle(Theme.text).lineSpacing(3)
+            } else {
+                bubble("Add a pricing page with monthly and yearly plans")
+                switch phase {
+                case 7: approval
+                case 8:
+                    HStack(spacing: 6) {
+                        LucideIcon("square-terminal", size: 12)
+                        Text("Ran npm install @stripe/stripe-js").font(.system(size: 11.5, design: .monospaced))
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    Text("Installed. Building the pricing page now.")
+                        .font(.system(size: 12.5)).foregroundStyle(Theme.text)
+                default:
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.mini)
+                        Text("Working…").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            composer
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The approval prompt as the chat now draws it: the composer's wash,
+    /// no border — Allow, Auto, Deny.
+    private var approval: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Claude wants to run a command")
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text)
+            Text("npm install @stripe/stripe-js")
+                .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.textSecondary)
+            HStack(spacing: 6) {
+                Text("Allow").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 11).frame(height: 24)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.ctaFill))
+                HStack(spacing: 4) {
+                    LucideIcon("zap", size: 11)
+                    Text("Auto").font(.system(size: 11, weight: .medium))
+                }
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 10).frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.rowHovered))
+                .demoTarget("auto")
+                .onTapGesture { advance() }
+                Text("Deny").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 8)
+            }
+            .padding(.top, 2)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.sidebarFill.opacity(0.6)))
+        .transition(.opacity)
+    }
+
+    /// The composer's resting bar — its mode chip flips to Auto edits
+    /// once the approval's Auto is taken.
+    private var composer: some View {
+        HStack(spacing: 8) {
+            Text("What's next?").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                if phase == 8 { LucideIcon("zap", size: 10) }
+                Text(phase == 8 ? "Auto edits" : "Ask first").font(.system(size: 10.5, weight: .medium))
+            }
+            .foregroundStyle(phase == 8 ? Theme.link : Theme.textSecondary)
+            Circle().fill(Theme.ctaFill).frame(width: 22, height: 22)
+                .overlay(LucideIcon("arrow-up", size: 11).foregroundStyle(.white))
+        }
+        .padding(.leading, 12).padding(.trailing, 6)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Theme.sidebarFill.opacity(0.6)))
+    }
+
+    private func bubble(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12.5)).foregroundStyle(.white)
+            .padding(.horizontal, 11).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Mini.bubble))
+            .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    // MARK: Side panel
+
+    /// The workspace's side panel: one card per item, each header with
+    /// its "+" — adding a terminal (or chat) happens right here.
+    private var sidePanel: some View {
+        VStack(spacing: 10) {
+            panelCard("TERMINALS", addTarget: "add-terminal") {
+                if shown == "hierarch" {
+                    panelRow("zsh", dot: Theme.dotShell)
+                } else if phase >= 4 {
+                    panelRow("zsh", dot: Theme.dotShell).transition(.opacity.combined(with: .offset(y: -4)))
+                } else {
+                    Text("No terminals open").font(.system(size: 11.5)).foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 6).frame(height: 24)
+                }
+            }
+            panelCard("CHATS", addTarget: nil) {
+                if shown == "hierarch" {
+                    panelRow("Empty state copy", dot: Theme.dotIdle)
+                } else {
+                    panelRow("Pricing page", dot: working || phase == 7 ? Theme.dotActive : Theme.dotIdle)
+                }
+            }
+        }
+        .frame(width: 168)
+    }
+
+    private func panelCard<Content: View>(
+        _ title: String, addTarget: String?, @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Mini.caps(title)
+                Spacer(minLength: 0)
+                LucideIcon("plus", size: 12)
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 22, height: 22)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.controlChip))
+                    .modifier(OptionalDemoTarget(id: addTarget))
+                    .onTapGesture { if addTarget != nil, phase == 3 { advance() } }
+                LucideIcon("dock-top", size: 12)
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 22, height: 22)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.controlChip))
+            }
+            content()
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Mini.bar))
+        .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+    }
+
+    private func panelRow(_ title: String, dot: Color) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(dot).frame(width: 6, height: 6)
+            Text(title).font(.system(size: 12)).foregroundStyle(Theme.text).lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 26)
+    }
+
+    // MARK: Overlays
+
+    /// The system folder picker, drawn small: a few folders, one chosen.
+    private var picker: some View {
+        ZStack {
+            Color.black.opacity(0.18)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Add a project")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+                    .padding(.bottom, 10)
+                VStack(spacing: 2) {
+                    ForEach(["hierarch", "portfolio", "showcase", "spicy-resume"], id: \.self) { name in
+                        HStack(spacing: 8) {
+                            LucideIcon("folder", size: 14)
+                                .foregroundStyle(name == "showcase" ? Color.white : Theme.link)
+                            Text(name).font(.system(size: 12.5))
+                                .foregroundStyle(name == "showcase" ? Color.white : Theme.text)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 10).frame(height: 28)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(name == "showcase" ? Theme.ctaFill : .clear))
+                    }
+                }
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Mini.page))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Text("Cancel").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text)
+                        .padding(.horizontal, 14).frame(height: 28)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.buttonFill))
+                    Text("Open").font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+                        .padding(.horizontal, 16).frame(height: 28)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Theme.ctaFill))
+                        .contentShape(Rectangle())
+                        .demoTarget("open")
+                        .onTapGesture { advance() }
+                }
+                .padding(.top, 12)
+            }
+            .padding(16)
+            .frame(width: 300)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Theme.menuFill)
+                    .shadow(color: Color.black.opacity(0.3), radius: 20, x: 0, y: 10)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+        }
+    }
+
+    /// The macOS banner a needs-you event raises.
+    private var banner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            SVGIcon(name: "rocket", size: 16)
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ctaFill))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("showcase needs you")
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.text)
+                Text("Claude is waiting for permission to run npm install.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(width: 270, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Theme.menuFill)
+                .shadow(color: Color.black.opacity(0.25), radius: 16, x: 0, y: 8)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+        .contentShape(Rectangle())
+        .demoTarget("banner")
+        .onTapGesture { advance() }
     }
 
     private func advance() {
         withAnimation(.spring(duration: 0.45, bounce: 0.15)) {
-            phase = (phase + 1) % 3
+            phase = (phase + 1) % 9
         }
+    }
+}
+
+/// `.demoTarget` only when there's an id — for shared chrome where just
+/// one instance is the cursor's target.
+private struct OptionalDemoTarget: ViewModifier {
+    let id: String?
+    func body(content: Content) -> some View {
+        if let id { content.demoTarget(id) } else { content }
     }
 }
 
@@ -666,11 +1181,14 @@ private struct ProjectsVignette: View {
 
 /// A reply at full size: select a run of text → right-click → "Ask About"
 /// → the thread opens beside it with the quote split out, reply count
-/// under the quoted words. Plays on its own; clicks jump ahead.
+/// under the quoted words. Plays on its own with the pointer doing the
+/// clicking; clicks jump ahead.
 private struct ThreadVignette: View {
     /// 0 idle · 1 selection · 2 context menu · 3 thread open, question
     /// waiting · 4 sent and answered.
     @State private var phase = 0
+    @State private var aim: String?
+    @State private var clicks = 0
 
     private let lead = "The booking card renders a skeleton while availability loads, matching the final layout so nothing shifts."
     private let before = "Availability is fetched "
@@ -684,6 +1202,9 @@ private struct ThreadVignette: View {
                 Mini.caps("CLAUDE")
                 paragraph(Text(lead))
                 middleParagraph
+                    // The context menu hangs off this paragraph and must
+                    // draw over the one below it.
+                    .zIndex(1)
                 paragraph(Text(tail))
                 Spacer(minLength: 0)
             }
@@ -698,22 +1219,23 @@ private struct ThreadVignette: View {
             }
         }
         .background(Mini.page)
-        .overlay(alignment: .topLeading) {
-            if phase == 2 {
-                Mini.menu {
-                    Mini.menuRow("Ask About \u{201C}stale-while-revalidate…\u{201D}", hint: true) { advance() }
-                    Mini.menuRow("Copy") {}
-                }
-                .frame(width: 270)
-                .offset(x: 150, y: 128)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
-            }
-        }
+        .demoCursor(aim, clicks: clicks)
         .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(phase == 4 ? 3.2 : 2.0))
-                advance()
-            }
+            await runDemo(
+                phase: { phase },
+                beat: { p in
+                    switch p {
+                    case 0: (1.0, ["quote"])
+                    case 1: (0.6, ["quote"])
+                    case 2: (0.5, ["ask"])
+                    case 3: (0.9, ["send"])
+                    default: (2.4, ["close"])
+                    }
+                },
+                aim: { aim = $0 },
+                click: { clicks += 1 },
+                advance: advance
+            )
         }
     }
 
@@ -751,28 +1273,37 @@ private struct ThreadVignette: View {
                     .font(.system(size: 13)).foregroundStyle(Theme.text)
             }
         } else {
-            (Text(before)
-                + Text(quote).foregroundColor(Theme.text)
-                + Text(after))
+            Text(selectable)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.text)
                 .lineSpacing(3)
-                .overlay(alignment: .topLeading) {
-                    // The selection wash over the quoted run — drawn as a
-                    // band across the run's rough extent.
-                    if phase >= 1 {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Mini.selection.opacity(0.65))
-                            .frame(width: 322, height: 18)
-                            .offset(x: 138, y: 0)
-                            .allowsHitTesting(false)
-                            .transition(.opacity)
+                .contentShape(Rectangle())
+                .demoTarget("quote")
+                .onTapGesture { if phase <= 1 { advance() } }
+                .overlay(alignment: .bottomLeading) {
+                    if phase == 2 {
+                        Mini.menu {
+                            Mini.menuRow("Ask About \u{201C}stale-while-revalidate…\u{201D}", hint: true) { advance() }
+                                .demoTarget("ask")
+                            Mini.menuRow("Copy") {}
+                        }
+                        .frame(width: 270)
+                        .offset(x: 110, y: 64)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { if phase == 1 { advance() } }
-                .overlay { if phase == 1 { HintRing(cornerRadius: 4).padding(-2) } }
         }
+    }
+
+    /// The middle paragraph with the selection wash on the quoted run
+    /// (phase 1+) — an attributed run, so it tracks the text at any width.
+    private var selectable: AttributedString {
+        var out = AttributedString(before)
+        var run = AttributedString(quote)
+        if phase >= 1 { run.backgroundColor = Mini.selection }
+        out += run
+        out += AttributedString(after)
+        return out
     }
 
     private var threadPanel: some View {
@@ -780,7 +1311,7 @@ private struct ThreadVignette: View {
             HStack {
                 Mini.caps("THREAD")
                 Spacer(minLength: 0)
-                Mini.control("x", hint: phase == 4).onTapGesture { reset() }
+                Mini.control("x").demoTarget("close").onTapGesture { reset() }
             }
             Text(quote)
                 .font(.system(size: 12)).foregroundStyle(Theme.textSecondary).lineLimit(2)
@@ -806,7 +1337,7 @@ private struct ThreadVignette: View {
                     .fill(phase == 4 ? Theme.buttonFill : Mini.bubble)
                     .frame(width: 24, height: 24)
                     .overlay(LucideIcon("arrow-up", size: 12).foregroundStyle(phase == 4 ? Theme.textSecondary : .white))
-                    .overlay { if phase == 3 { HintRing(cornerRadius: 12) } }
+                    .demoTarget("send")
                     .onTapGesture { if phase == 3 { advance() } }
             }
             .padding(.horizontal, 10)
@@ -829,6 +1360,175 @@ private struct ThreadVignette: View {
 
     private func reset() {
         withAnimation(.spring(duration: 0.45, bounce: 0.12)) { phase = 0 }
+    }
+}
+
+// MARK: - Quick tasks
+
+/// A reply with a follow-up buried in it: select the run → ⌘S → the
+/// tasks menu drops from the titlebar with the run as its newest task.
+/// Plays on its own (the pointer selects, the keys press); the keys jump
+/// ahead.
+private struct QuickTaskVignette: View {
+    /// 0 idle · 1 selection, keys waiting · 2 saved, tasks menu open.
+    @State private var phase = 0
+    @State private var aim: String?
+    @State private var clicks = 0
+
+    private let before = "Auth is wired and the suite passes. One follow-up: "
+    private let quote = "move the rate limiter into middleware before launch"
+    private let after = ", it's still per-route."
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // The titlebar strip: the tasks glyph the menu hangs off.
+            HStack {
+                Spacer(minLength: 0)
+                Mini.control("list-checks")
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .background(Mini.bar)
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.borderSidebar).frame(height: 1) }
+
+            VStack(alignment: .leading, spacing: 14) {
+                Mini.caps("CLAUDE")
+                Text(reply)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .lineSpacing(3)
+                    .frame(maxWidth: 400, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .demoTarget("run")
+                    .onTapGesture { if phase == 0 { advance() } }
+                Text("Want me to open a branch for the middleware change?")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .lineSpacing(3)
+                    .frame(maxWidth: 400, alignment: .leading)
+                Spacer(minLength: 0)
+                keys.frame(maxWidth: 400)
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .background(Mini.page)
+        .overlay(alignment: .topTrailing) {
+            if phase == 2 {
+                tasksMenu
+                    .frame(width: 290)
+                    .padding(.top, 36)
+                    .padding(.trailing, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+            }
+        }
+        .demoCursor(aim, clicks: clicks)
+        .task {
+            // The pointer selects the run; ⌘S and the menu happen on
+            // their own (keys, not clicks).
+            await runDemo(
+                phase: { phase },
+                beat: { p in
+                    switch p {
+                    case 0: (1.0, ["run"])
+                    case 1: (1.1, [])
+                    default: (3.2, [])
+                    }
+                },
+                aim: { aim = $0 },
+                click: { clicks += 1 },
+                advance: advance
+            )
+        }
+    }
+
+    /// The reply with the selection wash on the quoted run (phase 1+).
+    private var reply: AttributedString {
+        var out = AttributedString(before)
+        var run = AttributedString(quote)
+        if phase >= 1 { run.backgroundColor = Mini.selection }
+        out += run
+        out += AttributedString(after)
+        return out
+    }
+
+    /// ⌘ S keycaps: quiet until there's a selection, ringed while they're
+    /// the next click, pressed once the task is saved.
+    private var keys: some View {
+        HStack(spacing: 6) {
+            keycap("\u{2318}")
+            keycap("S")
+            Text(phase == 2 ? "Saved to Tasks" : "Add selection to Tasks")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.leading, 4)
+        }
+        .opacity(phase == 0 ? 0.45 : 1)
+        .contentShape(Rectangle())
+        .onTapGesture { if phase == 1 { advance() } }
+    }
+
+    private func keycap(_ glyph: String) -> some View {
+        Text(glyph)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(phase == 2 ? .white : Theme.text)
+            .frame(width: 28, height: 28)
+            .background(RoundedRectangle(cornerRadius: 7).fill(phase == 2 ? Theme.link : Mini.bar))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+            .shadow(color: Color.black.opacity(phase == 2 ? 0 : 0.12), radius: 0, x: 0, y: 2)
+            .scaleEffect(phase == 2 ? 0.94 : 1)
+    }
+
+    /// The titlebar tasks menu, as the app draws it: caps header, the
+    /// project's group, the new task on top with a fading accent wash.
+    private var tasksMenu: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Mini.caps("TASKS").padding(.horizontal, 4)
+            Text("HIERARCH")
+                .font(.system(size: 10.5, weight: .semibold))
+                .kerning(0.6)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+            taskRow(quote, fresh: true)
+            taskRow("Fix the flaky webhook retry test", fresh: false)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Theme.menuFill)
+                .shadow(color: Color.black.opacity(0.25), radius: 14, x: 0, y: 6)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+    }
+
+    private func taskRow(_ text: String, fresh: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            LucideIcon("circle", size: 13)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(fresh ? Theme.link.opacity(0.1) : Mini.page)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(fresh ? Theme.link.opacity(0.5) : Theme.borderSidebar, lineWidth: 1)
+        )
+    }
+
+    private func advance() {
+        withAnimation(.spring(duration: 0.45, bounce: 0.12)) {
+            phase = (phase + 1) % 3
+        }
     }
 }
 
@@ -858,10 +1558,6 @@ private struct ShareVignette: View {
                     Text("Any device on your Wi-Fi").font(.system(size: 13))
                 }
                 .foregroundStyle(Theme.textSecondary)
-                HStack(spacing: 8) {
-                    ComingSoonBadge()
-                    Text("Public live URLs").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                }
             }
             qr
                 .frame(width: 168, height: 168)
@@ -914,6 +1610,237 @@ private struct ShareVignette: View {
     }
 }
 
+// MARK: - Live URL
+
+/// The server card's Live URL switch at full size: flip it, it connects,
+/// and a phone on cellular (no Wi-Fi) loads the public link. Plays on its
+/// own with the pointer flipping the switch; the switch jumps ahead.
+private struct LiveURLVignette: View {
+    /// 0 off · 1 connecting · 2 online, the phone loaded.
+    @State private var phase = 0
+    @State private var aim: String?
+    @State private var clicks = 0
+    /// The relay's own name format (adjective-noun-suffix, houston-relay
+    /// names.go), so the demo shows the link a user actually gets.
+    static let host = "crimson-nebula-x4k2." + RelayTunnelStore.relayHost
+    private var host: String { Self.host }
+
+    var body: some View {
+        HStack(spacing: 48) {
+            card
+            VStack(spacing: 12) {
+                phone
+                HStack(spacing: 6) {
+                    LucideIcon("signal-high", size: 13)
+                    Text("Anywhere, not just your Wi-Fi").font(.system(size: 12))
+                }
+                .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Mini.page)
+        .demoCursor(aim, clicks: clicks)
+        .task {
+            await runDemo(
+                phase: { phase },
+                beat: { p in
+                    switch p {
+                    case 0: (1.2, ["switch"])
+                    case 1: (1.4, [])
+                    default: (3.4, [])
+                    }
+                },
+                aim: { aim = $0 },
+                click: { clicks += 1 },
+                advance: advance
+            )
+        }
+    }
+
+    // MARK: Server card
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Hierarch")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .padding(.bottom, 14)
+            row("Browser", subtitle: "Localhost:5173") {
+                SVGIcon(name: "redirect", size: 16).foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.bottom, 14)
+            hairline
+            row("Local WiFi sharing", subtitle: "hierarch.local") {
+                miniSwitch(true)
+            }
+            .padding(.vertical, 14)
+            hairline
+            row("Live URL", subtitle: liveSubtitle, live: phase == 2) {
+                if phase == 2 {
+                    LucideIcon("copy", size: 14)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 26, height: 26)
+                        .transition(.opacity)
+                }
+                miniSwitch(phase > 0)
+                    .contentShape(Capsule())
+                    .demoTarget("switch")
+                    .onTapGesture { phase == 0 ? advance() : reset() }
+            }
+            .padding(.top, 14)
+        }
+        .padding(20)
+        .frame(width: 330)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Mini.bar))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.borderSidebar, lineWidth: 1))
+    }
+
+    private var liveSubtitle: String {
+        switch phase {
+        case 1: "Connecting…"
+        default: host
+        }
+    }
+
+    private func row<Trailing: View>(
+        _ title: String, subtitle: String, live: Bool = false,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                HStack(spacing: 5) {
+                    if live {
+                        Circle().fill(Theme.dotActive).frame(width: 6, height: 6)
+                    }
+                    Text(subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(live ? Theme.link : Theme.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            HStack(spacing: 2) { trailing() }
+        }
+    }
+
+    /// `PanelSwitchStyle`'s look, drawn static for the demo.
+    private func miniSwitch(_ on: Bool) -> some View {
+        ZStack(alignment: on ? .trailing : .leading) {
+            Capsule()
+                .fill(on ? Theme.switchTrackOn : Theme.switchTrack)
+                .frame(width: 38, height: 22)
+            Circle()
+                .fill(.white)
+                .frame(width: 16, height: 16)
+                .padding(3)
+        }
+    }
+
+    private var hairline: some View {
+        Rectangle().fill(Theme.borderSidebar).frame(height: 1)
+    }
+
+    // MARK: Phone
+
+    private var phone: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Text("9:41").font(.system(size: 10, weight: .semibold))
+                Spacer(minLength: 0)
+                LucideIcon("signal-high", size: 10)
+                Text("5G").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+
+            HStack(spacing: 4) {
+                LucideIcon("lock", size: 9)
+                Text(host).font(.system(size: 10)).lineLimit(1).minimumScaleFactor(0.7)
+            }
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .frame(maxWidth: .infinity)
+            .background(Capsule().fill(Theme.buttonFill))
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+
+            ZStack {
+                switch phase {
+                case 2:
+                    site.transition(.opacity.combined(with: .offset(y: 8)))
+                case 1:
+                    ProgressView().controlSize(.small).transition(.opacity)
+                default:
+                    VStack(spacing: 6) {
+                        LucideIcon("globe", size: 20)
+                        Text("Not live yet").font(.system(size: 10.5))
+                    }
+                    .foregroundStyle(Theme.textSecondary.opacity(0.7))
+                    .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 184, height: 320)
+        .background(RoundedRectangle(cornerRadius: 26).fill(Mini.page))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26)
+                .strokeBorder(Theme.text.opacity(0.85), lineWidth: 4)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 16, x: 0, y: 8)
+    }
+
+    /// The dev site, as the phone renders it once the link is live.
+    private var site: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(LinearGradient(
+                    colors: [Theme.link, Theme.link.opacity(0.55)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                ))
+                .frame(height: 84)
+                .overlay(alignment: .bottomLeading) {
+                    Text("Hierarch")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(10)
+                }
+            ForEach([1.0, 0.85, 0.6], id: \.self) { width in
+                Capsule()
+                    .fill(Theme.textSecondary.opacity(0.22))
+                    .frame(height: 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .scaleEffect(x: width, anchor: .leading)
+            }
+            Text("Book a demo")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 26)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Theme.ctaFill))
+                .padding(.top, 4)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+    }
+
+    private func advance() {
+        withAnimation(.spring(duration: 0.45, bounce: 0.12)) {
+            phase = (phase + 1) % 3
+        }
+    }
+
+    private func reset() {
+        withAnimation(.spring(duration: 0.45, bounce: 0.12)) { phase = 0 }
+    }
+}
+
 // MARK: - Parallax set dressing
 
 /// Decorative deep space behind the steps: small planets, soft glows,
@@ -942,19 +1869,26 @@ private struct ParallaxSpace: View {
         let kind: Kind
     }
 
-    /// Placed on the left/right bands so nothing drifts under the card;
-    /// the fade-out over distance keeps travel from carrying a feature
-    /// anywhere visible far from home.
+    /// Placed around the edges of the two-column page: planets keep off
+    /// the text column (top-left) and out from behind the demo (right),
+    /// sitting in the top band, the bottom band, and the far left edge;
+    /// only soft glows sit behind content. The fade-out over distance
+    /// keeps travel from carrying a feature anywhere visible far from home.
     private static let features: [Feature] = [
         Feature(id: 0, fx: 0.10, fy: 0.22, depth: 0.25, home: 0, kind: .glow(Color(hex: 0xD97757), 150)),
-        Feature(id: 1, fx: 0.90, fy: 0.17, depth: 0.70, home: 0, kind: .planet(Color(hex: 0x8FD3D9), 18)),
-        Feature(id: 2, fx: 0.12, fy: 0.72, depth: 0.50, home: 1, kind: .planet(Color(hex: 0xE0C084), 11)),
-        Feature(id: 3, fx: 0.91, fy: 0.68, depth: 0.85, home: 1, kind: .ringed(Color(hex: 0xD9C27E), 24)),
+        Feature(id: 1, fx: 0.92, fy: 0.07, depth: 0.70, home: 0, kind: .planet(Color(hex: 0x8FD3D9), 18)),
+        Feature(id: 2, fx: 0.12, fy: 0.78, depth: 0.50, home: 1, kind: .planet(Color(hex: 0xE0C084), 11)),
+        Feature(id: 3, fx: 0.93, fy: 0.92, depth: 0.85, home: 1, kind: .ringed(Color(hex: 0xD9C27E), 24)),
         Feature(id: 4, fx: 0.92, fy: 0.28, depth: 0.30, home: 2, kind: .glow(Color(hex: 0x5069D9), 130)),
-        Feature(id: 5, fx: 0.09, fy: 0.40, depth: 0.60, home: 2, kind: .planet(Color(hex: 0x4A90D9), 14)),
-        Feature(id: 6, fx: 0.88, fy: 0.84, depth: 0.45, home: 3, kind: .planet(Color(hex: 0xD9603B), 9)),
-        Feature(id: 7, fx: 0.14, fy: 0.10, depth: 0.35, home: 3, kind: .planet(Color(hex: 0x9CA3AF), 7)),
-        Feature(id: 8, fx: 0.08, fy: 0.84, depth: 0.28, home: 3, kind: .glow(Color(hex: 0x8FD3D9), 140)),
+        Feature(id: 5, fx: 0.05, fy: 0.66, depth: 0.60, home: 2, kind: .planet(Color(hex: 0x4A90D9), 14)),
+        Feature(id: 12, fx: 0.11, fy: 0.62, depth: 0.40, home: 3, kind: .glow(Color(hex: 0xB07AD9), 130)),
+        Feature(id: 13, fx: 0.70, fy: 0.06, depth: 0.65, home: 3, kind: .planet(Color(hex: 0x7FBF8E), 13)),
+        Feature(id: 6, fx: 0.62, fy: 0.93, depth: 0.45, home: 4, kind: .planet(Color(hex: 0xD9603B), 9)),
+        Feature(id: 7, fx: 0.42, fy: 0.07, depth: 0.35, home: 4, kind: .planet(Color(hex: 0x9CA3AF), 7)),
+        Feature(id: 8, fx: 0.08, fy: 0.84, depth: 0.28, home: 4, kind: .glow(Color(hex: 0x8FD3D9), 140)),
+        Feature(id: 9, fx: 0.90, fy: 0.20, depth: 0.30, home: 5, kind: .glow(Color(hex: 0xD97757), 140)),
+        Feature(id: 10, fx: 0.06, fy: 0.72, depth: 0.75, home: 5, kind: .planet(Color(hex: 0x3F86D9), 16)),
+        Feature(id: 11, fx: 0.86, fy: 0.93, depth: 0.55, home: 5, kind: .planet(Color(hex: 0xC98F4C), 12)),
     ]
 
     /// Points of horizontal travel per page step, at depth 1.
@@ -995,15 +1929,18 @@ private struct ParallaxSpace: View {
     private func view(for feature: Feature) -> some View {
         switch feature.kind {
         case let .planet(color, size):
-            planetBody(color: color, size: size)
+            PlanetSphere(
+                color: color, size: size,
+                atmosphere: size >= 14 ? color : nil,
+                lightFrom: light(for: feature)
+            )
         case let .ringed(color, size):
-            planetBody(color: color, size: size)
-                .overlay(
-                    Ellipse()
-                        .stroke(color.opacity(0.55), lineWidth: 1.5)
-                        .frame(width: size * 2.1, height: size * 0.8)
-                        .rotationEffect(.degrees(-18))
-                )
+            PlanetSphere(
+                color: color, size: size,
+                bands: [0xE8D6A6, 0xD4B676, 0xE8D6A6, 0xC9A968, 0xE8D6A6].map { Color(hex: $0) },
+                ring: color,
+                lightFrom: light(for: feature)
+            )
         case let .glow(color, size):
             Circle()
                 .fill(color.opacity(0.35))
@@ -1012,16 +1949,10 @@ private struct ParallaxSpace: View {
         }
     }
 
-    /// A lit sphere: highlight pulled toward the upper left.
-    private func planetBody(color: Color, size: CGFloat) -> some View {
-        Circle()
-            .fill(RadialGradient(
-                colors: [color, color.opacity(0.45)],
-                center: UnitPoint(x: 0.35, y: 0.3),
-                startRadius: 0,
-                endRadius: size
-            ))
-            .frame(width: size, height: size)
+    /// Every body is lit from the middle of the sky, where the card sits
+    /// (widths scaled up a little for the landscape pane).
+    private func light(for feature: Feature) -> Angle {
+        .radians(atan2(Double(0.5 - feature.fy), Double((0.5 - feature.fx) * 1.5)))
     }
 }
 

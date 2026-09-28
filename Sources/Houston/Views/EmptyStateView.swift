@@ -186,18 +186,29 @@ struct SolarSystem: View {
         let period: Double
         /// Fixed scatter so the planets don't start in a line.
         let startAngle: Double
-        var hasRing = false
+        var bands: [Color] = []
+        var ring: Color? = nil
+        var atmosphere: Color? = nil
+        var hasMoon = false
     }
 
     static let planets: [Planet] = [
-        Planet(name: "Mercury", color: Color(hex: 0x9CA3AF), size: 3, orbit: 44, period: 26, startAngle: 40),
-        Planet(name: "Venus", color: Color(hex: 0xE0C084), size: 4.5, orbit: 62, period: 42, startAngle: 190),
-        Planet(name: "Earth", color: Color(hex: 0x4A90D9), size: 5, orbit: 80, period: 60, startAngle: 305),
-        Planet(name: "Mars", color: Color(hex: 0xD9603B), size: 4, orbit: 98, period: 84, startAngle: 120),
-        Planet(name: "Jupiter", color: Color(hex: 0xC98F4C), size: 10, orbit: 126, period: 130, startAngle: 250),
-        Planet(name: "Saturn", color: Color(hex: 0xD9C27E), size: 8.5, orbit: 154, period: 180, startAngle: 15, hasRing: true),
-        Planet(name: "Uranus", color: Color(hex: 0x8FD3D9), size: 6.5, orbit: 180, period: 240, startAngle: 150),
-        Planet(name: "Neptune", color: Color(hex: 0x5069D9), size: 6, orbit: 205, period: 300, startAngle: 80),
+        Planet(name: "Mercury", color: Color(hex: 0xA8A29E), size: 4, orbit: 44, period: 26, startAngle: 40),
+        Planet(name: "Venus", color: Color(hex: 0xE8C98E), size: 6, orbit: 62, period: 42, startAngle: 190,
+               atmosphere: Color(hex: 0xF3DDB0)),
+        Planet(name: "Earth", color: Color(hex: 0x3F86D9), size: 6.5, orbit: 82, period: 60, startAngle: 305,
+               atmosphere: Color(hex: 0x7FB8FF), hasMoon: true),
+        Planet(name: "Mars", color: Color(hex: 0xD2613A), size: 5, orbit: 102, period: 84, startAngle: 120),
+        Planet(name: "Jupiter", color: Color(hex: 0xC98F4C), size: 14, orbit: 130, period: 130, startAngle: 250,
+               bands: [0xE6CBA0, 0xC98F4C, 0xEAD7B5, 0xB0703E, 0xE3C39A, 0xC98F4C, 0xE6CBA0]
+                   .map { Color(hex: $0) }),
+        Planet(name: "Saturn", color: Color(hex: 0xDCC48A), size: 12, orbit: 158, period: 180, startAngle: 15,
+               bands: [0xE8D6A6, 0xD4B676, 0xE8D6A6, 0xC9A968, 0xE8D6A6].map { Color(hex: $0) },
+               ring: Color(hex: 0xD9C27E)),
+        Planet(name: "Uranus", color: Color(hex: 0x8FD3D9), size: 8.5, orbit: 184, period: 240, startAngle: 150,
+               atmosphere: Color(hex: 0x8FD3D9)),
+        Planet(name: "Neptune", color: Color(hex: 0x4F6AE0), size: 8, orbit: 208, period: 300, startAngle: 80,
+               atmosphere: Color(hex: 0x5069D9)),
     ]
 
     var body: some View {
@@ -209,19 +220,7 @@ struct SolarSystem: View {
                     .frame(width: planet.orbit * 2, height: planet.orbit * 2)
             }
 
-            // The sun: warm core with a soft halo.
-            Circle()
-                .fill(Color(hex: 0xE8A33D).opacity(0.35))
-                .frame(width: 44, height: 44)
-                .blur(radius: 10)
-            Circle()
-                .fill(RadialGradient(
-                    colors: [Color(hex: 0xFFD98A), Color(hex: 0xE8A33D)],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: 13
-                ))
-                .frame(width: 26, height: 26)
+            Sun()
 
             ForEach(Self.planets) { planet in
                 OrbitingPlanet(planet: planet)
@@ -231,38 +230,283 @@ struct SolarSystem: View {
     }
 }
 
+/// A hot core under a slowly breathing corona.
+private struct Sun: View {
+    @State private var breathe = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(RadialGradient(
+                    colors: [Color(hex: 0xF5B546).opacity(0.3), .clear],
+                    center: .center,
+                    startRadius: 8,
+                    endRadius: 64
+                ))
+                .frame(width: 128, height: 128)
+                .scaleEffect(breathe ? 1.06 : 0.94)
+            Circle()
+                .fill(Color(hex: 0xF0A63A).opacity(0.5))
+                .frame(width: 42, height: 42)
+                .blur(radius: 9)
+            Circle()
+                .fill(RadialGradient(
+                    stops: [
+                        .init(color: Color(hex: 0xFFF6DC), location: 0),
+                        .init(color: Color(hex: 0xFFD98A), location: 0.4),
+                        .init(color: Color(hex: 0xF2A43A), location: 0.8),
+                        .init(color: Color(hex: 0xE0802E), location: 1),
+                    ],
+                    center: UnitPoint(x: 0.44, y: 0.42),
+                    startRadius: 0,
+                    endRadius: 15
+                ))
+                .frame(width: 28, height: 28)
+        }
+        .allowsHitTesting(false)
+        .onAppear {
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 3.5).repeatForever(autoreverses: true)) {
+                    breathe = true
+                }
+            }
+        }
+    }
+}
+
 /// One planet riding its orbit: the offset-then-rotate trick swings the body
 /// around the system's center; linear and forever, at the planet's period.
+/// The rotated frame keeps the sun on local -x, so the lit face always
+/// points at it; bands and ring counter-rotate to hold their tilt.
 private struct OrbitingPlanet: View {
     let planet: SolarSystem.Planet
     @State private var angle: Double = 0
 
+    private var turn: Angle { .degrees(planet.startAngle + angle) }
+
     var body: some View {
-        planetBody
-            .offset(x: planet.orbit)
-            .rotationEffect(.degrees(planet.startAngle + angle))
+        PlanetSphere(
+            color: planet.color,
+            size: planet.size,
+            bands: planet.bands,
+            ring: planet.ring,
+            atmosphere: planet.atmosphere,
+            lightFrom: .degrees(180),
+            surfaceTurn: .zero - turn
+        )
+        .overlay { if planet.hasMoon { Moon(distance: planet.size / 2 + 4) } }
+        .help(planet.name)
+        .offset(x: planet.orbit)
+        .rotationEffect(turn)
+        .onAppear {
+            DispatchQueue.main.async {
+                withAnimation(.linear(duration: planet.period).repeatForever(autoreverses: false)) {
+                    angle = 360
+                }
+            }
+        }
+    }
+}
+
+private struct Moon: View {
+    let distance: CGFloat
+    @State private var angle: Double = 0
+
+    var body: some View {
+        Circle()
+            .fill(Color(hex: 0xC9CDD3))
+            .frame(width: 1.8, height: 1.8)
+            .offset(x: distance)
+            .rotationEffect(.degrees(angle))
             .onAppear {
                 DispatchQueue.main.async {
-                    withAnimation(.linear(duration: planet.period).repeatForever(autoreverses: false)) {
+                    withAnimation(.linear(duration: 7).repeatForever(autoreverses: false)) {
                         angle = 360
                     }
                 }
             }
     }
+}
 
-    private var planetBody: some View {
+/// A small lit planet: base color, optional cloud bands, ring, and haze,
+/// shaded so the lit face points at `lightFrom`. Shared by the solar
+/// system and the onboarding's parallax sky.
+struct PlanetSphere: View {
+    let color: Color
+    let size: CGFloat
+    /// Cloud bands, top to bottom, in equal stripes.
+    var bands: [Color] = []
+    var ring: Color? = nil
+    /// A soft haze around the limb.
+    var atmosphere: Color? = nil
+    /// Where the light arrives FROM in this view's frame (screen angles:
+    /// 180° is from the left, 90° from below).
+    var lightFrom: Angle = .degrees(180)
+    /// Turns the surface features (bands, ring) apart from the shading, so
+    /// an orbiting planet can hold them still while its frame turns.
+    var surfaceTurn: Angle = .zero
+
+    private static let tilt = Angle.degrees(-18)
+
+    var body: some View {
+        ZStack {
+            if let atmosphere {
+                Circle()
+                    .fill(atmosphere.opacity(0.4))
+                    .frame(width: size * 1.8, height: size * 1.8)
+                    .blur(radius: size * 0.32)
+            }
+            if let ring { ringHalf(ring, front: false) }
+            sphere
+            if let ring { ringHalf(ring, front: true) }
+        }
+        .frame(width: size, height: size)
+    }
+
+    private var sphere: some View {
         Circle()
-            .fill(planet.color)
-            .frame(width: planet.size, height: planet.size)
+            .fill(color)
             .overlay {
-                if planet.hasRing {
-                    Ellipse()
-                        .stroke(planet.color.opacity(0.55), lineWidth: 1)
-                        .frame(width: planet.size * 2.1, height: planet.size * 0.8)
-                        .rotationEffect(.degrees(-18))
+                if !bands.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(bands.indices, id: \.self) { index in
+                            Rectangle().fill(bands[index])
+                        }
+                    }
+                    .rotationEffect(Self.tilt + surfaceTurn)
+                    .clipShape(Circle())
                 }
             }
-            .help(planet.name)
+            // Highlight toward the light, limb darkening away from it.
+            .overlay {
+                Circle().fill(RadialGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.45), location: 0),
+                        .init(color: .white.opacity(0), location: 0.28),
+                        .init(color: .black.opacity(0.1), location: 0.55),
+                        .init(color: .black.opacity(0.62), location: 1),
+                    ],
+                    center: litCenter,
+                    startRadius: 0,
+                    endRadius: size * 0.95
+                ))
+            }
+            .frame(width: size, height: size)
+    }
+
+    private var litCenter: UnitPoint {
+        let radians = lightFrom.radians
+        return UnitPoint(x: 0.5 + 0.3 * cos(radians), y: 0.5 + 0.3 * sin(radians))
+    }
+
+    /// The ring in two halves around the body: the far half behind it, the
+    /// near half (the lower arc) across its face.
+    private func ringHalf(_ color: Color, front: Bool) -> some View {
+        ParticleRing(color: color, size: size, front: front)
+            .rotationEffect(Self.tilt + surfaceTurn)
+    }
+}
+
+/// A planetary ring as a disc of dust: a soft blurred haze with a scatter
+/// of motes over it and a gap splitting the inner and outer rings. Motes
+/// drift around the planet, inner ones faster. Draws one half: `front` is
+/// the near (lower) arc that crosses the planet's face.
+private struct ParticleRing: View {
+    let color: Color
+    let size: CGFloat
+    let front: Bool
+
+    /// Semi-major radii of the ring's inner and outer edges, and how much
+    /// the disc is squashed by the viewing angle.
+    private var inner: CGFloat { size * 0.8 }
+    private var outer: CGFloat { size * 1.45 }
+    private static let flatten: CGFloat = 0.28
+    /// The gap, as fractions across the band.
+    private static let gap: ClosedRange<CGFloat> = 0.56...0.66
+
+    private struct Mote {
+        let angle: Double
+        /// 0 at the inner edge, 1 at the outer.
+        let band: CGFloat
+        let dot: CGFloat
+        let alpha: Double
+    }
+
+    /// Fixed-seed scatter: the same ring every launch.
+    private static let motes: [Mote] = {
+        var seed: UInt64 = 0x5A7C_2E91_D3B4_F607
+        func next() -> Double {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Double((seed >> 33) % 10_000) / 10_000
+        }
+        var out: [Mote] = []
+        while out.count < 260 {
+            let band = CGFloat(next())
+            let angle = next() * 2 * .pi
+            let dot = 0.35 + CGFloat(next()) * 0.75
+            let alpha = 0.3 + next() * 0.7
+            if gap.contains(band) { continue }
+            out.append(Mote(angle: angle, band: band, dot: dot, alpha: alpha))
+        }
+        return out
+    }()
+
+    var body: some View {
+        let width = outer * 2 + 4
+        let height = outer * 2 * Self.flatten + 4
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, canvas in
+                let center = CGPoint(x: canvas.width / 2, y: canvas.height / 2)
+                // Keep to this half: below the center line is the near side.
+                context.clip(to: Path(CGRect(
+                    x: 0, y: front ? center.y : 0,
+                    width: canvas.width, height: canvas.height / 2
+                )))
+
+                // The haze: inner and outer rings as blurred annuli.
+                var haze = context
+                haze.addFilter(.blur(radius: max(0.6, size * 0.08)))
+                for (lo, hi, strength) in [(CGFloat(0), Self.gap.lowerBound, 0.32),
+                                           (Self.gap.upperBound, CGFloat(1), 0.22)] {
+                    var annulus = Path()
+                    annulus.addPath(ellipse(center, radius(lo)))
+                    annulus.addPath(ellipse(center, radius(hi)))
+                    haze.fill(annulus, with: .color(color.opacity(front ? strength : strength * 0.7)),
+                              style: FillStyle(eoFill: true))
+                }
+
+                // The motes.
+                for mote in Self.motes {
+                    let r = radius(mote.band)
+                    // Kepler-ish: angular speed falls off with distance.
+                    let omega = 0.22 * pow(Double(inner / r), 1.5)
+                    let angle = mote.angle + t * omega
+                    let point = CGPoint(
+                        x: center.x + r * CGFloat(cos(angle)),
+                        y: center.y + r * Self.flatten * CGFloat(sin(angle))
+                    )
+                    let d = mote.dot
+                    context.fill(
+                        Path(ellipseIn: CGRect(x: point.x - d / 2, y: point.y - d / 2, width: d, height: d)),
+                        with: .color(color.opacity(mote.alpha * (front ? 0.95 : 0.6)))
+                    )
+                }
+            }
+        }
+        .frame(width: width, height: height)
+        .allowsHitTesting(false)
+    }
+
+    private func radius(_ band: CGFloat) -> CGFloat {
+        inner + (outer - inner) * band
+    }
+
+    private func ellipse(_ center: CGPoint, _ r: CGFloat) -> Path {
+        Path(ellipseIn: CGRect(
+            x: center.x - r, y: center.y - r * Self.flatten,
+            width: r * 2, height: r * 2 * Self.flatten
+        ))
     }
 }
 

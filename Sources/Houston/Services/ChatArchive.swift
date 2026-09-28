@@ -1359,12 +1359,18 @@ final class ChatMetaStore: ObservableObject {
     @Published private(set) var continuations: [String: String] = [:]
     /// Files hidden because a continuation superseded them.
     private(set) var supersededFiles: Set<String> = []
+    /// Each chat's model as last sent or picked in its composer (harness,
+    /// arg, provider, effort, permission) — so leaving a chat and coming
+    /// back (or relaunching) doesn't snap it to the harness default. Not
+    /// published: composers read it on mount, nothing re-renders on it.
+    private(set) var models: [String: [String: String]] = [:]
 
     private struct Blob: Codable {
         var pinned: [String] = []
         var archived: [String] = []
         var branches: [String: String]?
         var continuations: [String: String]?
+        var models: [String: [String: String]]?
     }
 
     private static var fileURL: URL {
@@ -1380,13 +1386,15 @@ final class ChatMetaStore: ObservableObject {
             branches = blob.branches ?? [:]
             continuations = blob.continuations ?? [:]
             supersededFiles = Set(continuations.values)
+            models = blob.models ?? [:]
         }
     }
 
     private func save() {
         let blob = Blob(
             pinned: Array(pinned), archived: Array(archived),
-            branches: branches, continuations: continuations
+            branches: branches, continuations: continuations,
+            models: models
         )
         guard let data = try? JSONEncoder().encode(blob) else { return }
         try? FileManager.default.createDirectory(
@@ -1423,6 +1431,13 @@ final class ChatMetaStore: ObservableObject {
         continuations[file] = parent
         supersededFiles.insert(parent)
         if pinned.remove(parent) != nil { pinned.insert(file) }
+        if models[file] == nil, let model = models[parent] { models[file] = model }
+        save()
+    }
+
+    func setModel(_ fields: [String: String], for file: String) {
+        guard models[file] != fields else { return }
+        models[file] = fields
         save()
     }
 
@@ -1432,10 +1447,11 @@ final class ChatMetaStore: ObservableObject {
     func forget(_ file: String) {
         guard pinned.contains(file) || archived.contains(file)
             || branches[file] != nil || continuations[file] != nil
-            || supersededFiles.contains(file) else { return }
+            || supersededFiles.contains(file) || models[file] != nil else { return }
         pinned.remove(file)
         archived.remove(file)
         branches.removeValue(forKey: file)
+        models.removeValue(forKey: file)
         if let parent = continuations.removeValue(forKey: file),
            !continuations.values.contains(parent) {
             supersededFiles.remove(parent)
