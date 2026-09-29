@@ -528,6 +528,7 @@ struct MainWindowView: View {
         // type-checker past its time limit.
         .background(shortcutListeners)
         .background(consentDialogs)
+        .overlay { consentCards }
     }
 
     /// A Claude session appearing is the moment both offers become
@@ -557,8 +558,8 @@ struct MainWindowView: View {
         }
     }
 
-    /// Root observers and the consent alerts (status bar, notifications,
-    /// notifications-denied) hang off a background anchor rather than the
+    /// Root observers (and the consent offers' triggers — the cards
+    /// themselves draw in `consentCards`) hang off a background anchor rather than the
     /// body's modifier chain — the root is at the type-checker's limit
     /// (see shortcutListeners), and an alert presents from the window
     /// wherever it's attached. The anchor is always mounted, so its
@@ -617,59 +618,73 @@ struct MainWindowView: View {
                 notifyPromptQueued = false
                 showNotifyPrompt = true
             }
-            .alert("Show Claude's status in Houston?", isPresented: $showStatusPrompt) {
-                Button("Enable") {
-                    statusFeedInstalled = StatusLineFeed.install()
-                }
-                Button("Not Now", role: .cancel) {
-                    updateSettings { $0.statusLinePromptDeclined = true }
-                }
-            } message: {
-                Text(
-                    "Houston can show each Claude session's model, context and cost in a "
-                    + "native bar under the terminal — and blank out Claude's own status "
-                    + "line inside it.\n\nThis replaces the statusLine command in "
-                    + "~/.claude/settings.json. Your current one is backed up and can be "
-                    + "restored anytime from the sidebar's gear menu. Running sessions "
-                    + "switch over at their next response."
-                )
-            }
-            .alert("Notify when Claude needs you?", isPresented: $showNotifyPrompt) {
-                Button("Enable") {
-                    notifyInstalled = NotifyFeed.install()
-                    // Houston's consent first, then macOS's: the system
-                    // permission dialog follows straight after this one.
-                    notify.requestAuthorization { granted in
-                        if !granted && NotifyStore.canBanner { showNotifyDenied = true }
+    }
+
+    /// The three consent offers as Houston's own card (`ConsentCard`),
+    /// one at a time — the status offer first, notifications queued
+    /// behind it (see `offerConsentPrompts`), denied last.
+    @ViewBuilder
+    private var consentCards: some View {
+        ConsentLayer(isPresented: showStatusPrompt || showNotifyPrompt || showNotifyDenied) {
+            if showStatusPrompt {
+                ConsentCard(
+                    icon: "gauge",
+                    title: "Show Claude's status in Houston",
+                    message: "See each session's model, context, and cost in a bar "
+                        + "under the terminal.",
+                    footnote: "Sets statusLine in ~/.claude/settings.json. Your current "
+                        + "setting is backed up and can be restored from the gear menu.",
+                    primary: "Enable",
+                    secondary: "Not Now",
+                    onPrimary: {
+                        statusFeedInstalled = StatusLineFeed.install()
+                        showStatusPrompt = false
+                    },
+                    onSecondary: {
+                        updateSettings { $0.statusLinePromptDeclined = true }
+                        showStatusPrompt = false
                     }
-                }
-                Button("Not Now", role: .cancel) {
-                    updateSettings { $0.notifyPromptDeclined = true }
-                }
-            } message: {
-                Text(
-                    "Houston can tell you the moment a session is waiting — a "
-                    + "permission request, idle waiting for input, or a finished "
-                    + "response — with a notification, a menubar dot, and a badge "
-                    + "on the project's row. macOS will ask next whether Houston "
-                    + "may send notifications.\n\nThis adds a Houston entry to the "
-                    + "hooks in ~/.claude/settings.json. Your own hooks are left "
-                    + "untouched, and Disable removes exactly Houston's entry. "
-                    + "Sessions already running pick it up on their next turn."
+                )
+            } else if showNotifyPrompt {
+                ConsentCard(
+                    icon: "bell",
+                    title: "Get notified when Claude needs you",
+                    message: "A banner, a menu bar dot, and a badge on the project when "
+                        + "a session asks for permission, waits for input, or finishes.",
+                    footnote: "Adds one hook to ~/.claude/settings.json and leaves yours "
+                        + "untouched. macOS asks for notification permission next.",
+                    primary: "Enable",
+                    secondary: "Not Now",
+                    onPrimary: {
+                        showNotifyPrompt = false
+                        notifyInstalled = NotifyFeed.install()
+                        // Houston's consent first, then macOS's: the system
+                        // permission dialog follows straight after this one.
+                        notify.requestAuthorization { granted in
+                            if !granted && NotifyStore.canBanner { showNotifyDenied = true }
+                        }
+                    },
+                    onSecondary: {
+                        updateSettings { $0.notifyPromptDeclined = true }
+                        showNotifyPrompt = false
+                    }
+                )
+            } else if showNotifyDenied {
+                ConsentCard(
+                    icon: "bell-off",
+                    title: "Notifications are off for Houston",
+                    message: "macOS is blocking Houston's banners. The menu bar dot "
+                        + "and project badges still work.",
+                    primary: "Open Settings",
+                    secondary: "Later",
+                    onPrimary: {
+                        showNotifyDenied = false
+                        NotifyStore.openSystemNotificationSettings()
+                    },
+                    onSecondary: { showNotifyDenied = false }
                 )
             }
-            .alert("Notifications are off for Houston", isPresented: $showNotifyDenied) {
-                Button("Open System Settings") {
-                    NotifyStore.openSystemNotificationSettings()
-                }
-                Button("Later", role: .cancel) {}
-            } message: {
-                Text(
-                    "The menubar dot and sidebar badges still work, but macOS won't "
-                    + "show Houston's banners until notifications are allowed in "
-                    + "System Settings ▸ Notifications ▸ Houston."
-                )
-            }
+        }
     }
 
     /// Draggable split handle — invisible now (no line between sidebar and

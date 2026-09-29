@@ -133,15 +133,31 @@ final class ChatTitler: ObservableObject {
     /// assistant's last message ended in a question — "Yes, build it"
     /// grade, Tab drops it into the prompt for the user to send.
     static func suggestReply(context: String) async -> String? {
+        // Cached per conversation tail: the field empties and refills
+        // (type, delete, reopen the chat) far more often than the tail
+        // changes, and a re-ask made the ghost blink and sometimes flip.
+        if let cached = replyCache[context] { return cached }
+        let reply = await generateReply(context: context)
+        replyCache[context] = reply
+        if replyCache.count > 64 { replyCache.removeAll() }
+        return reply
+    }
+
+    private static var replyCache: [String: String?] = [:]
+
+    private static func generateReply(context: String) async -> String? {
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *),
               SystemLanguageModel.default.availability == .available else { return nil }
         let session = LanguageModelSession(instructions: """
-        A coding assistant just asked the user a question. Reply with \
-        ONLY the user's single most likely answer — short and direct, \
-        like "Yes, build it" or "Use the first option". Under 8 words, \
-        no quotes. Reply with nothing if the question has no obvious \
-        short answer.
+        You suggest what a user might type next to a coding assistant; it \
+        shows as dimmed ghost text in their empty message box. Look at the \
+        assistant's LAST message. If it asks the user a question or offers \
+        a concrete next step, reply with the user's single most likely \
+        short answer, like "Yes, build it", "Use the first option", or \
+        "Go ahead and add the tests". Under 8 words, no quotes. If the last \
+        message asks nothing and offers nothing (a summary, a status \
+        report, a finished answer), reply with exactly NONE.
         """)
         guard let response = try? await session.respond(
             to: "Conversation tail:\n\(context)\n\nThe user's likely reply:"
@@ -150,7 +166,9 @@ final class ChatTitler: ObservableObject {
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'"))
-        guard !text.isEmpty, text.count <= 60 else { return nil }
+        guard !text.isEmpty, text.count <= 60, !isNone(text),
+              isReplyGrounded(text, in: context)
+        else { return nil }
         return text
         #else
         return nil
@@ -159,30 +177,98 @@ final class ChatTitler: ObservableObject {
 
     /// The chat composer's ghost-text autocomplete, same on-device model.
     /// (Claude Code's own TUI autocomplete isn't exposed anywhere, so this
-    /// is Houston's equivalent, not a passthrough.)
+    /// is Houston's equivalent, not a passthrough.) Only completions that
+    /// refer to something in the conversation survive — see `isGrounded`.
     static func completeDraft(context: String, draft: String) async -> String? {
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *),
               SystemLanguageModel.default.availability == .available else { return nil }
         let session = LanguageModelSession(instructions: """
         You autocomplete a user's partially typed message to a coding \
-        assistant. Reply with ONLY the continuation of their text — do not \
-        repeat what they already typed, no quotes. Under 15 words. Reply \
-        with nothing if there is no natural continuation.
+        assistant. Only complete it when the rest of their sentence clearly \
+        refers to something already in the conversation: a file, feature, \
+        bug, option, or name mentioned there. Reply with ONLY the \
+        continuation (never repeat what they typed), no quotes, under 12 \
+        words, ending where their sentence would end. If you would have to \
+        guess, or nothing in the conversation fits, reply with exactly NONE.
         """)
         guard let response = try? await session.respond(
-            to: "Conversation context:\n\(context)\n\nPartial message:\n\(draft)"
+            to: "Conversation:\n\(context)\n\nPartial message:\n\(draft)"
         ) else { return nil }
         var text = response.content
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"“”"))
         if text.hasPrefix(draft) { text = String(text.dropFirst(draft.count)) }
-        guard !text.isEmpty, text.count <= 120 else { return nil }
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty,
+              text.count <= 100, !isNone(text),
+              isGrounded(text, draft: draft, in: context)
+        else { return nil }
         return text
         #else
         return nil
         #endif
     }
+
+    /// A suggested reply may be a bare go-ahead ("Yes, go ahead"), but any
+    /// substantive word in it must come from the agent's last message —
+    /// "Yes, make it better" under a message about autocomplete named
+    /// nothing the agent said.
+    private static func isReplyGrounded(_ reply: String, in context: String) -> Bool {
+        let lastMessage = context.components(separatedBy: "Assistant: ").last ?? context
+        let haystack = lastMessage.lowercased()
+        let content = reply.lowercased()
+            .split { !($0.isLetter || $0.isNumber || "_-.".contains($0)) }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".-")) }
+            .filter {
+                $0.count >= 4 && !groundingStopwords.contains($0)
+                    && !affirmations.contains($0)
+            }
+        return content.isEmpty || content.contains { haystack.contains($0) }
+    }
+
+    /// Words a go-ahead is made of — never evidence of anything.
+    private static let affirmations: Set<String> = [
+        "yes", "yeah", "yep", "sure", "okay", "ahead", "sounds", "perfect",
+        "please", "thanks", "thank", "that's", "works", "cool", "nice", "fine",
+        "proceed", "continue",
+    ]
+
+    private static func isNone(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            .uppercased() == "NONE"
+    }
+
+    /// Whether a completion refers to the conversation: some content word
+    /// of it (joined to the word being typed, when the caret is mid-word)
+    /// appears in the context. The model is told the same thing, but it
+    /// happily "completes" with generic filler; this is the backstop.
+    private static func isGrounded(_ completion: String, draft: String, in context: String) -> Bool {
+        let midWord = draft.last.map { !$0.isWhitespace } ?? false
+        let fragment = midWord
+            ? String(draft.split(whereSeparator: \.isWhitespace).last ?? "") : ""
+        let words = (fragment + completion).lowercased()
+            .split { !($0.isLetter || $0.isNumber || "_-.".contains($0)) }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".-")) }
+        let haystack = context.lowercased()
+        return words.contains { word in
+            word.count >= 4 && !groundingStopwords.contains(word) && haystack.contains(word)
+        }
+    }
+
+    /// Common words that appear in any conversation — matching one proves
+    /// nothing about the completion being about THIS chat.
+    private static let groundingStopwords: Set<String> = [
+        "that", "this", "with", "from", "have", "what", "when", "make", "like",
+        "just", "also", "should", "would", "could", "there", "their", "then",
+        "than", "them", "they", "your", "into", "about", "some", "more", "sure",
+        "want", "need", "please", "thanks", "okay", "going", "does", "dont",
+        "yeah", "good", "great", "maybe", "which", "where", "will", "been",
+        "were", "being", "here", "only", "over", "each", "other", "these",
+        "those", "very", "much", "many", "first", "next", "after", "before",
+        "because", "while", "again", "still", "even", "well", "back", "same",
+        "such", "both", "know", "think", "look", "work", "working", "thing",
+        "things", "right", "now", "can't", "it's", "let's", "doesn't",
+    ]
 
     #if canImport(FoundationModels)
     @available(macOS 26.0, *)

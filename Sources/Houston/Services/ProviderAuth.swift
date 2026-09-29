@@ -217,6 +217,16 @@ final class ProviderAuthStore: ObservableObject {
         )
     }
 
+    /// Install Claude Code with Anthropic's official installer, run in a
+    /// Houston terminal (the home pane) so the user watches it happen and
+    /// can answer anything it asks.
+    func installClaude() {
+        NotificationCenter.default.post(
+            name: .houstonRunLoginCommand, object: nil,
+            userInfo: ["command": "curl -fsSL https://claude.ai/install.sh | bash"]
+        )
+    }
+
     /// Retained while Google's OAuth round-trip is in flight — a running
     /// Process must be held or it deallocates under the flow.
     private var geminiAuthProcess: Process?

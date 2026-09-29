@@ -386,6 +386,16 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   thinking block, nil when a text/tool block opens or the turn ends) and
   `LiveTurnView` shows it. Any new stream state the terminal displays
   during a turn belongs in the live turn too; "Working…" alone is a bug.
+- **The live reply is ONE `MessageView`, and block pieces are keyed by
+  POSITION (2026-09-28).** Streamed text used to render in a second
+  MessageView (its own header) and jump into the first when its block
+  finished; and pieces were keyed by content hash, so every streaming
+  flush tore the tail paragraph down and rebuilt it. Both read as
+  flicker. Deltas also batch into `streamText` at ~20fps
+  (`appendStream`/`flushStream`) — per-token publishes re-rendered the
+  whole markdown message. The loader row reads `activity` (the running
+  tool in plain words, `toolActivity`) when not thinking; never a bare
+  "Working…".
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
   anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
   allowlist of the *small*-window models (`smallWindowPatterns`: Haiku, Opus

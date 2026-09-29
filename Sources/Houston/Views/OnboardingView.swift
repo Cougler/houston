@@ -414,7 +414,13 @@ private struct ConnectAIStep: View {
                 name: "Claude", plan: "Claude Pro or Max, or an Anthropic API account",
                 installed: installed["claude"], signedIn: claudeSignedIn,
                 installURL: "https://claude.com/product/claude-code",
-                installHint: "Install Claude Code"
+                installHint: "Install Claude Code",
+                install: {
+                    // The official installer, in a Houston terminal —
+                    // leave onboarding so it's on screen.
+                    onLeaveForSignIn()
+                    providerAuth.installClaude()
+                }
             ) {
                 onLeaveForSignIn()
                 providerAuth.signInClaude()
@@ -511,6 +517,9 @@ private struct ConnectProviderRow: View {
     var signedInLabel = "Signed in"
     let installURL: String
     let installHint: String
+    /// Installs in place (a Houston terminal) instead of opening
+    /// `installURL` in the browser.
+    var install: (() -> Void)? = nil
     let signIn: () -> Void
 
     var body: some View {
@@ -536,7 +545,9 @@ private struct ConnectProviderRow: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
             } else if installed == false {
-                OnbButton(installHint) { Actions.openExternal(installURL) }
+                OnbButton(installHint) {
+                    if let install { install() } else { Actions.openExternal(installURL) }
+                }
             } else {
                 OnbButton("Sign in", action: signIn)
             }

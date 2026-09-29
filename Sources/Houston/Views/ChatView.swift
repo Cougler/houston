@@ -751,7 +751,8 @@ struct ChatBrowserView: View {
             initialModel: ChatModelChoice.remembered(for: ref.filePath)
                 ?? hub.sessions[ref.filePath]?.lastModel
                 ?? .fallback(for: ref.harness),
-            ghostContext: ref.harness == .claude ? ghostContext : nil,
+            ghostContext: ghostContext,
+            replyInvited: replyInvited,
             runningSession: hub.sessions[ref.filePath],
             draftKey: ref.filePath,
             projectPath: activeProject,
@@ -1301,45 +1302,61 @@ struct ChatBrowserView: View {
         return out
     }
 
-    /// The transcript's autocomplete context: the tail of the conversation.
-    /// Non-nil ONLY while the assistant's last message ends in a question —
-    /// the ghost text (typed completion and the pre-typed suggested reply)
-    /// exists to answer a pending question, not to guess mid-thought.
+    /// The transcript's autocomplete context: the conversation's tail,
+    /// present whenever the agent spoke last. What's worth suggesting is
+    /// decided downstream (`refreshGhost` → `ChatTitler`): an empty field
+    /// only gets a reply when the agent's last message asks or offers
+    /// something, and a partial one only gets a completion that refers to
+    /// something actually in this conversation.
     private var ghostContext: String? {
-        guard let messages, let last = messages.last,
-              last.role == .assistant, Self.endsInQuestion(last)
+        guard let messages, let last = messages.last, last.role == .assistant
         else { return nil }
         var parts: [String] = []
-        let tail = Array(messages.suffix(3))
+        let tail = Array(messages.suffix(4))
         for (index, message) in tail.enumerated() {
-            for block in message.blocks {
-                if case let .text(text) = block {
-                    let role = message.role == .user ? "User" : "Assistant"
-                    // The last message clips from the END — that's where
-                    // the question lives, and it's what the ghost answers.
-                    let clipped = index == tail.count - 1
-                        ? String(text.suffix(400)) : String(text.prefix(400))
-                    parts.append("\(role): \(clipped)")
-                }
-            }
+            let text = message.blocks.compactMap { block -> String? in
+                if case let .text(t) = block { return t }
+                return nil
+            }.joined(separator: "\n")
+            guard !text.isEmpty else { continue }
+            let role = message.role == .user ? "User" : "Assistant"
+            // The agent's last message clips from the END — where its
+            // question or offer lives; earlier ones keep their opening.
+            let clipped = index == tail.count - 1
+                ? String(text.suffix(700)) : String(text.prefix(400))
+            parts.append("\(role): \(clipped)")
         }
-        let joined = parts.suffix(4).joined(separator: "\n")
+        let joined = parts.joined(separator: "\n\n")
         return joined.isEmpty ? nil : joined
     }
 
-    /// Whether a message's final text block reads as a question — trailing
-    /// markdown dressing (emphasis, quotes, parens) stripped first.
-    private static func endsInQuestion(_ message: ChatMessage) -> Bool {
-        for block in message.blocks.reversed() {
-            if case let .text(text) = block {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { continue }
-                return trimmed
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "*_`\"'“”’)] \n\t"))
-                    .hasSuffix("?")
-            }
-        }
-        return false
+    /// Whether the agent's last message is waiting on the user.
+    private var replyInvited: Bool {
+        guard let last = messages?.last, last.role == .assistant else { return false }
+        return Self.invitesReply(last)
+    }
+
+    /// A question or an offer in the message's closing paragraph — where
+    /// agents put "Want me to…?" / "I can also…". A question buried
+    /// mid-reply that the agent then answered itself doesn't count.
+    static func invitesReply(_ message: ChatMessage) -> Bool {
+        guard let text = message.blocks.reversed().lazy.compactMap({ block -> String? in
+            if case let .text(t) = block,
+               !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return t }
+            return nil
+        }).first else { return false }
+        let closing = (text.components(separatedBy: "\n\n").last ?? text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = closing.trimmingCharacters(
+            in: CharacterSet(charactersIn: "*_`\"'“”’)] \n\t"))
+        if stripped.hasSuffix("?") { return true }
+        let lower = closing.lowercased()
+        let offers = [
+            "want me to", "should i ", "shall i ", "would you like",
+            "do you want", "let me know if", "if you'd like", "if you want",
+            "i can also", "happy to", "ready when you are",
+        ]
+        return offers.contains { lower.contains($0) }
     }
 
 }
@@ -1548,6 +1565,12 @@ private struct LiveTurnView: View {
             .map { ChatThread.anchor(ofUserText: $0) != nil } ?? false
     }
 
+    private var liveReplyBlocks: [ChatMessage.Block] {
+        session.streamText.isEmpty
+            ? session.liveBlocks
+            : session.liveBlocks + [.text(session.streamText)]
+    }
+
     var body: some View {
         Group {
             // Exchanges a newer send superseded before the transcript
@@ -1566,15 +1589,13 @@ private struct LiveTurnView: View {
                     harness: harness
                 )
             }
-            if !session.liveBlocks.isEmpty, !threadTurn {
+            // ONE message for the whole live reply: finished blocks plus
+            // the text still streaming as its tail. Two views (blocks, then
+            // stream) each drew their own header, and every finished text
+            // block jumped from one to the other — the flicker.
+            if !threadTurn, !liveReplyBlocks.isEmpty {
                 MessageView(
-                    message: ChatMessage(role: .assistant, blocks: session.liveBlocks),
-                    harness: harness
-                )
-            }
-            if !session.streamText.isEmpty, !threadTurn {
-                MessageView(
-                    message: ChatMessage(role: .assistant, blocks: [.text(session.streamText)]),
+                    message: ChatMessage(role: .assistant, blocks: liveReplyBlocks),
                     harness: harness
                 )
             }
@@ -1606,7 +1627,11 @@ private struct LiveTurnView: View {
                                 + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
                                     .foregroundColor(Theme.textSecondary.opacity(0.7))
                         } else {
-                            Text("Working…")
+                            // What it's doing now: the running tool in
+                            // plain words, "Writing" while the reply
+                            // streams. Before the first event of a turn
+                            // the model is reading the prompt — thinking.
+                            Text(session.activity.map { $0 + "…" } ?? "Thinking…")
                         }
                     }
                     .font(Theme.Fonts.body)
@@ -2033,11 +2058,16 @@ private struct ChatComposer: View {
     let placeholder: String
     /// Menu selection before the user touches it — the session's harness.
     let initialModel: ChatModelChoice
-    /// Conversation tail for autocomplete — non-nil only while the
-    /// assistant's last message ended in a question; nil disables the
-    /// ghost text entirely (both typed completion and the empty-field
-    /// suggested reply).
+    /// Conversation tail for autocomplete — non-nil whenever the agent
+    /// spoke last; nil disables the ghost text entirely (both the typed
+    /// completion and the empty-field suggested reply).
     let ghostContext: String?
+    /// The agent's last message asks a question or offers a next step —
+    /// the ONLY time an empty field gets a suggested reply. Decided in
+    /// code (`ChatBrowserView.invitesReply`), never by the model: told to
+    /// answer NONE otherwise, it still suggested "Yes, make it better"
+    /// under a plain summary.
+    var replyInvited: Bool = false
     /// The chat's live session, when one exists — the send button turns
     /// into Stop while its turn runs.
     var runningSession: ChatAgentSession? = nil
@@ -2688,21 +2718,26 @@ private struct ChatComposer: View {
         ))
     }
 
-    /// Debounced on-device completion; anything typed since the request
-    /// went out invalidates the answer. An EMPTY field gets a suggested
-    /// reply to the assistant's pending question ("Yes, build it" — Tab
-    /// drops it into the prompt, Enter sends); a partial one gets the
-    /// continuation. Both exist only while ghostContext is non-nil, i.e.
-    /// the assistant actually asked something.
+    /// Debounced on-device ghost text; anything typed since the request
+    /// went out invalidates the answer. Two cases, both strict — a wrong
+    /// guess is worse than none (2026-09-29):
+    /// - EMPTY field: a suggested reply, only when the agent's last
+    ///   message asks a question or offers a next step ("Yes, build it" —
+    ///   Tab drops it in, Enter sends).
+    /// - PARTIAL draft: the rest of the sentence, only when it refers to
+    ///   something already in the conversation (a file, feature, option
+    ///   the chat named) — `ChatTitler.completeDraft` checks the
+    ///   grounding, so generic continuations never show.
     private func refreshGhost(_ text: String) {
         suggestion = ""
         ghostTask?.cancel()
         guard let ghostContext else { return }
         if text.isEmpty {
+            guard replyInvited else { return }
             ghostTask = Task {
                 try? await Task.sleep(for: .milliseconds(250))
                 // Post-send the field is empty too, but the turn is
-                // running — no suggestion for a question already answered.
+                // running — no suggestion for a message already answered.
                 // (.settling passes: that's a FINISHED turn absorbing, the
                 // moment a fresh question lands.)
                 guard !Task.isCancelled, runningSession?.phase != .working
@@ -2713,9 +2748,14 @@ private struct ChatComposer: View {
             }
             return
         }
-        guard text.count >= 3, !text.hasSuffix("\n") else { return }
+        // A finished sentence or a fresh line is the user's own thought —
+        // nothing to complete.
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 4, !text.hasSuffix("\n"),
+              let lastChar = trimmed.last, !".?!".contains(lastChar)
+        else { return }
         ghostTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
             let completed = await ChatTitler.completeDraft(
                 context: ghostContext, draft: text
@@ -3221,7 +3261,11 @@ struct MessageView: View {
 
         var id: String {
             switch self {
-            case let .block(_, block): block.id
+            // Positional, not the block's content hash: a streaming tail
+            // changes content every flush, and a content id made SwiftUI
+            // tear the paragraph down and rebuild it each time (flicker).
+            // A message's block order is stable, so the index is too.
+            case let .block(index, _): "b:\(index)"
             // Count is in the id so a live run re-renders as chips
             // stream in; expansion state is keyed by start index.
             case let .toolRun(start, run): "run:\(start):\(run.count)"
@@ -3879,8 +3923,7 @@ private struct MarkdownBlockView: View {
     private func partView(_ part: Part) -> some View {
         switch part {
         case let .paragraph(body):
-            styled(body, size: 16)
-                .lineSpacing(proseGap)
+            styled(body, size: 16, spacing: proseGap)
         case let .heading(level, body):
             styled(body, size: level <= 1 ? 20 : (level == 2 ? 18 : 16), weight: .semibold)
                 .padding(.top, 4)
@@ -3889,8 +3932,7 @@ private struct MarkdownBlockView: View {
                 Text("•")
                     .font(.system(size: 16))
                     .foregroundStyle(color.opacity(0.65))
-                styled(body, size: 16)
-                    .lineSpacing(proseGap)
+                styled(body, size: 16, spacing: proseGap)
             }
             .padding(.leading, 12 + CGFloat(indent) * 18)
         case let .numbered(indent, marker, body):
@@ -3899,8 +3941,7 @@ private struct MarkdownBlockView: View {
                     .font(.system(size: 15))
                     .monospacedDigit()
                     .foregroundStyle(color.opacity(0.65))
-                styled(body, size: 16)
-                    .lineSpacing(proseGap)
+                styled(body, size: 16, spacing: proseGap)
             }
             .padding(.leading, 12 + CGFloat(indent) * 18)
         case let .quote(body):
@@ -3908,8 +3949,7 @@ private struct MarkdownBlockView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(color.opacity(0.3))
                     .frame(width: 3)
-                styled(body, size: 15)
-                    .lineSpacing(accent ? 1 : 6)
+                styled(body, size: 15, spacing: accent ? 1 : 6)
                     .opacity(0.85)
             }
         case let .linkCard(url):
@@ -3919,9 +3959,21 @@ private struct MarkdownBlockView: View {
         }
     }
 
-    private func styled(_ body: String, size: CGFloat, weight: Font.Weight = .regular) -> some View {
-        Text(Self.inline(body, onAccent: accent))
+    /// One run of prose. `spacing` is the extra leading between lines,
+    /// set TWICE on purpose: `.lineSpacing` for SwiftUI's render, and an
+    /// AppKit paragraph style for the selection layer. Clicking selectable
+    /// text swaps in an AppKit text view that ignores `.lineSpacing` and
+    /// lays lines at its own tighter default (18pt vs SwiftUI's ~18.8 at
+    /// 16pt, measured) — the paragraph visibly collapsed on click. SwiftUI
+    /// ignores the paragraph style (also measured), so neither doubles.
+    private func styled(
+        _ body: String, size: CGFloat, weight: Font.Weight = .regular, spacing: CGFloat = 0
+    ) -> some View {
+        Text(Self.selectionStable(
+            Self.inline(body, onAccent: accent), size: size, weight: weight, spacing: spacing
+        ))
             .font(.system(size: size, weight: weight))
+            .lineSpacing(spacing)
             .foregroundStyle(color)
             .tint(accent ? color : Theme.link)
             .textSelection(.enabled)
@@ -3933,6 +3985,23 @@ private struct MarkdownBlockView: View {
             // User bubbles (accent) hug their text; assistant prose fills
             // the column.
             .frame(maxWidth: accent ? nil : .infinity, alignment: .leading)
+    }
+
+    /// Pins the AppKit line height to SwiftUI's own line metrics (ascender
+    /// − descender + leading) plus the same extra spacing, so the click-
+    /// to-select layer lays the paragraph out exactly as it was drawn.
+    private static func selectionStable(
+        _ text: AttributedString, size: CGFloat, weight: Font.Weight, spacing: CGFloat
+    ) -> AttributedString {
+        let font = NSFont.systemFont(ofSize: size, weight: weight == .semibold ? .semibold : .regular)
+        let lineHeight = font.ascender - font.descender + font.leading
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = lineHeight
+        style.maximumLineHeight = lineHeight
+        style.lineSpacing = spacing
+        var out = text
+        out.appKit.paragraphStyle = style
+        return out
     }
 
     /// Inline markdown, with bare URLs promoted to tappable links and

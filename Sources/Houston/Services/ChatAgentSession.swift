@@ -258,6 +258,16 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// bare "Thinking…" (2026-09-27). nil until the first delta lands.
     @Published private(set) var thinkingLabel: String?
     private var thinkingText = ""
+    /// What the agent is doing right now when it ISN'T thinking — the
+    /// running tool in plain words ("Reading ChatView.swift", "Running
+    /// npm test"), or "Writing" while the reply streams. The loader row
+    /// shows this; a bare "Working…" told the user nothing (2026-09-28).
+    @Published private(set) var activity: String?
+    /// Text deltas land here and reach `streamText` in ~20fps batches:
+    /// publishing per token re-rendered the whole live message (markdown
+    /// and all) dozens of times a second — the stutter and lag.
+    private var streamBuffer = ""
+    private var streamFlushScheduled = false
     /// Exchanges superseded by a newer send before the transcript
     /// re-read absorbed them — rendered ahead of the pending message so
     /// back-to-back sends never make the earlier one vanish.
@@ -426,7 +436,8 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         carryLiveTurn()
         pendingUserText = text
         liveBlocks = []
-        streamText = ""
+        resetStream()
+        activity = nil
         running = true
         ChatSessionHub.shared.noteActivity()
         // The sidebar lists chats from the on-disk index, and its only
@@ -614,7 +625,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         guard !running else { return }
         pendingUserText = nil
         liveBlocks = []
-        streamText = ""
+        resetStream()
         carriedTurns = []
         // Settling → idle is a phase change the sidebar badge reads.
         ChatSessionHub.shared.noteActivity()
@@ -627,6 +638,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 role: .user, blocks: ChatArchive.userBlocks(pending)
             ))
         }
+        flushStream()
         var blocks = liveBlocks
         if !streamText.isEmpty { blocks.append(.text(streamText)) }
         if !blocks.isEmpty {
@@ -747,15 +759,24 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             case "content_block_start":
                 // A thinking block opening shows "Thinking…" at once, before
                 // the first token estimate; any other block ends the phase.
-                let kind = (event["content_block"] as? [String: Any])?["type"] as? String
+                let block = event["content_block"] as? [String: Any]
+                let kind = block?["type"] as? String
                 thinkingTokens = kind == "thinking" ? (thinkingTokens ?? 0) : nil
                 thinkingText = ""
                 thinkingLabel = nil
+                switch kind {
+                case "tool_use":
+                    activity = Self.toolActivity(block?["name"] as? String ?? "tool", nil)
+                case "text":
+                    activity = "Writing"
+                default:
+                    break
+                }
             case "content_block_delta":
                 guard let delta = event["delta"] as? [String: Any] else { return }
                 switch delta["type"] as? String {
                 case "text_delta":
-                    if let text = delta["text"] as? String { streamText += text }
+                    if let text = delta["text"] as? String { appendStream(text) }
                 case "thinking_delta":
                     // The summary streams in; its first sentence is the
                     // live description of what this step is doing.
@@ -781,15 +802,19 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 switch block["type"] as? String {
                 case "text":
                     if let text = block["text"] as? String, !text.isEmpty {
-                        liveBlocks.append(.text(text))
+                        // One publish: the finished block replaces the
+                        // streamed copy in the same render.
+                        streamBuffer = ""
+                        var blocks = liveBlocks
+                        blocks.append(.text(text))
+                        liveBlocks = blocks
                         streamText = ""
                     }
                 case "tool_use":
                     let name = block["name"] as? String ?? "tool"
-                    liveBlocks.append(.tool(
-                        name: name,
-                        detail: Self.toolDetail(block["input"] as? [String: Any])
-                    ))
+                    let input = block["input"] as? [String: Any]
+                    liveBlocks.append(.tool(name: name, detail: Self.toolDetail(input)))
+                    activity = Self.toolActivity(name, input)
                 case "thinking":
                     // A finished thinking block becomes a step in the
                     // run (same as the transcript parser), so the
@@ -1042,15 +1067,31 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         let params = o["params"] as? [String: Any] ?? [:]
         switch method {
         case "item/agentMessage/delta":
-            if let delta = params["delta"] as? String { streamText += delta }
+            if let delta = params["delta"] as? String { appendStream(delta) }
+        case "item/started":
+            // Only the loader label reads this; chips land on completion.
+            guard let item = params["item"] as? [String: Any] else { return }
+            switch item["type"] as? String {
+            case "commandExecution":
+                activity = (item["command"] as? String).map {
+                    Self.toolActivity("Bash", ["command": $0])
+                } ?? "Running a command"
+            case "fileChange": activity = "Editing files"
+            case "agentMessage": activity = "Writing"
+            case "reasoning": activity = "Thinking"
+            case "webSearch": activity = "Searching the web"
+            case "mcpToolCall": activity = "Using \(item["tool"] as? String ?? "a tool")"
+            default: break
+            }
         case "item/completed":
             guard let item = params["item"] as? [String: Any] else { return }
             switch item["type"] as? String {
             case "agentMessage":
-                streamText = ""
+                streamBuffer = ""
                 if let text = item["text"] as? String, !text.isEmpty {
                     liveBlocks.append(.text(text))
                 }
+                streamText = ""
             case "commandExecution":
                 liveBlocks.append(.tool(
                     name: "Shell", detail: item["command"] as? String ?? ""
@@ -1339,13 +1380,19 @@ final class ChatAgentSession: ObservableObject, Identifiable {
               let update = params["update"] as? [String: Any] else { return }
         switch update["sessionUpdate"] as? String {
         case "agent_message_chunk":
-            if let text = acpChunkText(update["content"]) { streamText += text }
+            if let text = acpChunkText(update["content"]) {
+                appendStream(text)
+                activity = "Writing"
+            }
+        case "agent_thought_chunk":
+            activity = "Thinking"
         case "tool_call":
             // Flush any streamed text into a block first so tool chips land
             // in order.
             flushACPStream()
             let title = update["title"] as? String
                 ?? (update["kind"] as? String ?? "Tool")
+            activity = title
             let block = ChatMessage.Block.tool(
                 name: acpToolName(update["kind"] as? String),
                 detail: title
@@ -1415,11 +1462,12 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     }
 
     private func flushACPStream() {
+        flushStream()
         guard !streamText.isEmpty else { return }
         let block = ChatMessage.Block.text(streamText)
         liveBlocks.append(block)
         acpTurnBlocks.append(block)
-        streamText = ""
+        resetStream()
     }
 
     /// An ACP content chunk's text — `content` is a single ContentBlock
@@ -1504,6 +1552,8 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         thinkingTokens = nil
         thinkingLabel = nil
         thinkingText = ""
+        activity = nil
+        flushStream()
         currentTurnID = nil
         lastUsed = Date()
         if let error { lastError = error }
@@ -1540,6 +1590,65 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         running = false
         pendingUserText = nil
         lastError = message
+    }
+
+    /// Buffer a streamed text delta; `flushStream` publishes the batch.
+    private func appendStream(_ text: String) {
+        guard !text.isEmpty else { return }
+        streamBuffer += text
+        guard !streamFlushScheduled else { return }
+        streamFlushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            self?.flushStream()
+        }
+    }
+
+    /// Publish buffered deltas now — before anything reads `streamText`.
+    private func flushStream() {
+        streamFlushScheduled = false
+        guard !streamBuffer.isEmpty else { return }
+        streamText += streamBuffer
+        streamBuffer = ""
+    }
+
+    /// Reset the stream (a block finished, a turn began or ended).
+    private func resetStream() {
+        streamText = ""
+        streamBuffer = ""
+    }
+
+    /// A tool call in plain words for the loader row. `input` is nil when
+    /// only the name is known yet (the block just opened).
+    static func toolActivity(_ name: String, _ input: [String: Any]?) -> String {
+        func str(_ key: String) -> String? {
+            (input?[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        let file = str("file_path").map { ($0 as NSString).lastPathComponent }
+        func clip(_ s: String) -> String {
+            let line = s.split(separator: "\n").first.map(String.init) ?? s
+            return line.count > 60 ? String(line.prefix(59)) + "…" : line
+        }
+        switch name {
+        case "Read": return file.map { "Reading \($0)" } ?? "Reading a file"
+        case "Edit", "MultiEdit", "NotebookEdit":
+            return file.map { "Editing \($0)" } ?? "Editing a file"
+        case "Write": return file.map { "Writing \($0)" } ?? "Writing a file"
+        case "Bash":
+            if let d = str("description") { return clip(d) }
+            return str("command").map { "Running \(clip($0))" } ?? "Running a command"
+        case "Grep": return str("pattern").map { "Searching for \u{201C}\(clip($0))\u{201D}" } ?? "Searching the code"
+        case "Glob": return str("pattern").map { "Finding \(clip($0))" } ?? "Finding files"
+        case "WebFetch":
+            return str("url").flatMap { URL(string: $0)?.host }.map { "Reading \($0)" } ?? "Fetching a page"
+        case "WebSearch": return str("query").map { "Searching the web for \u{201C}\(clip($0))\u{201D}" } ?? "Searching the web"
+        case "Task", "Agent":
+            return str("description").map { "Agent: \(clip($0))" } ?? "Running an agent"
+        case "TodoWrite": return "Updating the plan"
+        default:
+            let detail = toolDetail(input)
+            return detail.isEmpty ? "Using \(name)" : "\(name): \(clip(detail))"
+        }
     }
 
     private static func toolDetail(_ input: [String: Any]?) -> String {
