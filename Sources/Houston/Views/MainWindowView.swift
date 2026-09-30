@@ -28,11 +28,12 @@ enum SidebarSelection: Hashable {
     }
 }
 
-/// What the right sheet can show — Git, Skills, the notification feed,
+/// What the right sheet can show — Skills, the notification feed,
 /// Tasks (which carries Reminders as its second tab), or a dev server (by
 /// `DevServer.id`). One sheet, so the panels are exclusive by construction.
 enum RightPanel: Equatable {
-    case git, skills, tasks
+    // No git (2026-09-29): git lives in the Branches workspace module.
+    case skills, tasks
     /// The server list — clicking a row pushes to that server's page.
     case servers
     case server(String)
@@ -117,8 +118,6 @@ struct MainWindowView: View {
     /// COLLAPSES instead (2026-09-22): tucked off the right edge with a
     /// small handle to bring it back.
     @State private var chatsPanelCollapsed = HoustonSettings.read().chatsPanelCollapsed
-    /// The git page pushed inside the project panel (like a server's).
-    @State private var projectPanelGit = false
     /// A server card floated beside the workspace sub-sidebar's row.
     @State private var subServerFlyoutID: String? = nil
     /// The top-bar chip whose dropdown is open (nil = none).
@@ -451,7 +450,7 @@ struct MainWindowView: View {
         // Commit watch for the bell's feed: HEAD moving on the watched
         // project's branch becomes a "Committed"/"New commits" event.
         .onChange(of: git.info) { _, info in
-            feed.noteGit(path: selection?.projectPath, info: info)
+            feed.noteGit(path: git.path, info: info)
         }
         // A project's last terminal closing (✕, ⇧⌘W, ctrl-D) lands on the
         // solar-system empty state, not a dead detail page — unless the
@@ -488,7 +487,7 @@ struct MainWindowView: View {
             }
             terminals.activeProjectPath = newValue?.projectPath
             terminals.activeTabID = newValue?.tabID
-            git.watch(newValue?.projectPath)
+            git.watch(chatTarget?.path ?? newValue?.projectPath)
             notify.markSeen(projectPath: newValue?.projectPath)
         }
         // Coming back to Houston with a flagged project on screen spends its
@@ -1302,7 +1301,7 @@ struct MainWindowView: View {
             }
         case let .chats(project):
             chatIndex.refresh(project, force: true)
-        case .git, .servers, .server, .tasks, .capsules, .chatThread:
+        case .servers, .server, .tasks, .capsules, .chatThread:
             break
         }
     }
@@ -1596,7 +1595,6 @@ struct MainWindowView: View {
 
     private var rightSheetTitle: String {
         switch effectiveRightPanel {
-        case .git: "GIT"
         case .skills: "SKILLS"
         case .servers: "SERVERS"
         case .server: "SERVER"
@@ -1693,15 +1691,6 @@ struct MainWindowView: View {
     @ViewBuilder
     private var rightSheetContent: some View {
         switch effectiveRightPanel {
-        case .git:
-            // Terminal view resolves via the selection; the workspace
-            // column's Branches section opens it from chat view, where
-            // only chatTarget knows the project.
-            if let path = selection?.projectPath ?? chatTarget?.path {
-                gitPanel(for: path)
-            } else {
-                rightSheetPlaceholder("Select a project to see its git state.")
-            }
         case .skills:
             if let path = selection?.projectPath, terminals.agents[path] != nil {
                 SkillsPanel(
@@ -1924,49 +1913,6 @@ struct MainWindowView: View {
             )
         }
         if !rightPanelDocked { closeRightPanel() }
-    }
-
-    private func gitPanel(for path: String) -> some View {
-        GitPanel(
-            info: git.info,
-            projectPath: path,
-            onInitialize: {
-                terminals.send("git init\n", to: path)
-                git.refresh()
-            },
-            onSwitchBranch: { branch in
-                // Single-quoted + control-stripped: git allows `$`, `` ` ``
-                // and parens in ref names, so a hostile repo's branch
-                // list must never reach the shell double-quoted.
-                let safe = branch.strippingTerminalControls.shellQuoted
-                terminals.send("git switch \(safe)\n", to: path)
-                git.refresh()
-            },
-            onNewBranch: {
-                guard let name = promptForText(
-                    title: "New Branch",
-                    message: "Created from the current branch and switched to.",
-                    placeholder: "feature/thing"
-                ), !name.isEmpty else { return }
-                let safe = name.strippingTerminalControls.shellQuoted
-                terminals.send("git switch -c \(safe)\n", to: path)
-                git.refresh()
-            },
-            onCommand: { command, execute in
-                if execute {
-                    terminals.send(command + "\n", to: path)
-                    git.refresh()
-                } else {
-                    // Destructive: type it and get out of the way — the
-                    // user's Return in the terminal is the confirm.
-                    terminals.send(command, to: path)
-                    if !rightPanelDocked { closeRightPanel() }
-                }
-            },
-            prompt: { promptForText(
-                title: $0, message: $1, placeholder: $2
-            ) }
-        )
     }
 
     private func rightSheetPlaceholder(_ message: String) -> some View {
@@ -2791,18 +2737,22 @@ struct MainWindowView: View {
                         .foregroundStyle(Theme.heading)
                         .padding(.leading, 8)
                     Spacer(minLength: 8)
-                    PanelControlButton(
-                        icon: "plus", help: addHelp(item),
-                        action: {
-                            // Tasks adds IN the dropdown (its input is
-                            // at the bottom), so it stays open; every
-                            // other add leaves for its surface.
-                            if item != .tasks {
-                                withAnimation(Theme.quick) { barDropdown = nil }
+                    // Branches has no "+": New Worktree lives in the
+                    // branch row's menu.
+                    if item != .branches {
+                        PanelControlButton(
+                            icon: "plus", help: addHelp(item),
+                            action: {
+                                // Tasks adds IN the dropdown (its input is
+                                // at the bottom), so it stays open; every
+                                // other add leaves for its surface.
+                                if item != .tasks {
+                                    withAnimation(Theme.quick) { barDropdown = nil }
+                                }
+                                addAction(item, path: path)
                             }
-                            addAction(item, path: path)
-                        }
-                    )
+                        )
+                    }
                     // No panel to move into while the window is too
                     // narrow for one.
                     if !workspacePanelSuppressed {
@@ -2854,19 +2804,7 @@ struct MainWindowView: View {
     private func dropdownRows(_ item: WorkspaceItem, path: String) -> some View {
         switch item {
         case .branches:
-            if let branch = BranchPeek.branch(path) {
-                SubSidebarRow(
-                    title: branch,
-                    dot: git.rowStatuses[path]?.isDirty == true
-                        ? Theme.dotDegraded : Theme.dotActive,
-                    selected: false
-                ) {
-                    withAnimation(Theme.quick) { barDropdown = nil }
-                    toggleRightPanel(.git)
-                }
-            } else {
-                dropdownEmpty("Not a git repository")
-            }
+            branchesModule(path)
         case .servers:
             let live = servers.devServers.filter { $0.cwd == path }
             if live.isEmpty {
@@ -3409,31 +3347,6 @@ struct MainWindowView: View {
 
     @ViewBuilder
     private func headerActions(for path: String) -> some View {
-        // Branch button: live git state at a glance, sheet on click.
-        Button {
-            toggleRightPanel(.git)
-        } label: {
-            HStack(spacing: 5) {
-                LucideIcon("git-branch", size: 12)
-                    .foregroundStyle(Theme.text.opacity(0.75))
-                Text(gitButtonTitle)
-                    .font(Theme.Fonts.bodyMedium)
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                if let info = git.info, info.isRepo, !info.changes.isEmpty {
-                    Circle()
-                        .fill(Theme.dotDegraded)
-                        .frame(width: 5, height: 5)
-                }
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .modifier(HeaderButtonChrome(active: rightPanel == .git))
-        .help("Git status")
-
         // The project's tasks — the queue built from the web preview's
         // "Add to Tasks", plus manual entries. Opens
         // nested under All Tasks, so Back in the sheet goes up.
@@ -3554,11 +3467,6 @@ struct MainWindowView: View {
             }
         }
         return menu
-    }
-
-    private var gitButtonTitle: String {
-        guard let info = git.info else { return "Git" }
-        return info.isRepo ? info.branchLabel : "Git"
     }
 
     private var headerTitle: String {
@@ -3779,16 +3687,26 @@ struct MainWindowView: View {
         out.append(.header("Projects"))
         let starred = store.pinnedProjects.filter { settings.starredProjects.contains($0) }
         let rest = store.pinnedProjects.filter { !settings.starredProjects.contains($0) }
-        for path in starred {
+        // A project's worktrees nest right under it, named by branch.
+        func appendProject(_ path: String) {
             out.append(.folder(path: path, name: name(of: path)))
+            for tree in git.worktrees[path] ?? []
+            where !store.pinnedProjects.contains(tree.path) {
+                out.append(.folder(path: tree.path, name: tree.label))
+            }
         }
+        for path in starred { appendProject(path) }
         if !starred.isEmpty, !rest.isEmpty {
             out.append(.divider("projects-pinned"))
         }
-        for path in rest {
-            out.append(.folder(path: path, name: name(of: path)))
-        }
+        for path in rest { appendProject(path) }
         return out
+    }
+
+    /// A worktree row nested under its project (a worktree the user
+    /// added as a project of its own stays a plain row).
+    private func isNestedWorktree(_ path: String) -> Bool {
+        !store.pinnedProjects.contains(path) && git.mainRepo(of: path) != nil
     }
 
     private func isStarred(_ path: String) -> Bool {
@@ -3897,12 +3815,12 @@ struct MainWindowView: View {
     /// grammar; the global drawers (Tasks, Servers) stay their own
     /// sheets, opened from the sidebar's top list.
     /// The project panel (2026-09-22 mock): folder + NAME header with
-    /// one circular chevron (collapse), Git/server PILLS under it, the
+    /// one circular chevron (collapse), server PILLS under it, the
     /// chat list, and "+ Chat / + Terminal" pills pinned at the bottom.
     /// Collapsed, only the header bar survives (see
     /// `collapsedProjectBar`).
     private func chatListPanel(for path: String) -> some View {
-        let onRoot = !projectPanelGit && projectPanelServer == nil
+        let onRoot = projectPanelServer == nil
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 LucideIcon("folder", size: 17)
@@ -3923,7 +3841,7 @@ struct MainWindowView: View {
             .padding(.top, 2)
             .padding(.horizontal, 4)
 
-            // Git + live server, as status pills — the panel's places to
+            // Live server(s), as status pills — the panel's places to
             // drill into, one row under the name.
             if onRoot {
                 projectStatusPills(for: path)
@@ -3935,10 +3853,7 @@ struct MainWindowView: View {
             // git) overlap in the same slot while a push runs — same
             // grammar as the sheet's own page swaps.
             ZStack(alignment: .top) {
-                if projectPanelGit {
-                    projectGitDetail(path)
-                        .transition(Self.pageChild)
-                } else if let sid = projectPanelServer {
+                if let sid = projectPanelServer {
                     projectServerDetail(sid)
                         .transition(Self.pageChild)
                 } else {
@@ -3966,7 +3881,7 @@ struct MainWindowView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// One status pill row: Git always, then each live server (or the
+    /// One status pill row: each live server (or the
     /// last known one, dimmed). Each pill pushes its page.
     private func projectStatusPills(for path: String) -> some View {
         let live = servers.devServers.filter { $0.cwd == path }
@@ -3974,12 +3889,6 @@ struct MainWindowView: View {
             ? servers.recents.first(where: { $0.projectPath == path })
             : nil
         return HStack(spacing: 10) {
-            statusPill("Git", running: true) {
-                withAnimation(sheetSpring) {
-                    projectPanelServer = nil
-                    projectPanelGit = true
-                }
-            }
             ForEach(live, id: \.id) { server in
                 statusPill(
                     "Localhost:" + String(server.port), running: true
@@ -4092,7 +4001,7 @@ struct MainWindowView: View {
     /// runs, so the bar dropdown and the card behave alike.
     private func addAction(_ item: WorkspaceItem, path: String) {
         switch item {
-        case .branches: toggleRightPanel(.git)
+        case .branches: newWorktree(from: path)
         case .servers: startProjectDevServer(path)
         case .terminals: newTerminal(in: path)
         case .chats: newChat(in: path)
@@ -4103,7 +4012,7 @@ struct MainWindowView: View {
 
     private func addHelp(_ item: WorkspaceItem) -> String {
         switch item {
-        case .branches: "Open git — branches and changes"
+        case .branches: "New worktree"
         case .servers: "Start the dev server"
         case .terminals: "Open a terminal in this project"
         case .chats: "Start a new chat"
@@ -4392,20 +4301,306 @@ struct MainWindowView: View {
     @ViewBuilder
     private func subBranchesSection(_ path: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
+            // No "+": New Worktree lives in the branch row's menu.
             SubSectionHeader(
-                title: "BRANCHES", addHelp: "Open git — branches and changes",
-                onAdd: { toggleRightPanel(.git) },
+                title: "BRANCHES", addHelp: "",
                 onMoveToBar: { moveToBar(.branches) }
             )
-            if let branch = BranchPeek.branch(path) {
-                SubSidebarRow(
-                    title: branch,
-                    dot: git.rowStatuses[path]?.isDirty == true
-                        ? Theme.dotDegraded : Theme.dotActive,
-                    selected: effectiveRightPanel == .git
-                ) { toggleRightPanel(.git) }
+            branchesModule(path)
+        }
+    }
+
+    // MARK: - Branches module (git + worktrees)
+
+    /// The Branches module's rows, the same in the bar dropdown and the
+    /// side panel card. Actions that leave the module close the dropdown.
+    private func branchesModule(_ path: String) -> some View {
+        let info = git.path == path ? git.info : nil
+        return BranchesModuleRows(
+            branch: BranchPeek.branch(path)
+                ?? (info?.isRepo == true ? info?.branchLabel : nil),
+            dirty: git.rowStatuses[path]?.isDirty == true,
+            status: info?.moduleStatus ?? "",
+            worktrees: worktreeRows(for: path),
+            onBranchMenu: { popBranchMenu(path) },
+            onInitialize: {
+                closeBarDropdown()
+                runGit("git init", in: path, execute: true)
+            },
+            onOpen: { tree in
+                closeBarDropdown()
+                openProjectChats(tree.path)
+            },
+            onMerge: { tree in
+                closeBarDropdown()
+                mergeWorktree(tree.path)
+            },
+            onRemove: { tree in
+                closeBarDropdown()
+                removeWorktree(tree.path)
+            }
+        )
+    }
+
+    /// Every other checkout of `path`'s repo: the main one first when
+    /// `path` is itself a worktree, then the linked ones.
+    private func worktreeRows(for path: String) -> [WorktreeRowModel] {
+        let repo = git.mainRepo(of: path) ?? path
+        guard let linked = git.worktrees[repo] else { return [] }
+        var rows: [WorktreeRowModel] = []
+        if repo != path {
+            rows.append(WorktreeRowModel(
+                path: repo, label: displayProjectName(repo), isMain: true,
+                dirty: git.rowStatuses[repo]?.isDirty == true
+            ))
+        }
+        for tree in linked where tree.path != path {
+            rows.append(WorktreeRowModel(
+                path: tree.path, label: tree.label, isMain: false,
+                dirty: git.rowStatuses[tree.path]?.isDirty == true
+            ))
+        }
+        return rows
+    }
+
+    private func closeBarDropdown() {
+        guard barDropdown != nil else { return }
+        withAnimation(Theme.quick) { barDropdown = nil }
+    }
+
+    /// The branch row's menu, popped at the pointer: switch branch, new
+    /// branch / worktree, worktree merge-back, then the git command
+    /// catalog, each run in the project's terminal.
+    private func popBranchMenu(_ path: String) {
+        let menu = NSMenu()
+        let info = git.path == path ? git.info : nil
+        let current = BranchPeek.branch(path)
+        if let branches = info?.branches, !branches.isEmpty {
+            for branch in branches {
+                let item = ClosureMenuItem(branch) {
+                    guard branch != current else { return }
+                    runGit(
+                        "git switch " + branch.strippingTerminalControls.shellQuoted,
+                        in: path, execute: true
+                    )
+                }
+                item.state = branch == current ? .on : .off
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+        menu.addItem(ClosureMenuItem("New Branch…") { newBranch(in: path) })
+        menu.addItem(ClosureMenuItem("New Worktree…") { newWorktree(from: path) })
+        if let repo = git.mainRepo(of: path) {
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(
+                "Merge into \(BranchPeek.branch(repo) ?? "Main") and Remove…"
+            ) { mergeWorktree(path) })
+            menu.addItem(ClosureMenuItem("Remove Worktree…") { removeWorktree(path) })
+        }
+        menu.addItem(.separator())
+        for section in gitCommandSections {
+            let sub = NSMenu()
+            for spec in section.commands {
+                sub.addItem(ClosureMenuItem(spec.title) { runGitCommand(spec, in: path) })
+            }
+            let parent = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+            parent.submenu = sub
+            menu.addItem(parent)
+        }
+        if let remote = info?.remoteURL {
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(
+                remote.contains("github.com") ? "Open on GitHub" : "Open Remote"
+            ) { Actions.openExternal(remote) })
+        }
+        if menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) {
+            closeBarDropdown()
+        }
+    }
+
+    private func runGitCommand(_ spec: GitCommandSpec, in path: String) {
+        var command = spec.command
+        if let input = spec.input {
+            guard let text = promptForText(
+                title: input.title, message: input.message,
+                placeholder: input.placeholder
+            ), !text.isEmpty else { return }
+            command = spec.filled(text)
+        }
+        runGit(command, in: path, execute: !spec.typeOnly)
+    }
+
+    /// Types a git command into the project's terminal and shows it, so
+    /// output and errors land where the user reads them. `execute: false`
+    /// only types it (destructive commands: Return is the confirm). A
+    /// project with an agent running gets a fresh tab, so the command
+    /// can't land in the agent's prompt.
+    private func runGit(_ command: String, in path: String, execute: Bool) {
+        let text = execute ? command + "\n" : command
+        if terminals.agents[path] != nil, let tab = terminals.newTab(in: path) {
+            tab.panes.first?.send(text)
+            select(.shell(path: path, tab: tab.id))
+        } else {
+            let pane = terminals.pane(for: path)
+            select(.project(path))
+            pane?.send(text)
+        }
+        git.refresh()
+    }
+
+    private func newBranch(in path: String) {
+        guard let name = promptForText(
+            title: "New Branch",
+            message: "Created from the current branch and switched to.",
+            placeholder: "feature/thing"
+        ), !name.isEmpty else { return }
+        runGit(
+            "git switch -c " + name.strippingTerminalControls.shellQuoted,
+            in: path, execute: true
+        )
+    }
+
+    /// Prompt for a branch, check it out in a sibling folder
+    /// (`<project>-<branch>`), and open a terminal there. It nests under
+    /// the project in the sidebar.
+    private func newWorktree(from path: String) {
+        let base = BranchPeek.branch(path) ?? "the current branch"
+        guard let name = promptForText(
+            title: "New Worktree",
+            message: "A second copy of the project in its own folder, on its "
+                + "own branch, so an agent can work there without touching "
+                + "this one. A new name branches off \(base); an existing "
+                + "branch is checked out.",
+            placeholder: "feature/thing"
+        ), !name.isEmpty else { return }
+        Task {
+            let result = await Task.detached {
+                GitWorktrees.create(branch: name, from: path)
+            }.value
+            switch result {
+            case let .success(dest):
+                git.refreshWorktrees()
+                select(.project(dest))
+            case let .failure(failure):
+                showGitError("Couldn't create the worktree", failure.message)
             }
         }
+    }
+
+    /// Confirm, then delete a worktree's folder (the branch is kept).
+    /// Uncommitted changes get a louder warning and a forced remove.
+    private func removeWorktree(_ tree: String) {
+        let label = GitWorktrees.branch(of: tree) ?? name(of: tree)
+        Task {
+            let dirty = await Task.detached { GitWorktrees.isDirty(tree) }.value
+            let alert = NSAlert()
+            alert.messageText = "Remove the \(label) worktree?"
+            alert.informativeText = dirty
+                ? "It has uncommitted changes. Removing it deletes them along "
+                    + "with its folder. The branch is kept."
+                : "Its folder is deleted. The branch and its commits are kept."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            leaveWorktree(tree)
+            let result = await Task.detached {
+                GitWorktrees.remove(tree, force: dirty)
+            }.value
+            if case let .failure(failure) = result {
+                showGitError("Couldn't remove the worktree", failure.message)
+            }
+            git.refreshWorktrees()
+        }
+    }
+
+    /// Merge a worktree's branch into whatever the main checkout has out,
+    /// then remove the worktree and delete the (now merged) branch.
+    /// Conflicts change nothing: the merge aborts, and the user can redo
+    /// it in a terminal to resolve them.
+    private func mergeWorktree(_ tree: String) {
+        guard let repo = GitWorktrees.mainRepo(ofWorktree: tree),
+              let branch = GitWorktrees.branch(of: tree) else {
+            showGitError(
+                "Can't merge this worktree",
+                "It isn't on a branch. Create one in its terminal first."
+            )
+            return
+        }
+        let target = GitWorktrees.branch(of: repo) ?? "the main checkout"
+        Task {
+            if await Task.detached(operation: { GitWorktrees.isDirty(tree) }).value {
+                showGitError(
+                    "Commit first",
+                    "\(branch) has uncommitted changes. Commit or stash them "
+                        + "in its terminal, then merge."
+                )
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "Merge \(branch) into \(target)?"
+            alert.informativeText = "Afterwards the worktree's folder is "
+                + "removed and the \(branch) branch deleted. If the branches "
+                + "conflict, nothing changes."
+            alert.addButton(withTitle: "Merge and Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let outcome = await Task.detached {
+                GitWorktrees.merge(branch: branch, into: repo)
+            }.value
+            switch outcome {
+            case .merged:
+                leaveWorktree(tree)
+                let removed = await Task.detached {
+                    GitWorktrees.remove(tree, force: false)
+                }.value
+                if case let .failure(failure) = removed {
+                    showGitError("Merged, but couldn't remove the worktree", failure.message)
+                } else {
+                    _ = await Task.detached {
+                        GitWorktrees.deleteMergedBranch(branch, in: repo)
+                    }.value
+                }
+                git.refreshWorktrees()
+                git.refresh()
+            case .conflicts:
+                let conflict = NSAlert()
+                conflict.messageText = "\(branch) conflicts with \(target)"
+                conflict.informativeText = "Nothing was changed. Merge in a "
+                    + "terminal to resolve the conflicts by hand (or ask an "
+                    + "agent to), then remove the worktree."
+                conflict.addButton(withTitle: "Merge in Terminal")
+                conflict.addButton(withTitle: "Cancel")
+                if conflict.runModal() == .alertFirstButtonReturn {
+                    runGit(
+                        "git merge " + branch.strippingTerminalControls.shellQuoted,
+                        in: repo, execute: true
+                    )
+                }
+            case let .failed(message):
+                showGitError("Couldn't merge", message)
+            }
+        }
+    }
+
+    /// Step off a worktree that's about to vanish: the workspace moves to
+    /// the main checkout, and its shells close (a shell in a deleted
+    /// folder is a dead end).
+    private func leaveWorktree(_ tree: String) {
+        if chatTarget?.path == tree,
+           let repo = GitWorktrees.mainRepo(ofWorktree: tree) {
+            openProjectChats(repo)
+        }
+        terminals.closePane(for: tree)
+    }
+
+    private func showGitError(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     @ViewBuilder
@@ -4566,29 +4761,6 @@ struct MainWindowView: View {
 
     private func popProjectServer() {
         withAnimation(sheetSpring) { projectPanelServer = nil }
-    }
-
-    /// The git page, pushed inside the project panel — the same content
-    /// the right sheet's Git panel renders, headed by a back chevron
-    /// (the panel's project header stays above it).
-    private func projectGitDetail(_ path: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                ControlIconButton(
-                    icon: "chevron-left",
-                    help: "Back",
-                    bare: true,
-                    circleSize: 28,
-                    action: {
-                        withAnimation(sheetSpring) { projectPanelGit = false }
-                    }
-                )
-                capsSheetTitle("GIT")
-                Spacer(minLength: 0)
-            }
-            gitPanel(for: path)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// The chats the panel lists (same filter the sidebar nesting used):
@@ -4954,12 +5126,16 @@ struct MainWindowView: View {
             let busy = chatHub.sessions.values.contains {
                 $0.projectPath == path && $0.phase != .idle
             }
+            let nested = isNestedWorktree(path)
             HStack(spacing: 9) {
                 // Every project wears an icon (2026-09-17): its own
                 // favicon/app icon when it ships one, the generic project
-                // glyph otherwise.
+                // glyph otherwise. A worktree wears the branch glyph.
                 ZStack {
-                    if let logo = ProjectLogoCache.logo(for: path) {
+                    if nested {
+                        LucideIcon("git-branch", size: 13)
+                            .foregroundStyle(Theme.textSecondary)
+                    } else if let logo = ProjectLogoCache.logo(for: path) {
                         Image(nsImage: logo)
                             .resizable()
                             .interpolation(.high)
@@ -5001,6 +5177,9 @@ struct MainWindowView: View {
                     }
                 }
             }
+            // Worktrees indent under their project; the hover chrome
+            // still spans the row.
+            .padding(.leading, nested ? 16 : 0)
             // The breathing room lives inside the row (and its hover
             // chrome), not as a gap between rows.
             .padding(.vertical, 2)
@@ -5068,7 +5247,7 @@ struct MainWindowView: View {
             let busy = chatHub.sessions.values.contains {
                 $0.projectPath == path && $0.phase != .idle
             }
-            return "f:\(folderName)|\(busy ? "w" : "-")"
+            return "f:\(folderName)|\(busy ? "w" : "-")|\(isNestedWorktree(path) ? "n" : "-")"
                 + "|\(chatOpen ? "o" : "-")|\(hovered ? "h" : "-")"
         case let .row(id, title):
             // Only what the row RENDERS rides in the key — folding in
@@ -5114,6 +5293,22 @@ struct MainWindowView: View {
                 Actions.revealInFinder(path: path)
             })
             menu.addItem(.separator())
+            if isNestedWorktree(path) {
+                let target = git.mainRepo(of: path).flatMap(BranchPeek.branch) ?? "Main"
+                menu.addItem(ClosureMenuItem("Merge into \(target) and Remove…") {
+                    mergeWorktree(path)
+                })
+                menu.addItem(ClosureMenuItem("Remove Worktree…") {
+                    removeWorktree(path)
+                })
+                return menu
+            }
+            if BranchPeek.branch(path) != nil {
+                menu.addItem(ClosureMenuItem("New Worktree…") {
+                    newWorktree(from: path)
+                })
+                menu.addItem(.separator())
+            }
             if store.pinnedProjects.contains(path) {
                 menu.addItem(ClosureMenuItem(isStarred(path) ? "Unpin" : "Pin") {
                     toggleStar(path)
@@ -5299,6 +5494,11 @@ struct MainWindowView: View {
 
     private var chatListeners: some View {
         Color.clear
+            // Git follows the workspace (the Branches module's project),
+            // falling back to a bare terminal selection.
+            .onChange(of: chatTarget?.path) { _, path in
+                git.watch(path ?? selection?.projectPath)
+            }
             // A reply paragraph's "ask about this" — open (or toggle) the
             // thread panel in the right sheet.
             .onReceive(
@@ -5376,7 +5576,13 @@ struct MainWindowView: View {
             ) { _ in toggleSidebarCollapse() }
             .onReceive(
                 NotificationCenter.default.publisher(for: .houstonToggleGitPanel)
-            ) { _ in toggleRightPanel(.git) }
+            ) { _ in
+                // The Branches module: its dropdown when it rides the bar;
+                // in the side panel it's already on screen.
+                if chatTarget != nil, !shownPanelItems.contains(.branches) {
+                    toggleBarDropdown(.branches)
+                }
+            }
             // ⌘S: the highlighted text becomes a task — in the open
             // workspace's project when there is one, else No project —
             // and the tasks menu opens to show it landed.
@@ -6395,7 +6601,8 @@ enum WorkspaceItem: String, CaseIterable {
 private struct SubSectionHeader: View {
     let title: String
     let addHelp: String
-    let onAdd: () -> Void
+    /// nil: the section has no "+".
+    var onAdd: (() -> Void)? = nil
     /// Sends this section back to the top bar.
     var onMoveToBar: (() -> Void)? = nil
 
@@ -6406,7 +6613,9 @@ private struct SubSectionHeader: View {
                 .kerning(0.8)
                 .foregroundStyle(Theme.heading)
             Spacer(minLength: 8)
-            PanelControlButton(icon: "plus", help: addHelp, action: onAdd)
+            if let onAdd {
+                PanelControlButton(icon: "plus", help: addHelp, action: onAdd)
+            }
             if let onMoveToBar {
                 PanelControlButton(
                     icon: "dock-top", help: "Move to the top bar",
@@ -6821,8 +7030,11 @@ enum BranchPeek {
         if let hit = cache[path], Date().timeIntervalSince(hit.at) < 5 {
             return hit.name.isEmpty ? nil : hit.name
         }
+        // Through the gitdir pointer: a linked worktree's `.git` is a
+        // file naming its HEAD's real home.
+        let dir = GitWorktrees.gitDir(of: path) ?? path + "/.git"
         let head = (try? String(
-            contentsOfFile: path + "/.git/HEAD", encoding: .utf8
+            contentsOfFile: dir + "/HEAD", encoding: .utf8
         )) ?? ""
         let name: String
         if head.hasPrefix("ref: refs/heads/") {
@@ -8056,7 +8268,7 @@ struct ServerRow: View {
 /// label.
 /// A quiet hover icon on a project header row — no chrome of its own, the
 /// row's hover pill is the backdrop.
-private struct RowActionIcon: View {
+struct RowActionIcon: View {
     let symbol: String
     let help: String
     /// Glyph point size; the project-header actions run larger (12, the

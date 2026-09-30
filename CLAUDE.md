@@ -246,6 +246,26 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   One session = one turn at a time: a thread question mid-turn queues
   like any held message; the tangent stays in the model's context by
   design.
+- **Git is the Branches workspace module, not a sheet (2026-09-29).** The
+  right sheet's Git panel (and its commit-detail / diff pages) is GONE;
+  `BranchesModuleRows` renders the same in both of `WorkspaceItem.branches`'
+  homes (bar dropdown, side-panel card): the current branch (click → one
+  NSMenu: switch, New Branch/Worktree, worktree merge-back, the git
+  command catalog as submenus, all typed into the project's terminal — a
+  fresh tab when an agent owns the pane), a status line, then the repo's
+  other checkouts. No "+" (New Worktree is in the branch menu and the
+  project row's right-click). **Worktrees** (`GitWorktrees`)
+  are siblings, `<project>-<branch>`, nested under their project in the
+  sidebar as `.folder` rows (indent + branch glyph) — a worktree is just a
+  path, so chats/terminals/servers all work there unchanged. Listing is
+  spawn-free (`.git/worktrees/*/gitdir` + `HEAD`, polled by
+  `GitStatusStore.worktrees`); a worktree's `.git` is a FILE, so anything
+  reading `.git/HEAD` must go through `GitWorktrees.gitDir` (BranchPeek
+  does). Create/remove/merge run `git` directly (not in a pane) so errors
+  surface in an alert; merge-back needs a clean worktree, merges into
+  whatever the main checkout has out, and ABORTS on conflict (offering to
+  redo it in a terminal) rather than leave main mid-merge. Git follows
+  the workspace (`chatTarget.path`), not just the terminal selection.
 - `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to
@@ -264,14 +284,14 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   dictionaries so fields only the skill knows survive the round trip.
   `EventFeed` is the in-memory session feed (needs-you, finished turns, due
   reminders, commits on the watched branch — HEAD moving on the *same*
-  branch, so a branch switch isn't a "commit"). Git / Skills / Reminders /
+  branch, so a branch switch isn't a "commit"). Skills / Reminders /
   Notifications (and the server page, `ServerPanel`) share one full-height
   right sheet in `MainWindowView`: the
   sheet is ONE always-mounted overlay view sliding by offset, and pinning
   just animates a width reservation in the root HStack — re-parenting it
   between overlay and layout is what made pin/unpin jump. There is NO
   click-away scrim (2026-08-25, deliberate): sheets are swappable — clicking
-  another opener (server row, Git button) swaps content in place, and
+  another opener (server row, Tasks) swaps content in place, and
   sidebar project/shell rows select without dismissing. `closeFloatingSheet`
   fires from: header gaps, the empty-state sky, the sidebar's dead space
   (`onEmptyClick`, a click hitting no row), and clicks INTO the terminal

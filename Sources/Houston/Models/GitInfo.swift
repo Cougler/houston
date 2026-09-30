@@ -42,45 +42,6 @@ struct GitCommit: Equatable, Identifiable {
     var id: String { sha }
 }
 
-/// One file touched by a commit, with its line counts (nil for binary files).
-struct GitCommitFile: Equatable, Identifiable {
-    let path: String
-    let kind: GitChange.Kind
-    let added: Int?
-    let deleted: Int?
-    var id: String { path }
-
-    var fileName: String { (path as NSString).lastPathComponent }
-    var directory: String {
-        let dir = (path as NSString).deletingLastPathComponent
-        return dir.isEmpty ? "" : dir
-    }
-}
-
-/// One line of a file diff, prefix (`+`/`-`/space) preserved for alignment.
-struct GitDiffLine: Equatable, Identifiable {
-    enum Kind: Equatable {
-        case added, removed, context, hunk, note
-    }
-
-    let id: Int
-    let kind: Kind
-    let text: String
-}
-
-/// The second page of the git panel: everything about one commit.
-struct GitCommitDetail: Equatable {
-    let sha: String
-    let subject: String
-    let body: String
-    let author: String
-    let date: String
-    let files: [GitCommitFile]
-
-    var totalAdded: Int { files.compactMap(\.added).reduce(0, +) }
-    var totalDeleted: Int { files.compactMap(\.deleted).reduce(0, +) }
-}
-
 /// Everything Houston knows about a project's git state.
 struct GitInfo: Equatable {
     let isRepo: Bool
@@ -100,17 +61,4 @@ struct GitInfo: Equatable {
         isRepo: false, branchLabel: "", branches: [], changes: [],
         hasUpstream: false, ahead: 0, behind: 0, commits: [], remoteURL: nil
     )
-
-    /// The line under the branch name — only what the section labels don't
-    /// already say (uncommitted and to-push counts live on their sections).
-    var headerSubtext: String {
-        guard isRepo else { return "" }
-        var parts: [String] = []
-        if changes.isEmpty && ahead == 0 && !commits.isEmpty && hasUpstream {
-            parts.append("everything saved to the remote")
-        }
-        if behind > 0 { parts.append("\(behind) commit\(behind == 1 ? "" : "s") to pull") }
-        if !hasUpstream && !commits.isEmpty { parts.append("no remote yet") }
-        return parts.joined(separator: " · ")
-    }
 }

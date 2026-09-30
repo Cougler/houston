@@ -202,7 +202,7 @@ enum MainMenu {
         toggleSidebar.keyEquivalent = "b"
         toggleSidebar.keyEquivalentModifierMask = [.command]
         viewMenu.addItem(toggleSidebar)
-        let gitSheet = ClosureMenuItem("Git") {
+        let gitSheet = ClosureMenuItem("Branches") {
             NotificationCenter.default.post(name: .houstonToggleGitPanel, object: nil)
         }
         gitSheet.keyEquivalent = "g"
