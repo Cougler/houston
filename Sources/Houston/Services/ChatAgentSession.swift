@@ -263,6 +263,31 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// npm test"), or "Writing" while the reply streams. The loader row
     /// shows this; a bare "Working…" told the user nothing (2026-09-28).
     @Published private(set) var activity: String?
+    /// A background shell or subagent the CLI is still running OUTSIDE a
+    /// turn (Claude only).
+    struct BackgroundTask: Equatable {
+        let id: String
+        let isAgent: Bool
+    }
+    /// Claude ends the turn (`result`) while these keep going, then starts
+    /// a NEW turn on its own when one finishes (`resumeAutonomousTurn`).
+    /// From `system/background_tasks_changed`, which always carries the
+    /// full list (verified against the live CLI 2026-10-01).
+    @Published private(set) var backgroundTasks: [BackgroundTask] = []
+    /// What a background subagent is doing right now, in the CLI's own
+    /// words (`system/task_progress`).
+    @Published private(set) var backgroundActivity: String?
+    /// A subagent is working with no turn in flight — the chat shows the
+    /// working row for it, same as the terminal's task line.
+    var hasBackgroundAgent: Bool { backgroundTasks.contains { $0.isAgent } }
+    /// A background task just finished and Claude is about to start a turn
+    /// on its own: `system/task_notification`, then the first stream event
+    /// an API round trip later. This only bridges the working row across
+    /// that gap — `running` stays the truth and comes on with the stream —
+    /// and it times out, so a notification that leads nowhere can't strand
+    /// the row.
+    @Published private(set) var turnImminent = false
+    private var imminentToken = 0
     /// Text deltas land here and reach `streamText` in ~20fps batches:
     /// publishing per token re-rendered the whole live message (markdown
     /// and all) dozens of times a second — the stutter and lag.
@@ -363,10 +388,12 @@ final class ChatAgentSession: ObservableObject, Identifiable {
     /// The agent's state, made explicit so no view has to infer it:
     /// `working` = a turn is in flight; `settling` = the turn finished but
     /// the transcript re-read hasn't absorbed it yet; `idle` = fully
-    /// caught up.
+    /// caught up. A background subagent counts as working even between
+    /// turns: its process must survive the warm-cap and TTL sweeps (both
+    /// reclaim `idle` only), and the sidebar should show the chat busy.
     enum Phase { case idle, working, settling }
     var phase: Phase {
-        if running { return .working }
+        if running || hasBackgroundAgent { return .working }
         return hasUnabsorbedTurn ? .settling : .idle
     }
 
@@ -439,6 +466,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         resetStream()
         activity = nil
         running = true
+        turnImminent = false
         ChatSessionHub.shared.noteActivity()
         // The sidebar lists chats from the on-disk index, and its only
         // unthrottled refreshes used to live in the chat view — navigate
@@ -680,6 +708,9 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         acpSessionReady = false
         threadReady = false
         running = false
+        backgroundTasks = []
+        backgroundActivity = nil
+        turnImminent = false
     }
 
     // MARK: Claude driver
@@ -750,11 +781,34 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 // The CLI's own running estimate for the open thinking
                 // block — the same number the terminal's spinner shows.
                 if let n = o["estimated_tokens"] as? Int { thinkingTokens = n }
+            case "background_tasks_changed":
+                let tasks = (o["tasks"] as? [[String: Any]] ?? []).compactMap { task in
+                    (task["task_id"] as? String).map {
+                        BackgroundTask(
+                            id: $0,
+                            isAgent: task["task_type"] as? String == "local_agent"
+                        )
+                    }
+                }
+                if tasks != backgroundTasks { backgroundTasks = tasks }
+                if !hasBackgroundAgent { backgroundActivity = nil }
+                // The sidebar's busy badge covers a working subagent too.
+                ChatSessionHub.shared.noteActivity()
+            case "task_notification":
+                if !running { expectTurn() }
+            case "task_progress":
+                if let text = o["description"] as? String, !text.isEmpty,
+                   text != backgroundActivity {
+                    backgroundActivity = text
+                }
             default:
                 break
             }
         case "stream_event":
-            guard let event = o["event"] as? [String: Any] else { return }
+            // Subagent traffic is not the reply (see "assistant" below).
+            guard o["parent_tool_use_id"] as? String == nil,
+                  let event = o["event"] as? [String: Any] else { return }
+            resumeAutonomousTurn()
             switch event["type"] as? String {
             case "content_block_start":
                 // A thinking block opening shows "Thinking…" at once, before
@@ -792,8 +846,17 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 break
             }
         case "assistant":
-            guard let message = o["message"] as? [String: Any],
+            // A subagent's messages arrive on the same stream, tagged with
+            // the Agent call that spawned it — and keep arriving after the
+            // turn's `result` when it runs in the background. They are NOT
+            // the reply: the transcript files them as sidechains, so taking
+            // them here put text in the live turn that vanished on the
+            // re-read, wiped the main reply's streaming tail, and fed a
+            // subagent's usage to the context meter (2026-10-01).
+            guard o["parent_tool_use_id"] as? String == nil,
+                  let message = o["message"] as? [String: Any],
                   let content = message["content"] as? [[String: Any]] else { return }
+            resumeAutonomousTurn()
             captureUsage(
                 message["usage"] as? [String: Any],
                 model: message["model"] as? String
@@ -1536,6 +1599,9 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 self.acpModelKey = nil
                 self.acpSessionReady = false
                 self.threadReady = false
+                self.backgroundTasks = []
+                self.backgroundActivity = nil
+                self.turnImminent = false
                 if self.running {
                     let detail = stderr.isEmpty ? "exit \(status)" : stderr
                     self.endTurn(error: self.interrupting
@@ -1545,8 +1611,40 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Claude starts turns nobody sent: a background shell or subagent
+    /// finishing re-invokes the model AFTER the turn's `result` (verified
+    /// against the live CLI 2026-10-01: result → task_notification → a
+    /// full new stream → a second result). `running` used to come on only
+    /// in `begin`, so that work streamed in with no working row, and the
+    /// absorb of the first turn (`clearTurn`, gated on `running`) wiped it
+    /// mid-flight. Any main-thread stream activity while idle is such a
+    /// turn. It continues the live exchange when that hasn't been absorbed
+    /// yet — the transcript merges it into the same reply too, since the
+    /// notification isn't a user message there.
+    private func resumeAutonomousTurn() {
+        if turnImminent { turnImminent = false }
+        guard !running else { return }
+        running = true
+        interrupting = false
+        activity = nil
+        lastUsed = Date()
+        ChatSessionHub.shared.noteActivity()
+    }
+
+    private func expectTurn() {
+        turnImminent = true
+        imminentToken += 1
+        let token = imminentToken
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard let self, self.imminentToken == token else { return }
+            self.turnImminent = false
+        }
+    }
+
     private func endTurn(error: String?) {
         running = false
+        turnImminent = false
         interrupting = false
         approval = nil
         thinkingTokens = nil

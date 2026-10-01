@@ -416,6 +416,39 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   whole markdown message. The loader row reads `activity` (the running
   tool in plain words, `toolActivity`) when not thinking; never a bare
   "Working…".
+- **Claude's stream carries more than the reply, and a `result` is not
+  the end of the work (2026-10-01, both verified against the live CLI).**
+  (1) A subagent's `assistant` messages arrive on the same stream tagged
+  `parent_tool_use_id` — also AFTER the turn's `result` when it runs in
+  the background. They're sidechains on disk, so taking them as the reply
+  put text in the live turn that vanished on the re-read, wiped the main
+  reply's streaming tail, and fed subagent usage to the context meter.
+  `handleClaude` drops anything with a parent. (2) A background shell or
+  subagent finishing makes the CLI start a turn NOBODY sent: `result` →
+  `system/task_notification` → a full new stream → a second `result`.
+  `running` came on only in `begin`, so that work streamed with no
+  working row and the first turn's absorb (`clearTurn`) wiped it
+  mid-flight — the "indicator vanished but it's still working" report.
+  `resumeAutonomousTurn` turns it back on from any main-thread stream
+  activity; `backgroundTasks` (`system/background_tasks_changed`, always
+  the full list) keeps the row up while a subagent works between turns
+  (a background SHELL gets a quiet line — it can run for hours), and
+  `turnImminent` bridges notification → first stream event. `phase` is
+  `.working` while a subagent runs, which is what keeps the warm-cap and
+  TTL sweeps from killing its process. On disk the notification isn't a
+  user message, so an autonomous turn MERGES into the previous reply:
+  the live section draws it headerless at block spacing (`extendsReply`)
+  and `committed` trims it by block (`trimmingLiveTail`).
+- **The turn-end swap must move nothing.** The live turn is replaced by
+  the re-read transcript a beat after it ends; every difference between
+  the two renders is a visible jump. So the live reply renders in the
+  parser's shape (`ChatArchive.parsedShape` — code fences split out) and
+  its step chips fold away the instant `running` drops (finished
+  transcripts are prose only), together with the working row. Tool runs
+  and markdown parts are keyed by position like the block pieces — a
+  count or content hash in the id rebuilt them on every step / flush.
+  A change to how transcripts render needs the same change in
+  `LiveTurnView`.
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
   anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
   allowlist of the *small*-window models (`smallWindowPatterns`: Haiku, Opus

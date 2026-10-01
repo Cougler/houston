@@ -478,9 +478,11 @@ struct ChatBrowserView: View {
     private func committed(
         _ parsed: [ChatMessage], _ ref: ChatSessionRef
     ) -> [ChatMessage] {
-        guard let session = hub.sessions[ref.filePath],
-              session.running,
-              let pending = session.pendingUserText else { return parsed }
+        guard let session = hub.sessions[ref.filePath], session.running
+        else { return parsed }
+        guard let pending = session.pendingUserText else {
+            return trimmingLiveTail(parsed, session)
+        }
         // Compare in parsed space: the transcript stores the message as
         // blocks — capsule/fragment markers become chips — so a raw-text
         // needle would miss any send that led with an attachment. Match
@@ -515,6 +517,36 @@ struct ChatBrowserView: View {
             }
         }
         return matches ? Array(parsed.prefix(lastUser)) : parsed
+    }
+
+    /// `committed` for an autonomous turn (`resumeAutonomousTurn`): it has
+    /// no user message to trim from — on disk its steps EXTEND the last
+    /// assistant message. Cut that message back to its last prose block
+    /// the live section isn't showing; everything after is the running
+    /// turn. Prose only: step chips are hidden in a finished transcript
+    /// and their detail strings needn't match the live ones.
+    private func trimmingLiveTail(
+        _ parsed: [ChatMessage], _ session: ChatAgentSession
+    ) -> [ChatMessage] {
+        guard let last = parsed.last, last.role == .assistant else { return parsed }
+        let live = Set(
+            ChatArchive.parsedShape(session.liveBlocks).compactMap { block -> String? in
+                if case .tool = block { return nil }
+                return block.id
+            }
+        )
+        let keep = last.blocks.lastIndex { block in
+            if case .tool = block { return false }
+            return !live.contains(block.id)
+        }.map { $0 + 1 } ?? 0
+        guard keep < last.blocks.count else { return parsed }
+        var out = parsed
+        if keep == 0 {
+            out.removeLast()
+        } else {
+            out[out.count - 1].blocks = Array(last.blocks.prefix(keep))
+        }
+        return out
     }
 
     // MARK: - Transcript
@@ -584,6 +616,7 @@ struct ChatBrowserView: View {
                                 if let session = hub.sessions[ref.filePath] {
                                     LiveTurnView(
                                         session: session, harness: ref.harness,
+                                        continuesReply: visible.last?.role == .assistant,
                                         onGrow: {
                                             // Only scroll when actually AWAY
                                             // from the bottom: at the bottom,
@@ -1242,14 +1275,24 @@ struct ChatBrowserView: View {
     private static func containsTurn(
         _ messages: [ChatMessage], for userText: String?, finalText: String?
     ) -> Bool {
-        guard let userText, !userText.isEmpty else { return !messages.isEmpty }
-        let needle = String(userText.prefix(60))
-        guard let index = messages.lastIndex(where: { message in
-            message.role == .user && message.blocks.contains { block in
-                if case let .text(text) = block { return text.contains(needle) }
-                return false
-            }
-        }) else { return false }
+        let index: Int
+        if let userText, !userText.isEmpty {
+            let needle = String(userText.prefix(60))
+            guard let found = messages.lastIndex(where: { message in
+                message.role == .user && message.blocks.contains { block in
+                    if case let .text(text) = block { return text.contains(needle) }
+                    return false
+                }
+            }) else { return false }
+            index = found
+        } else if let finalText, !finalText.isEmpty, !messages.isEmpty {
+            // An autonomous turn: no user message, and its reply extends
+            // the transcript's last message. Without this the absorb took
+            // the first read as final and wiped a tail still unflushed.
+            index = messages.count - 1
+        } else {
+            return !messages.isEmpty
+        }
         // The stream is raw markdown but the parse splits fenced code into
         // `.code` blocks — a reply ENDING in code never matched a
         // text-only search, so every such turn burned the full retry loop
@@ -1552,6 +1595,8 @@ enum ChatRowActions {
 private struct LiveTurnView: View {
     @ObservedObject var session: ChatAgentSession
     let harness: ChatHarness
+    /// The transcript above ends on an assistant reply.
+    var continuesReply = false
     /// Fired as the live turn grows — the transcript follows the stream.
     var onGrow: () -> Void = {}
     /// Fired when a turn completes — the owner re-reads the transcript.
@@ -1565,10 +1610,43 @@ private struct LiveTurnView: View {
             .map { ChatThread.anchor(ofUserText: $0) != nil } ?? false
     }
 
+    /// The live reply in the transcript parser's block shape, so the
+    /// turn-end swap to the parsed copy changes nothing on screen.
     private var liveReplyBlocks: [ChatMessage.Block] {
-        session.streamText.isEmpty
-            ? session.liveBlocks
-            : session.liveBlocks + [.text(session.streamText)]
+        ChatArchive.parsedShape(
+            session.streamText.isEmpty
+                ? session.liveBlocks
+                : session.liveBlocks + [.text(session.streamText)]
+        )
+    }
+
+    /// Carried exchanges are FINISHED turns waiting on the re-read, so
+    /// they render the way it will show them: parsed block shape, steps
+    /// folded away, a steps-only reply skipped.
+    private var carried: [ChatMessage] {
+        ChatThread.strippingExchanges(session.carriedTurns).compactMap { message in
+            guard message.role == .assistant else { return message }
+            let blocks = ChatArchive.parsedShape(message.blocks)
+            guard Self.hasProse(blocks) else { return nil }
+            return ChatMessage(id: message.id, role: .assistant, blocks: blocks)
+        }
+    }
+
+    private static func hasProse(_ blocks: [ChatMessage.Block]) -> Bool {
+        blocks.contains { block in
+            if case .tool = block { return false }
+            return true
+        }
+    }
+
+    /// The live reply picks up a reply the transcript already shows: an
+    /// autonomous turn (background work finished) after the first one was
+    /// absorbed. On disk the two are one message, so the live part draws
+    /// without a header and at block spacing — no seam now, no jump when
+    /// the re-read merges them.
+    private var extendsReply: Bool {
+        continuesReply && session.pendingUserText == nil
+            && session.carriedTurns.isEmpty
     }
 
     var body: some View {
@@ -1576,8 +1654,8 @@ private struct LiveTurnView: View {
             // Exchanges a newer send superseded before the transcript
             // caught up — without these, the earlier message vanished.
             // Thread exchanges stay out of the main flow here too.
-            ForEach(ChatThread.strippingExchanges(session.carriedTurns)) { message in
-                MessageView(message: message, harness: harness)
+            ForEach(carried) { message in
+                MessageView(message: message, harness: harness, showTools: false)
             }
             if let pending = session.pendingUserText, !threadTurn {
                 // Through userBlocks so an attached capsule shows as its
@@ -1593,11 +1671,21 @@ private struct LiveTurnView: View {
             // the text still streaming as its tail. Two views (blocks, then
             // stream) each drew their own header, and every finished text
             // block jumped from one to the other — the flicker.
-            if !threadTurn, !liveReplyBlocks.isEmpty {
+            // Steps show only while the turn runs: a finished transcript
+            // is prose only, so they fold away the moment the turn ends —
+            // together with the working row, as ONE settle — instead of
+            // seconds later when the re-read lands (the turn-end jump).
+            let replyBlocks = liveReplyBlocks
+            if !threadTurn,
+               session.running ? !replyBlocks.isEmpty : Self.hasProse(replyBlocks) {
                 MessageView(
-                    message: ChatMessage(role: .assistant, blocks: liveReplyBlocks),
-                    harness: harness
+                    message: ChatMessage(role: .assistant, blocks: replyBlocks),
+                    harness: harness,
+                    showTools: session.running,
+                    showsHeader: !extendsReply
                 )
+                // Message spacing (28) down to block spacing (12).
+                .padding(.top, extendsReply ? -16 : 0)
             }
             if let approval = session.approval {
                 ApprovalCard(
@@ -1608,18 +1696,26 @@ private struct LiveTurnView: View {
                     onDeny: { session.respond(to: approval, allow: false) }
                 )
             }
-            if session.running {
+            if session.running || session.hasBackgroundAgent || session.turnImminent {
                 // Stop lives in the composer (the send button's slot).
                 // The liquid-chrome blob is THE activity indicator — no
                 // spinner anywhere in a turn. Thinking adds the CLI's live
                 // token estimate (the terminal's "Thinking… 7.8k tokens");
                 // a long think used to read as a hang here.
+                // A background subagent keeps the row up between turns:
+                // Claude ends the turn while the agent works on, and a
+                // bare transcript there read as "done" (2026-10-01).
                 HStack(spacing: 10) {
                     LiquidThinkingView()
                         .frame(width: 56, height: 56)
                         .accessibilityHidden(true)
                     Group {
-                        if let tokens = session.thinkingTokens {
+                        if !session.running {
+                            // Between turns: the subagent's own progress
+                            // line, or the turn Claude is about to start.
+                            Text((session.backgroundActivity
+                                ?? (session.turnImminent ? "Thinking" : "Subagent working")) + "…")
+                        } else if let tokens = session.thinkingTokens {
                             // The summary's first sentence names the step
                             // ("Planning the wave physics"); the token
                             // count rides beside it as progress.
@@ -1643,6 +1739,16 @@ private struct LiveTurnView: View {
                 // Pull the blob's internal breathing room back so it sits
                 // on the row's leading edge like the spinner did.
                 .padding(.leading, -12)
+            } else if !session.backgroundTasks.isEmpty {
+                // A background shell (a build, a dev server) outliving the
+                // turn: a quiet line, not the blob — it can run for hours,
+                // and Claude picks the chat back up itself when it ends.
+                let count = session.backgroundTasks.count
+                Text(count == 1
+                    ? "1 background task running"
+                    : "\(count) background tasks running")
+                    .font(Theme.Fonts.secondary)
+                    .foregroundStyle(Theme.textSecondary)
             }
             // Held messages: sent while the turn was running, waiting their
             // turn (like the terminal's queued line). Dimmed, with a clock
@@ -3192,6 +3298,9 @@ struct MessageView: View {
     /// and drop out of finished transcripts — prose only, like the
     /// desktop apps.
     var showTools = true
+    /// Off when this message visually extends the one above it (a live
+    /// autonomous turn under the reply it will merge into on disk).
+    var showsHeader = true
     /// Threads per paragraph, keyed by the paragraph's block key — each
     /// entry is one anchor (whole paragraph or a selected run inside it)
     /// with its reply count.
@@ -3221,10 +3330,12 @@ struct MessageView: View {
             // blocks — thoughts, tool folds, and prose need air to read
             // as separate beats (8 packed them into one column of lines).
             VStack(alignment: .leading, spacing: 12) {
-                Text(harness.rawValue.uppercased())
-                    .font(Theme.Fonts.label)
-                    .kerning(0.5)
-                    .foregroundStyle(Theme.heading)
+                if showsHeader {
+                    Text(harness.rawValue.uppercased())
+                        .font(Theme.Fonts.label)
+                        .kerning(0.5)
+                        .foregroundStyle(Theme.heading)
+                }
                 blocksView
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3266,9 +3377,11 @@ struct MessageView: View {
             // tear the paragraph down and rebuild it each time (flicker).
             // A message's block order is stable, so the index is too.
             case let .block(index, _): "b:\(index)"
-            // Count is in the id so a live run re-renders as chips
-            // stream in; expansion state is keyed by start index.
-            case let .toolRun(start, run): "run:\(start):\(run.count)"
+            // Keyed by start index alone, like the expansion state. The
+            // count used to ride in the id, which tore the run's view
+            // down and rebuilt it on every new step of a live turn; the
+            // body re-renders with the new count without it.
+            case let .toolRun(start, _): "run:\(start)"
             }
         }
     }
@@ -3889,7 +4002,10 @@ private struct MarkdownBlockView: View {
     var body: some View {
         let parts = Self.parse(text)
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(parts.enumerated()), id: \.element.id) { index, part in
+            // Keyed by POSITION, same as the message's block pieces: a
+            // content id rebuilt the streaming tail paragraph on every
+            // flush, and two identical parts (repeated lines) collided.
+            ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
                 partView(part)
                     // The paragraph gap is BETWEEN parts — a trailing one
                     // padded every one-line user bubble to two lines tall.

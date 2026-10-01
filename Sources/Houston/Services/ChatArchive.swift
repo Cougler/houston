@@ -1291,7 +1291,7 @@ enum ChatArchive {
 
     /// Splits fenced code out of markdown so the view can render it as a
     /// monospace card instead of mangled inline text.
-    private static func splitMarkdown(_ text: String) -> [ChatMessage.Block] {
+    static func splitMarkdown(_ text: String) -> [ChatMessage.Block] {
         var blocks: [ChatMessage.Block] = []
         var inCode = false
         var fenceLang: String?
@@ -1318,6 +1318,18 @@ enum ChatArchive {
         }
         flush()
         return blocks
+    }
+
+    /// Live-turn blocks in the shape the parser gives the same reply once
+    /// it's on disk: text runs split around their code fences. The stream
+    /// delivers raw markdown, so a streamed code sample used to render as
+    /// fenced prose and snap into a code card when the turn-end re-read
+    /// replaced it. With the two shapes equal that swap moves nothing.
+    static func parsedShape(_ blocks: [ChatMessage.Block]) -> [ChatMessage.Block] {
+        blocks.flatMap { block -> [ChatMessage.Block] in
+            if case let .text(text) = block { return splitMarkdown(text) }
+            return [block]
+        }
     }
 
     /// Consecutive same-role lines merge into one message so a multi-part
