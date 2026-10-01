@@ -278,7 +278,10 @@ struct MainWindowView: View {
     private var contentArea: some View {
         HStack(spacing: 0) {
             detailColumn
-                .frame(maxWidth: .infinity)
+                // minWidth 0 + clip: the column yields before it can
+                // push the sidebar and sheet off the window's edges.
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .clipped()
             // The project workspace panel (2026-09-23): a floating
             // rounded canvas on the right holding whichever workspace
             // items were placed in it. No items — no panel. ALWAYS
@@ -1260,13 +1263,21 @@ struct MainWindowView: View {
     private var activeSheetWidth: CGFloat {
         guard isThreadSheet else { return rightSheetWidth }
         let half = (windowContentWidth / 2).rounded()
-        return Self.clampThreadWidth(threadSheetWidth ?? half, window: windowContentWidth)
+        return clampThreadWidth(threadSheetWidth ?? half, window: windowContentWidth)
     }
 
+    /// The narrowest the chat column is allowed to get beside a thread.
+    private static let minThreadSiblingWidth: CGFloat = 420
+
     /// Never narrower than a readable column, never so wide the chat
-    /// underneath loses its own.
-    private static func clampThreadWidth(_ width: CGFloat, window: CGFloat) -> CGFloat {
-        let upper = max(360, window - 420)
+    /// underneath loses its own. The room the thread can take is what is
+    /// left AFTER the sidebar (and its divider) — measuring against the
+    /// whole window let sidebar + thread + chat sum past the window, which
+    /// pushed everything off both edges.
+    private func clampThreadWidth(_ width: CGFloat, window: CGFloat) -> CGFloat {
+        let sidebar: CGFloat = sidebarRevealed
+            ? (sidebarCollapsed ? railWidth : sidebarWidth) : 0
+        let upper = max(360, window - sidebar - 1 - Self.minThreadSiblingWidth)
         return min(max(360, width), upper).rounded()
     }
 
@@ -1481,7 +1492,7 @@ struct MainWindowView: View {
                     .onChanged { value in
                         let start = threadDragStart ?? activeSheetWidth
                         threadDragStart = start
-                        threadSheetWidth = Self.clampThreadWidth(
+                        threadSheetWidth = clampThreadWidth(
                             start - value.translation.width, window: windowContentWidth
                         )
                     }
@@ -4118,6 +4129,24 @@ struct MainWindowView: View {
     /// Clicking a chip moves that item into the panel; the panel
     /// section's arrow sends it back here.
     private func chatHeaderBar(_ path: String) -> some View {
+        // The pill is as wide as its chips need, which can exceed the
+        // detail column (a wide thread sheet leaves it little room). An
+        // overflowing fixed-size child used to push the WHOLE window
+        // layout wider than the window — sidebar and sheet both clipped
+        // (2026-10-01). It now scrolls sideways inside its own lane,
+        // centered whenever it fits.
+        GeometryReader { geo in
+            ScrollView(.horizontal, showsIndicators: false) {
+                chatHeaderPill(path)
+                    .frame(minWidth: geo.size.width)
+            }
+        }
+        .frame(height: 40)
+        .padding(.top, 24)
+        .padding(.bottom, 2)
+    }
+
+    private func chatHeaderPill(_ path: String) -> some View {
         HStack(spacing: 14) {
             // The project name is a switcher: pick another project and
             // the whole workspace retargets to it.
@@ -4171,9 +4200,6 @@ struct MainWindowView: View {
             RoundedRectangle(cornerRadius: Theme.radiusFloat)
                 .strokeBorder(Theme.borderSidebar, lineWidth: 1)
         )
-        .frame(maxWidth: .infinity)
-        .padding(.top, 24)
-        .padding(.bottom, 2)
     }
 
     /// A workspace item's top-bar chip: icon + label (Branches and Chats
