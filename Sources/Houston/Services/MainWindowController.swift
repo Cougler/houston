@@ -96,18 +96,32 @@ private final class WindowFrameSaver: NSObject, NSWindowDelegate {
     /// lazily on the main thread the first time a field asks.
     private var fieldEditor: NoDropFieldEditor?
 
-    /// AppKit's stock field editor accepts file drags and inserts the raw
-    /// path as text — an image dropped on the composer's own text landed
-    /// as a `/var/folders/…/drop.png` line. This editor registers for NO
-    /// drag types, so the window's drop-target hit test skips it and the
-    /// drop falls through to the SwiftUI `.onDrop` beneath (the
-    /// composer's, then the root's window-wide image drop).
+    /// Covers AppKit-native fields only. SwiftUI's `TextField` (the chat
+    /// composer) ignores this and edits through its OWN
+    /// `_SystemTextFieldFieldEditor` — see `windowDidUpdate`.
     func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
         if let fieldEditor { return fieldEditor }
         let editor = NoDropFieldEditor()
         editor.isFieldEditor = true
         fieldEditor = editor
         return editor
+    }
+
+    /// An image dropped on the focused composer was swallowed: AppKit's
+    /// field editor accepts file drags and inserts the raw path as text,
+    /// so the window-wide image drop never saw it. The delegate hook above
+    /// can't stop that for a SwiftUI `TextField` — probed 2026-10-01 (macOS
+    /// 26): the first responder is SwiftUI's private
+    /// `_SystemTextFieldFieldEditor`, registered for 19 drag types, and
+    /// the delegate's editor is never used (that hook had been dead since
+    /// it was written). The editor is shared by every field in the window
+    /// and created lazily, so it's patched the first time it shows up as
+    /// first responder.
+    func windowDidUpdate(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let editor = window.firstResponder as? NSTextView,
+              editor.isFieldEditor else { return }
+        FieldEditorDropGuard.apply(to: editor)
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -129,6 +143,54 @@ private final class WindowFrameSaver: NSObject, NSWindowDelegate {
             window.frame.width, window.frame.height,
         ]
         HoustonSettings.write(s)
+    }
+}
+
+/// Makes a live field editor refuse every drag, so a drop over a focused
+/// text field falls through to the SwiftUI `.onDrop` beneath (the
+/// composer's text drop, then the root's window-wide image drop).
+/// The editor is SwiftUI's private class, so it can't be subclassed
+/// statically: a runtime subclass overrides the two registration hooks
+/// (`acceptableDragTypes` is what NSTextView registers,
+/// `updateDragTypeRegistration` re-runs on every container change, so
+/// overriding one alone gets undone) and the instance is re-classed in
+/// place. Verified in a standalone probe to stay at zero drag types
+/// through typing, selection changes and re-registration.
+@MainActor
+private enum FieldEditorDropGuard {
+    private static var subclasses: [String: AnyClass] = [:]
+    private static let suffix = "_HoustonNoDrop"
+
+    static func apply(to editor: NSTextView) {
+        // object_getClass, not type(of:): KVO may have put its own
+        // subclass in the way and that one must stay the instance's class.
+        guard let base = object_getClass(editor) else { return }
+        let baseName = String(cString: class_getName(base))
+        if baseName.hasSuffix(suffix) { return }
+        let cls: AnyClass
+        if let known = subclasses[baseName] {
+            cls = known
+        } else {
+            guard let made = objc_allocateClassPair(base, baseName + suffix, 0)
+            else { return }
+            let acceptable: @convention(block) (AnyObject) -> NSArray = { _ in NSArray() }
+            class_addMethod(
+                made, #selector(getter: NSTextView.acceptableDragTypes),
+                imp_implementationWithBlock(acceptable), "@@:"
+            )
+            let update: @convention(block) (NSTextView) -> Void = {
+                $0.unregisterDraggedTypes()
+            }
+            class_addMethod(
+                made, #selector(NSTextView.updateDragTypeRegistration),
+                imp_implementationWithBlock(update), "v@:"
+            )
+            objc_registerClassPair(made)
+            subclasses[baseName] = made
+            cls = made
+        }
+        object_setClass(editor, cls)
+        editor.unregisterDraggedTypes()
     }
 }
 
