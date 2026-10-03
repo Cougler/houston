@@ -58,6 +58,9 @@ extension Notification.Name {
     /// the `ChatPermissionMode` raw value. The composer on that session
     /// adopts it so its chip reads true.
     static let houstonChatPermissionChanged = Notification.Name("houstonChatPermissionChanged")
+    /// Focus the visible chat's composer — posted when the user clicks a
+    /// project or a chat, so they can type straight away.
+    static let houstonFocusComposer = Notification.Name("houstonFocusComposer")
 }
 
 /// The capsule shelf, persisted to

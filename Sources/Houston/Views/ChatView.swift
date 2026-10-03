@@ -2294,6 +2294,20 @@ private struct ChatComposer: View {
                     .padding(.trailing, 36)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(minHeight: attached ? 42 : 64)
+                    // The WHOLE padded area is the input: a click anywhere
+                    // on the card — the padding around the text, the empty
+                    // lines under it — focuses the field (only the inner
+                    // text well used to, so a click near the card's edge
+                    // did nothing). The send button sits above and keeps
+                    // its own click.
+                    .contentShape(Rectangle())
+                    .onTapGesture { inputFocused = true }
+                    // The cursor says so. NOT an onHover + NSCursor.set():
+                    // AppKit's cursor-rect pass resets the cursor on every
+                    // mouse move until the field is first responder, so
+                    // set() just flickered. pointerStyle is the
+                    // system-managed way.
+                    .modifier(IBeamCursor())
                 Group {
                     if let runningSession {
                         SendStopButton(
@@ -2400,6 +2414,26 @@ private struct ChatComposer: View {
         }
         .onChange(of: effort) { rememberPick() }
         .onChange(of: permission) { rememberPick() }
+        // Type-ready: a fresh composer (a project or chat just opened)
+        // takes the keyboard, a click on a project/chat row re-asserts it,
+        // and so does coming back to the window.
+        .onAppear { focusInput() }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonFocusComposer)
+        ) { _ in focusInput() }
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+        ) { note in
+            // Houston's main window only (not an alert or popover), and
+            // never over another text field the user was typing in — an
+            // activation restores that field's focus on its own.
+            guard let window = note.object as? NSWindow, window.canBecomeMain,
+                  !(window.firstResponder is NSTextView) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                guard !(window.firstResponder is NSTextView) else { return }
+                focusInput()
+            }
+        }
         // Capsule-view insert buttons route here; drags land via onDrop
         // instead.
         .onReceive(
@@ -2807,13 +2841,20 @@ private struct ChatComposer: View {
         .padding(.bottom, attached ? 0 : 8)
         .padding(.horizontal, 2)
         .frame(minHeight: attached ? nil : 58, alignment: .topLeading)
-        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
-        .onTapGesture { inputFocused = true }
-        // The whole well is a text target — cursor says so. NOT an
-        // onHover + NSCursor.set(): AppKit's cursor-rect pass resets the
-        // cursor on every mouse move until the field is first responder,
-        // so set() just flickered. pointerStyle is the system-managed way.
-        .modifier(IBeamCursor())
+    }
+
+    /// Focus the field, and keep trying: right after a click on a sidebar
+    /// row the table still holds first responder for a beat, and a focus
+    /// set into a view that isn't mounted yet (a new chat's composer) is
+    /// dropped. `inputFocused` reads the REAL focus, so a retry is a
+    /// no-op once it took.
+    private func focusInput() {
+        inputFocused = true
+        for delay in [0.1, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if !inputFocused { inputFocused = true }
+            }
+        }
     }
 
     /// A menu row that carries the native checkmark on the current pick.

@@ -449,6 +449,27 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   count or content hash in the id rebuilt them on every step / flush.
   A change to how transcripts render needs the same change in
   `LiveTurnView`.
+- **Side chrome is ONE surface: `ChromeGlass` (2026-10-02).** The left
+  sidebar, right sheet, workspace module cards and the top bar pill all
+  draw `ChromeGlass` (frosted glass + 70% `sidebarFill`; flat
+  `sidebarFill` in terminal view, the same `inTerminalView` flag the
+  sidebar uses). They had drifted apart — solid `sidebarFill` bar, lighter
+  solid `menuFill` cards, a `background`-tinted sheet — so a new side
+  surface wears `ChromeGlass`, never its own fill. `menuFill` stays for
+  dropdowns/flyouts only.
+- **The composer's whole padded area is the input, and it grabs focus on
+  its own (2026-10-02).** Tap-to-focus and the I-beam sit on the padded
+  input area, not the inner text well (clicks near the card edge did
+  nothing). `focusInput()` (with retries — a sidebar row click leaves the
+  table first responder for a beat) runs on composer appear, on
+  `.houstonFocusComposer` (posted by `openChat` / `openProjectChats`, since
+  re-clicking the open chat changes no state), and on the main window
+  becoming key — skipped when another text field already holds the
+  keyboard. Separately: SwiftUI's `TextField` edits through its OWN
+  `_SystemTextFieldFieldEditor` (19 drag types, file drags included), never
+  the window delegate's field editor, so `FieldEditorDropGuard`
+  (`MainWindowController.swift`) re-classes the live editor to a no-drop
+  runtime subclass or a focused composer swallows image drops.
 - **`contextWindow(for:)` defaults to 1M.** The `[1m]` suffix is not persisted
   anywhere on disk — only the bare model id (`claude-opus-5`). Detection is an
   allowlist of the *small*-window models (`smallWindowPatterns`: Haiku, Opus

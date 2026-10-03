@@ -1558,12 +1558,7 @@ struct MainWindowView: View {
         // Glass, same recipe as the left sidebar: the content behind the
         // floating card reads through the blur, the fill wash keeps the
         // panel's rows legible.
-        .background(
-            ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                Theme.background.opacity(0.7)
-            }
-        )
+        .background(ChromeGlass(shape: Rectangle(), flat: inTerminalView))
         // Floating: a rounded card with a hairline all the way around,
         // detached from the window edge. Docked: square and flush, part
         // of the page — a border there would read as a seam.
@@ -3747,12 +3742,18 @@ struct MainWindowView: View {
     private func openChat(project: String, file: String) {
         chatTarget = ChatTarget(path: project, sessionFile: file.isEmpty ? nil : file)
         detailShowsTerminal = false
+        // Click a chat → type immediately (a re-click on the open chat
+        // changes no state, so the composer's onAppear can't cover it).
+        NotificationCenter.default.post(name: .houstonFocusComposer, object: nil)
     }
 
     /// A project click: its chat home in the center, its chat list in the
     /// right sheet (2026-09-20 layout — chats live in the right sidebar,
     /// not nested under the project row).
     private func openProjectChats(_ path: String) {
+        // Click a project → type immediately, whether this lands on a
+        // fresh composer or the chat already open.
+        defer { NotificationCenter.default.post(name: .houstonFocusComposer, object: nil) }
         // Already inside one of this project's chats: keep it; the click
         // just summons the workspace panel.
         let entering = chatTarget?.path != path
@@ -4118,10 +4119,10 @@ struct MainWindowView: View {
         content()
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                    .fill(Theme.menuFill)
-            )
+            .background(ChromeGlass(
+                shape: RoundedRectangle(cornerRadius: Theme.radiusFloat),
+                flat: inTerminalView
+            ))
     }
 
     /// The chat view's top bar: the project title plus a labeled chip
@@ -4192,10 +4193,10 @@ struct MainWindowView: View {
         // The bar HUGS its content — just slightly wider than the text —
         // and floats centered, a pill, not a strip.
         .fixedSize(horizontal: true, vertical: false)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusFloat)
-                .fill(Theme.sidebarFill)
-        )
+        .background(ChromeGlass(
+            shape: RoundedRectangle(cornerRadius: Theme.radiusFloat),
+            flat: inTerminalView
+        ))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.radiusFloat)
                 .strokeBorder(Theme.borderSidebar, lineWidth: 1)
@@ -6002,18 +6003,7 @@ private struct SidebarSurface: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(
-                Group {
-                    if seamless {
-                        shape.fill(Theme.sidebarFill)
-                    } else {
-                        ZStack {
-                            shape.fill(.ultraThinMaterial)
-                            shape.fill(Theme.sidebarFill.opacity(0.7))
-                        }
-                    }
-                }
-            )
+            .background(ChromeGlass(shape: shape, flat: seamless))
             .clipShape(shape)
             .overlay {
                 if !seamless {

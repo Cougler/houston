@@ -573,3 +573,26 @@ struct SVGIcon: View {
         return image
     }
 }
+
+/// The ONE surface for side chrome: the left sidebar, the right sheet, the
+/// workspace panel's module cards and the project top bar. Frosted glass
+/// with a 70% `sidebarFill` wash, so the four read as the same faded,
+/// subtle color (before this, the bar was solid `sidebarFill`, the cards a
+/// lighter solid `menuFill` and the sheet a darker wash of `background`).
+/// `flat` is the terminal view's seamless mode: the page behind is the
+/// terminal's own background, so the glass gives way to a flat fill.
+struct ChromeGlass<S: Shape>: View {
+    let shape: S
+    var flat = false
+
+    var body: some View {
+        if flat {
+            shape.fill(Theme.sidebarFill)
+        } else {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Theme.sidebarFill.opacity(0.7))
+            }
+        }
+    }
+}
