@@ -3775,7 +3775,7 @@ struct MainWindowView: View {
         // force Chats into the panel every time.)
         chatIndex.refresh(path, force: true)
         // No chat needs the user but a terminal pane does ("needs you"
-        // rose wash): the workspace opens on that pane instead.
+        // pulsing ring): the workspace opens on that pane instead.
         if entering, chatTarget?.sessionFile == nil,
            let tab = attentionTab(in: path) {
             let isMain = terminals.tabs[path]?.first?.id == tab
@@ -6326,10 +6326,6 @@ struct MenuAnchorReader: NSViewRepresentable {
 private struct RowChrome: ViewModifier {
     let hovered: Bool
     let selected: Bool
-    /// "Needs you": a rose wash over the pill. Drawn here — RowChrome is the
-    /// one layer that draws row highlights — so it can never fight the
-    /// hover/selection fills.
-    var attention: Bool = false
 
     func body(content: Content) -> some View {
         content
@@ -6346,7 +6342,6 @@ private struct RowChrome: ViewModifier {
     private var fill: Color {
         if selected { return Theme.rowSelected }
         if hovered { return Theme.rowHovered }
-        if attention { return Theme.buttonActiveFill }
         return .clear
     }
 }
@@ -6362,7 +6357,8 @@ struct SidebarRow: View {
     /// The pane's agent has a turn in flight — the dot pulses amber.
     var working: Bool = false
     /// The session is waiting on the user (permission prompt, idle, or a
-    /// finished turn) — rose wash over the whole row until viewed.
+    /// finished turn) — a pulsing ring around the status dot until viewed.
+    /// (It was a wash over the whole row; the row itself stays calm now.)
     var needsAttention: Bool = false
     var hovered: Bool = false
     var selected: Bool = false
@@ -6390,9 +6386,12 @@ struct SidebarRow: View {
         HStack(spacing: 8) {
             // Every row leads with a status dot (2026-09-09, replaces the
             // terminal avatar + project glyph): gray = idle, green = shell
-            // open and ready, amber pulse = a turn in flight. Attention is
-            // still the row itself: a wash drawn by RowChrome.
-            StatusDot(state: hasTerminal ? (working ? .working : .ready) : .idle)
+            // open and ready, amber pulse = a turn in flight. Needs-you is
+            // a concentric ring pulsing around the dot.
+            StatusDot(
+                state: hasTerminal ? (working ? .working : .ready) : .idle,
+                attention: needsAttention
+            )
             if renaming {
                 InlineRenameField(
                     text: $renameDraft,
@@ -6428,9 +6427,7 @@ struct SidebarRow: View {
             }
         }
         .padding(.leading, nested ? 17 : 0)
-        .modifier(RowChrome(
-            hovered: hovered, selected: selected, attention: needsAttention
-        ))
+        .modifier(RowChrome(hovered: hovered, selected: selected))
     }
 
     private func finishRename(_ result: String?) {
@@ -6565,6 +6562,8 @@ struct StatusDot: View {
     // Not named `State` — that shadows SwiftUI's @State attribute.
     enum Kind { case idle, ready, working }
     let state: Kind
+    /// Waiting on the user: a ring pulses around the dot.
+    var attention = false
 
     @SwiftUI.State private var dimmed = false
 
@@ -6582,7 +6581,12 @@ struct StatusDot: View {
             )
             .onAppear { dimmed = state == .working }
             .onChange(of: state) { _, now in dimmed = now == .working }
-            .help(help)
+            // After the opacity/animation above, so the ring never dims
+            // with a working dot's own pulse.
+            .overlay {
+                if attention { AttentionRing() }
+            }
+            .help(attention ? "Needs you" : help)
     }
 
     private var color: Color {
@@ -6599,6 +6603,30 @@ struct StatusDot: View {
         case .ready: "Terminal open"
         case .working: "Working…"
         }
+    }
+}
+
+/// The "needs you" cue: a ring concentric with the status dot that
+/// breathes outward and fades, on a loop, in the brand accent. Its own
+/// view so the loop starts when the ring appears and stops when it goes.
+/// Reduce Motion gets a still ring.
+private struct AttentionRing: View {
+    @SwiftUI.State private var pulsing = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Circle()
+            .strokeBorder(Theme.buttonActiveStroke, lineWidth: 1.5)
+            .frame(width: 14, height: 14)
+            .scaleEffect(pulsing ? 1 : 0.62)
+            .opacity(pulsing ? 0.1 : 1)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeOut(duration: 1.3).repeatForever(autoreverses: false)) {
+                    pulsing = true
+                }
+            }
+            .allowsHitTesting(false)
     }
 }
 
