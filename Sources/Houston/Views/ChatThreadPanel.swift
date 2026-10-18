@@ -271,6 +271,19 @@ struct ChatThreadTarget: Equatable, Hashable {
     let file: String
     let harnessRaw: String
     let anchor: String
+    /// Terminal threads (`TerminalThreadStore`): the pane session this
+    /// thread forks from — `file` is the fork's transcript, which may not
+    /// exist until the first send. nil for a chat thread.
+    var forkOf: String? = nil
+    /// The pane's model (provider id + display name), so the fork answers
+    /// on what the terminal runs rather than the chat default.
+    var modelArg: String? = nil
+    var modelLabel: String? = nil
+
+    var isTerminalThread: Bool { forkOf != nil }
+    var preferredModel: ChatModelChoice? {
+        modelArg.map { ChatModelChoice(label: modelLabel ?? $0, harness: .claude, arg: $0) }
+    }
 
     var harness: ChatHarness { ChatHarness(rawValue: harnessRaw) ?? .claude }
     var ref: ChatSessionRef {
@@ -310,9 +323,13 @@ struct ChatThreadPanel: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         anchorQuote
-                        if exchanges.isEmpty, hub.sessions[target.file] == nil {
-                            Text("Ask about this part — the answer lands here, "
-                                + "and the main conversation stays put.")
+                        if exchanges.isEmpty, !(hub.sessions[target.file]?.hasLiveContent ?? false) {
+                            Text(target.isTerminalThread
+                                ? "Ask about this. A fork of the terminal's session "
+                                    + "answers here, with everything it knows so far, "
+                                    + "and the terminal itself stays put."
+                                : "Ask about this part — the answer lands here, "
+                                    + "and the main conversation stays put.")
                                 .font(Theme.Fonts.secondary)
                                 .foregroundStyle(Theme.textSecondary)
                         }
@@ -327,6 +344,7 @@ struct ChatThreadPanel: View {
                                 session: session,
                                 anchor: target.anchor,
                                 harness: target.harness,
+                                showsApproval: target.isTerminalThread,
                                 onGrow: {
                                     proxy.scrollTo("thread-bottom", anchor: .bottom)
                                 },
@@ -343,7 +361,24 @@ struct ChatThreadPanel: View {
             }
             composer
         }
-        .task(id: target.file + "|" + target.anchor) { reload() }
+        .task(id: target.file + "|" + target.anchor) {
+            reload()
+            // A terminal thread boots its fork on open, like a chat
+            // prewarms — the fork load is the slow part, not the reply.
+            if target.isTerminalThread {
+                let session = threadSession()
+                session.warmUp(model: model(for: session))
+            }
+        }
+    }
+
+    private func threadSession() -> ChatAgentSession {
+        hub.session(for: target.ref, project: target.project, forkOf: target.forkOf)
+    }
+
+    private func model(for session: ChatAgentSession) -> ChatModelChoice {
+        session.lastModel ?? target.preferredModel
+            ?? ChatModelChoice.fallback(for: target.harness)
     }
 
     /// The paragraph this thread hangs off — a quote card with the rose bar.
@@ -353,10 +388,10 @@ struct ChatThreadPanel: View {
                 .fill(Theme.buttonActiveStroke)
                 .frame(width: 3)
             Text(target.anchor)
-                .font(.system(size: 12))
+                .font(target.isTerminalThread ? Theme.Fonts.monoSmall : .system(size: 12))
                 .lineSpacing(2)
                 .foregroundStyle(Theme.textSecondary)
-                .lineLimit(4)
+                .lineLimit(target.isTerminalThread ? 12 : 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -406,11 +441,10 @@ struct ChatThreadPanel: View {
         let q = trimmedQuestion
         guard !q.isEmpty else { return }
         question = ""
-        let session = hub.session(for: target.ref, project: target.project)
+        let session = threadSession()
         session.send(
             text: ChatThread.compose(anchor: target.anchor, question: q),
-            model: session.lastModel
-                ?? ChatModelChoice.fallback(for: target.harness)
+            model: model(for: session)
         )
     }
 
@@ -437,6 +471,9 @@ private struct ThreadLiveSection: View {
     @ObservedObject var session: ChatAgentSession
     let anchor: String
     let harness: ChatHarness
+    /// Terminal threads have no main view to answer permission prompts
+    /// in — the card renders here. Chat threads leave it to the chat.
+    var showsApproval = false
     var onGrow: () -> Void = {}
     let onTurnEnd: () -> Void
 
@@ -474,6 +511,15 @@ private struct ThreadLiveSection: View {
                         harness: harness
                     )
                 }
+                if showsApproval, let approval = session.approval {
+                    ApprovalCard(
+                        request: approval,
+                        onAllow: { session.respond(to: approval, allow: true) },
+                        onAuto: session.canSwitchToAuto
+                            ? { session.allowAndSwitchToAuto(approval) } : nil,
+                        onDeny: { session.respond(to: approval, allow: false) }
+                    )
+                }
                 if session.running {
                     // Same indicator as the main live turn: the liquid
                     // blob, plus the thinking token count when the model
@@ -502,6 +548,7 @@ private struct ThreadLiveSection: View {
             }
         }
         .onChange(of: session.streamText) { _, _ in onGrow() }
+        .onChange(of: session.approval != nil) { onGrow() }
         .onChange(of: session.running) { was, running in
             guard was, !running else { return }
             onTurnEnd()

@@ -34,6 +34,33 @@ final class HoustonTerminalView: AppTerminalView {
         NSMenu.popUpContextMenu(contextMenu, with: event, for: self)
     }
 
+    /// The pane's selected text, or nil without one. libghostty exposes
+    /// the selection only through the package's internals, but its copy
+    /// action writes the pasteboard synchronously — so this copies with
+    /// the pasteboard deep-copied and restored around it, like
+    /// `ChatThread.capturedSelection` does for SwiftUI text.
+    func selectedText() -> String? {
+        let pasteboard = NSPasteboard.general
+        let saved: [NSPasteboardItem] = (pasteboard.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
+        let before = pasteboard.changeCount
+        guard copySelectedTextToPasteboard(), pasteboard.changeCount != before
+        else { return nil }
+        let text = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        if !saved.isEmpty { pasteboard.writeObjects(saved) }
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return text
+    }
+
     override func mouseDown(with event: NSEvent) {
         // Clicking into the terminal counts as "outside" the right sheet —
         // ghostty consumes the click, so the dismiss rides a notification.

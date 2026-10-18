@@ -881,10 +881,10 @@ struct MainWindowView: View {
     private let railWidth: CGFloat = 52
 
     /// The collapsed sidebar, mirroring the expanded layout (2026-09-16):
-    /// the top list (New Chat, New Terminal, Tasks, Servers — same
-    /// actions, Servers opens the right sheet, not a flyout) above the
-    /// rule, then the table's sections (Terminals, Projects) as flyout
-    /// buttons below it.
+    /// the top list (New Chat, New Terminal, Servers — the same actions
+    /// and glyphs; Servers opens the same flyout card) above the rule,
+    /// then the table's sections (Terminals, Projects) as flyout buttons
+    /// below it.
     private var railColumn: some View {
         VStack(spacing: 6) {
             // Expand lives in the fixed `collapseToggleLayer` beside the
@@ -915,27 +915,17 @@ struct MainWindowView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             .modifier(railTipHover(.newTerminal))
+            // Tasks lives in the titlebar strip in both states (no rail
+            // button — the expanded list has none either). Servers opens
+            // the SAME flyout card the expanded row does, anchored to this
+            // button through the shared "servers" anchor (2026-10-18).
             RailButton(
                 help: "",
-                active: rightPanel == .tasks,
-                action: { openAllTasks() }
-            ) {
-                LucideIcon("list-checks", size: 15)
-                    .foregroundStyle(Theme.textSecondary)
-                    .overlay(alignment: .topTrailing) {
-                        if tracked.attentionCount > 0 {
-                            Circle()
-                                .fill(Theme.dotDegraded)
-                                .frame(width: 5, height: 5)
-                                .offset(x: 4, y: -3)
-                        }
-                    }
-            }
-            .modifier(railTipHover(.tasks))
-            RailButton(
-                help: "",
-                active: rightPanel == .servers,
-                action: { toggleRightPanel(.servers) }
+                active: serversPopoverShown,
+                action: {
+                    popoverServerID = nil
+                    serversPopoverShown.toggle()
+                }
             ) {
                 // Same quiet language as the expanded row: neutral glyph,
                 // the count riding its corner in plain gray.
@@ -951,6 +941,9 @@ struct MainWindowView: View {
                     }
             }
             .modifier(railTipHover(.servers))
+            .anchorPreference(key: SidebarFlyoutAnchorKey.self, value: .bounds) {
+                ["servers": $0]
+            }
             // Same short rule as the expanded footer, centered on the rail.
             Rectangle()
                 .fill(Theme.borderSidebar)
@@ -1319,6 +1312,43 @@ struct MainWindowView: View {
 
     private func closeRightPanel() {
         withAnimation(sheetSpring) { rightPanel = nil }
+    }
+
+    /// Open (never toggle closed) the thread for a terminal selection.
+    /// The pane's session comes from the statusline feed (exact, per
+    /// pane) or the active-session scan (by cwd); without one there's
+    /// nothing to fork, so say so instead of opening an empty sheet.
+    private func openTerminalThread(paneID: String, project: String, selection: String) {
+        guard let source = TerminalThreadStore.source(
+            paneID: paneID, project: project,
+            statusLines: statusFeed.snapshots, active: store.sessions
+        ) else {
+            let alert = NSAlert()
+            alert.messageText = "No Claude session in this terminal"
+            alert.informativeText = "A thread forks the pane's running Claude "
+                + "session. Start claude in this terminal first, then select "
+                + "text and ask about it."
+            alert.runModal()
+            return
+        }
+        let anchor = TerminalThreadStore.anchor(forSelection: selection)
+        guard !anchor.isEmpty else { NSSound.beep(); return }
+        let registry = TerminalThreadStore.shared
+        let forkID = registry.forkID(source: source.sessionID, anchor: anchor)
+            ?? UUID().uuidString.lowercased()
+        registry.register(
+            forkID: forkID, project: project, source: source.sessionID, anchor: anchor
+        )
+        let file = ChatArchive.claudeProjectDir(for: project) + "/" + forkID + ".jsonl"
+        let target = ChatThreadTarget(
+            project: project, file: file,
+            harnessRaw: ChatHarness.claude.rawValue, anchor: anchor,
+            forkOf: source.sessionID,
+            modelArg: source.modelID, modelLabel: source.modelName
+        )
+        if rightPanel != .chatThread(target) {
+            toggleRightPanel(.chatThread(target))
+        }
     }
 
     /// Every pin toggle goes through here so the choice persists — the
@@ -1935,7 +1965,8 @@ struct MainWindowView: View {
     /// (they share the slot beside the rail).
     @ViewBuilder
     private var railTipLayer: some View {
-        if sidebarCollapsed, railPopover == nil, let tip = railTip {
+        if sidebarCollapsed, railPopover == nil, !serversPopoverShown,
+           let tip = railTip {
             TipCard(text: tip.label)
                 .offset(x: railWidth + 8, y: railTipTop(tip))
                 .allowsHitTesting(false)
@@ -1945,11 +1976,11 @@ struct MainWindowView: View {
 
     /// Vertical center of a rail row's tooltip: the rows stack from the
     /// panel top in 36pt steps (30pt button + 6 spacing), with the rule
-    /// block (5pt + 6 spacing) between the top quartet and the sections;
+    /// block (5pt + 6 spacing) between the top trio and the sections;
     /// the ~23pt tip card centers on the 30pt button.
     private func railTipTop(_ tip: RailTipItem) -> CGFloat {
         let rowTop = sidebarTuckTop + 14 + tip.row * 36
-            + (tip.row >= 4 ? 11 : 0)
+            + (tip.row >= 3 ? 11 : 0)
         return rowTop + 3
     }
 
@@ -1969,15 +2000,15 @@ struct MainWindowView: View {
     private func flyoutTop(for section: RailSection) -> CGFloat {
         let index: CGFloat = switch section {
         case .terminals: 0
-        // Servers opens the right sheet now, not a flyout — the case
-        // exists only for exhaustiveness.
+        // Servers opens the shared servers flyout (`serversFlyoutLayer`),
+        // not a rail popover — the case exists only for exhaustiveness.
         case .servers: 0
         case .projects: 1
         }
-        // Panel top + inner padding (14), then the top quartet (four 30pt
+        // Panel top + inner padding (14), then the top trio (three 30pt
         // buttons + 6pt spacings) and the rule block (5pt + 6 spacing)
         // sit above the first flyout button; each further row is 36pt.
-        return sidebarTuckTop + 14 + 4 * 36 + 11 + index * 36
+        return sidebarTuckTop + 14 + 3 * 36 + 11 + index * 36
     }
 
     @ViewBuilder
@@ -2005,6 +2036,8 @@ struct MainWindowView: View {
         guard collapsed != sidebarCollapsed || collapsed != sidebarTopTucked
         else { return }
         railPopover = nil
+        serversPopoverShown = false
+        popoverServerID = nil
         collapseStageSeq += 1
         let seq = collapseStageSeq
         updateSettings { $0.sidebarCollapsed = collapsed }
@@ -5541,6 +5574,26 @@ struct MainWindowView: View {
                     harnessRaw: harness, anchor: anchor
                 )))
             }
+            // A terminal pane's selection → a thread answered by a fork
+            // of the pane's Claude session (`TerminalThreadStore`).
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonOpenTerminalThread)
+            ) { note in
+                guard let info = note.userInfo,
+                      let paneID = info["paneID"] as? String,
+                      let project = info["project"] as? String,
+                      let selection = info["selection"] as? String else { return }
+                openTerminalThread(paneID: paneID, project: project, selection: selection)
+            }
+            // Edit ▸ Ask About Selection with a terminal focused: the
+            // transcript view ignores it, the terminal manager threads it.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .houstonAskSelection)
+            ) { _ in
+                if NSApp.keyWindow?.firstResponder is HoustonTerminalView {
+                    TerminalSessionManager.shared.askAboutFocusedSelection()
+                }
+            }
             // A chat continued under a new transcript file (context
             // rollover, cross-harness transplant): follow it, so the
             // sidebar highlight and the seal-protection don't point at
@@ -5783,13 +5836,12 @@ private enum RailSection: String, Identifiable {
 /// One rail row for the instant-tooltip layer: label + position in the
 /// rail's stack (the rule sits between rows 2 and 3).
 private enum RailTipItem: Equatable {
-    case newChat, newTerminal, tasks, servers, terminals, projects
+    case newChat, newTerminal, servers, terminals, projects
 
     var label: String {
         switch self {
         case .newChat: "New Chat"
         case .newTerminal: "New Terminal"
-        case .tasks: "Tasks"
         case .servers: "Servers"
         case .terminals: "Terminals"
         case .projects: "Projects"
@@ -5800,10 +5852,9 @@ private enum RailTipItem: Equatable {
         switch self {
         case .newChat: 0
         case .newTerminal: 1
-        case .tasks: 2
-        case .servers: 3
-        case .terminals: 4
-        case .projects: 5
+        case .servers: 2
+        case .terminals: 3
+        case .projects: 4
         }
     }
 }

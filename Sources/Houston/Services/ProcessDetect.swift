@@ -45,7 +45,11 @@ enum ProcessDetect {
                         ?? jsonl.flatMap { fileMtimeMs(path: $0) },
                     isHoustonOwned: ProcScan.isDescendant(
                         p.pid, of: ProcessInfo.processInfo.processIdentifier, in: procs
-                    )
+                    ),
+                    sessionId: jsonl.map {
+                        (($0 as NSString).lastPathComponent as NSString).deletingPathExtension
+                    } ?? sessionFile?.sessionId,
+                    transcriptPath: jsonl
                 )
             )
         }

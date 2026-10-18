@@ -548,6 +548,15 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"
         )
         menu.addItem(.separator())
+        // Terminal threads: the selection becomes a side question answered
+        // by a fork of the pane's Claude session, in the right sheet.
+        let ask = ClosureMenuItem("Ask About Selection") { [weak self] in
+            self?.askAboutSelection(path: path)
+        }
+        ask.keyEquivalent = "a"
+        ask.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(ask)
+        menu.addItem(.separator())
         let right = ClosureMenuItem("Split Right") { [weak self] in
             self?.split(path: path, vertical: true)
         }
@@ -582,6 +591,38 @@ final class TerminalSessionManager: NSObject, ObservableObject {
             return displayed
         }
         return list.first
+    }
+
+    /// Thread the focused pane's selection (context menu, or Edit ▸ Ask
+    /// About Selection with a terminal focused). Beeps without one; the
+    /// window resolves the pane's Claude session and opens the sheet.
+    func askAboutSelection(path: String) {
+        guard let pane = actionPane(in: path) else { NSSound.beep(); return }
+        thread(selectionOf: pane)
+    }
+
+    /// The Edit-menu path: whichever pane holds keyboard focus, in any
+    /// project. False when focus isn't in a terminal.
+    @discardableResult
+    func askAboutFocusedSelection() -> Bool {
+        guard let responder = paneContainer.window?.firstResponder as? NSView,
+              let pane = tabs.values.lazy.flatMap({ $0 }).flatMap(\.panes).first(where: {
+                  responder === $0.view || responder.isDescendant(of: $0.view)
+              }) else { return false }
+        thread(selectionOf: pane)
+        return true
+    }
+
+    private func thread(selectionOf pane: TerminalPane) {
+        guard let text = pane.view.selectedText() else { NSSound.beep(); return }
+        NotificationCenter.default.post(
+            name: .houstonOpenTerminalThread, object: nil,
+            userInfo: [
+                "paneID": pane.id.uuidString,
+                "project": pane.projectPath,
+                "selection": text,
+            ]
+        )
     }
 
     /// The pane within that tab: the one holding keyboard focus, else the

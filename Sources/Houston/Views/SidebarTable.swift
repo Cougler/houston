@@ -411,15 +411,69 @@ private final class HoverTableView: NSTableView {
     /// The second click of a double click on a row.
     var onRowDoubleClick: ((Int) -> Void)?
     private var tracking: NSTrackingArea?
+    private var moveMonitor: Any?
 
-    override func mouseDown(with event: NSEvent) {
-        // super runs the selection tracking loop first; the click callback
-        // fires after, so it sees the settled selection.
-        super.mouseDown(with: event)
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        if row >= 0 { onRowClick?(row) } else { onEmptyClick?() }
-        if event.clickCount == 2, row >= 0 { onRowDoubleClick?(row) }
+    /// Hover follows the LIVE pointer, not AppKit's cached tracking rect
+    /// (2026-10-18). The `.inVisibleRect` area below is only re-registered
+    /// when the TABLE's frame changes — and once the list is at least as
+    /// tall as the clip, the table is content-sized, so a window resize
+    /// moves the clip (SwiftUI lays the host out after AppKit's own resize
+    /// pass) without touching the table. The area kept its old window-space
+    /// rect: rows that slid out of it — the bottom ones, in a shorter
+    /// window — got no mouseMoved, while clicks (hit-tested live) still
+    /// landed. "Hover works at one height, not another." Two guards: the
+    /// area is re-registered whenever the clip or scroll view's geometry
+    /// changes, and a local mouseMoved monitor derives the row from a live
+    /// hit-test — which also keeps hover OFF under a flyout or sheet that
+    /// covers the rows, something the tracking area never knew about.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let moveMonitor { NSEvent.removeMonitor(moveMonitor) }
+        moveMonitor = nil
+        guard window != nil else { return }
+        moveMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            self?.pointerMoved(event)
+            return event
+        }
+    }
+
+    /// The views whose geometry we watch — removed one by one, never via
+    /// `removeObserver(self)`: that also strips NSTableView's OWN clip-view
+    /// observers, and the table then never resizes its column to the
+    /// scroll view (every label truncated at the column's creation width).
+    private var geometryObserved: [NSView] = []
+    private static let geometryNames: [Notification.Name] = [
+        NSView.boundsDidChangeNotification, NSView.frameDidChangeNotification,
+    ]
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        let center = NotificationCenter.default
+        for view in geometryObserved {
+            for name in Self.geometryNames {
+                center.removeObserver(self, name: name, object: view)
+            }
+        }
+        geometryObserved = []
+        guard let clip = superview as? NSClipView else { return }
+        clip.postsBoundsChangedNotifications = true
+        clip.postsFrameChangedNotifications = true
+        geometryObserved = [clip]
+        if let scroll = clip.enclosingScrollView {
+            scroll.postsFrameChangedNotifications = true
+            geometryObserved.append(scroll)
+        }
+        for view in geometryObserved {
+            for name in Self.geometryNames {
+                center.addObserver(
+                    self, selector: #selector(geometryChanged), name: name, object: view
+                )
+            }
+        }
+    }
+
+    @objc private func geometryChanged(_ note: Notification) {
+        updateTrackingAreas()
     }
 
     override func updateTrackingAreas() {
@@ -436,14 +490,25 @@ private final class HoverTableView: NSTableView {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        onHoverChange?(row >= 0 ? row : nil)
+        pointerMoved(event)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         onHoverChange?(nil)
+    }
+
+    /// The row under the pointer, or nil when it's outside the visible
+    /// rows or something else (a sheet, a flyout) is on top of them.
+    private func pointerMoved(_ event: NSEvent) {
+        guard let window, event.window === window else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        var row = visibleRect.contains(point) ? self.row(at: point) : -1
+        if row >= 0, let content = window.contentView, let frame = content.superview {
+            let hit = content.hitTest(frame.convert(event.locationInWindow, from: nil))
+            if !(hit?.isDescendant(of: self) ?? false) { row = -1 }
+        }
+        onHoverChange?(row >= 0 ? row : nil)
     }
 
     /// Right-click should target the row under the cursor without stealing

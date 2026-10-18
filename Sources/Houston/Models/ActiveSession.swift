@@ -12,6 +12,11 @@ struct ActiveSession: Identifiable, Equatable {
     /// transcripts are on disk) but not displayable — Houston doesn't hold
     /// their pty. The sidebar shows only owned sessions.
     let isHoustonOwned: Bool
+    /// The session id (its transcript's basename) and transcript path,
+    /// when the JSONL could be matched — the fallback a terminal thread
+    /// forks from when the statusline feed isn't installed.
+    var sessionId: String? = nil
+    var transcriptPath: String? = nil
 
     var contextPercent: Double {
         guard contextWindow > 0 else { return 0 }

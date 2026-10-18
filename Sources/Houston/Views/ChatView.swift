@@ -758,6 +758,9 @@ struct ChatBrowserView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: .houstonAskSelection)
         ) { _ in
+            // A terminal pane's selection is the window's to thread
+            // (`.houstonOpenTerminalThread`), not this transcript's.
+            if NSApp.keyWindow?.firstResponder is HoustonTerminalView { return }
             guard let selection = ChatThread.capturedSelection() else {
                 NSSound.beep()
                 return
@@ -2060,7 +2063,7 @@ private struct ContextMeter: View {
 /// prompt for, rendered in the chat. Deliberately light (2026-09-28): no
 /// border, just the composer's own wash behind it. "Auto" allows this one
 /// and moves the chat to Auto edits, so the next edit doesn't ask.
-private struct ApprovalCard: View {
+struct ApprovalCard: View {
     let request: ChatAgentSession.ApprovalRequest
     let onAllow: () -> Void
     /// nil when the harness's permission mode isn't Houston's to set.

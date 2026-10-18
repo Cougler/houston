@@ -246,6 +246,34 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   One session = one turn at a time: a thread question mid-turn queues
   like any held message; the tangent stays in the model's context by
   design.
+- **Terminal threads (2026-10-14): highlight in a pane → "Ask About
+  Selection" → a thread answered by a FORK of the pane's Claude session.**
+  The right-click menu item (and Edit ▸ Ask About Selection, ⇧⌘A, when a
+  terminal is focused) reads the selection and opens `RightPanel.chatThread`
+  with `ChatThreadTarget.forkOf` set; the panel's session spawns `claude -p
+  --resume <pane session> --fork-session --session-id <ours>` — the CLI's
+  own `/btw` mechanism, hosted so the answer lands in the sheet instead of
+  the TUI. Verified live (2.1.299, json AND stream-json): the forked
+  transcript lands at the chosen id, so its path is known before the
+  process exists and the panel keys/re-reads by it like any chat thread.
+  Pieces: `TerminalThreadStore` (fork registry under `Application
+  Support/Houston/terminal-threads.json` — re-selecting an anchor reopens
+  its fork; `ChatArchive.sessions` hides fork files from the chat list;
+  `source(...)` resolves the pane's session from the statusline snapshot
+  (`session_id`, exact per pane) or the active-session scan by cwd),
+  `ChatAgentSession.forkFromID/forkFile` (fork flags only while the fork
+  file doesn't exist; afterwards plain `--resume`), `ChatSessionHub.
+  session(for:project:forkOf:)`. **libghostty's selection API is internal
+  to the package**, so `HoustonTerminalView.selectedText()` drives the
+  public `copySelectedTextToPasteboard()` (synchronous NSPasteboard write)
+  with the pasteboard deep-copied and restored — same trick as
+  `ChatThread.capturedSelection`. Terminal anchors KEEP line breaks (code
+  and log output are meaningless flattened; the marker's `"]` terminator
+  only needs double quotes flattened) and cap at 4000 chars. A fork is a
+  snapshot: follow-ups see the terminal's history up to the fork, not
+  after. The thread panel renders `ApprovalCard` for fork sessions (no
+  main view to answer permissions in). Without a claude running in the
+  pane, an alert says so.
 - **Git is the Branches workspace module, not a sheet (2026-09-29).** The
   right sheet's Git panel (and its commit-detail / diff pages) is GONE;
   `BranchesModuleRows` renders the same in both of `WorkspaceItem.branches`'
@@ -511,6 +539,25 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   Active header's "+" menu reads the selection; with a title-only key the
   header never re-hosted and the menu kept the selection captured at launch
   (nil), so its per-project item never appeared.
+- **Sidebar hover follows the LIVE pointer, never only the tracking area
+  (2026-10-18).** `HoverTableView`'s `.inVisibleRect` tracking area is
+  re-registered by AppKit only when the TABLE's frame changes — and once
+  the list is at least as tall as the clip, the table is content-sized, so
+  a window resize moves the clip (SwiftUI lays the host out after AppKit's
+  resize pass) without touching the table. The area kept its stale
+  window-space rect: the rows that slid out of it (the bottom ones in a
+  shorter window) got no mouseMoved, while clicks — hit-tested live — still
+  landed. Symptom: "hover works at one window height, not another". The
+  table now re-registers the area on clip/scroll geometry changes AND
+  derives hover from a local mouseMoved monitor + live `hitTest` (which
+  also keeps hover off under a flyout or sheet). Diagnosing it: lldb-attach
+  and `hitTest:` down the sidebar — a cover shows as the root
+  `NSHostingView` claiming the point; synthesized `sendEvent:`/`postEvent:`
+  mouseMoved events do NOT drive tracking areas (AppKit uses the real
+  cursor), and `CGEventPost` needs Accessibility access, so only a real
+  pointer exercises hover. And never `removeObserver(self)` on an
+  NSTableView: it strips AppKit's own clip-view observers too, and the
+  column stops resizing to the scroll view (every label truncated).
 - **One layer draws each highlight.** Selection *and* hover are both drawn by
   `RowChrome`; `table.selectionHighlightStyle = .none`. Every highlight bug in
   this sidebar (three separate times) was two layers drawing the same thing with

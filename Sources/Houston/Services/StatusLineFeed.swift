@@ -213,6 +213,11 @@ struct StatusLineSnapshot: Equatable {
 
     let paneID: String
     let modelName: String
+    /// The session behind the pane and its model's provider id — what a
+    /// terminal thread forks from (`TerminalThreadStore.source`).
+    let sessionID: String?
+    let modelID: String?
+    let transcriptPath: String?
     /// Context used, 0–1. Nil until the session's first API response.
     let usedFraction: Double?
     let usedTokens: Int?
@@ -234,6 +239,9 @@ struct StatusLineSnapshot: Equatable {
 
         let model = obj["model"] as? [String: Any]
         modelName = model?["display_name"] as? String ?? "Claude"
+        modelID = model?["id"] as? String
+        sessionID = obj["session_id"] as? String
+        transcriptPath = obj["transcript_path"] as? String
 
         let ctx = obj["context_window"] as? [String: Any]
         usedTokens = (ctx?["total_input_tokens"] as? NSNumber)?.intValue

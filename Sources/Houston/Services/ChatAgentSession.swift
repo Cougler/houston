@@ -238,6 +238,15 @@ final class ChatAgentSession: ObservableObject, Identifiable {
 
     /// Claude session id / Codex thread id, once known.
     @Published private(set) var sessionID: String?
+    /// Terminal threads: the pane session this one forks from. Set by the
+    /// hub when `forkFile` doesn't exist yet; the first spawn then runs
+    /// `--resume <forkFromID> --fork-session --session-id <sessionID>`
+    /// (the CLI's own /btw mechanism, hosted here) and every later spawn
+    /// resumes the fork like any chat. Cleared once the fork transcript
+    /// exists — until then a respawn must fork again, not resume a file
+    /// that isn't there.
+    var forkFromID: String?
+    var forkFile: String?
     @Published private(set) var running = false
     @Published private(set) var pendingUserText: String?
     /// Finished blocks of the running turn (text runs + tool chips).
@@ -749,7 +758,13 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 "--verbose", "--include-partial-messages",
                 "--permission-prompt-tool", "stdio",
             ]
-            if let id = sessionID { args += ["--resume", id] }
+            if let fork = forkFromID, let id = sessionID,
+               !(forkFile.map { FileManager.default.fileExists(atPath: $0) } ?? false) {
+                args += ["--resume", fork, "--fork-session", "--session-id", id]
+            } else if let id = sessionID {
+                forkFromID = nil
+                args += ["--resume", id]
+            }
             if let arg = model.arg { args += ["--model", arg] }
             if let effort = model.effort { args += ["--effort", effort] }
             switch model.permission {
@@ -1849,7 +1864,12 @@ final class ChatSessionHub: ObservableObject {
         }
     }
 
-    func session(for ref: ChatSessionRef, project: String) -> ChatAgentSession {
+    /// `forkOf`: a terminal thread — the ref's file is a fork transcript
+    /// that may not exist yet; its session forks from that pane session on
+    /// first spawn (see `ChatAgentSession.forkFromID`).
+    func session(
+        for ref: ChatSessionRef, project: String, forkOf: String? = nil
+    ) -> ChatAgentSession {
         if let existing = sessions[ref.filePath] { return existing }
         let file = (ref.filePath as NSString).lastPathComponent
         let id: String = switch ref.harness {
@@ -1863,6 +1883,11 @@ final class ChatSessionHub: ObservableObject {
             harness: ref.harness, projectPath: project, resumeID: id
         )
         session.modelMemoryKey = ref.filePath
+        if let forkOf, ref.harness == .claude,
+           !FileManager.default.fileExists(atPath: ref.filePath) {
+            session.forkFromID = forkOf
+            session.forkFile = ref.filePath
+        }
         sessions[ref.filePath] = session
         seedContext(session, transcript: ref.filePath)
         return session

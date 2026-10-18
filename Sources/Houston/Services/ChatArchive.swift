@@ -273,6 +273,9 @@ enum ChatArchive {
         var refs: [ChatSessionRef] = []
         for name in names where name.hasSuffix(".jsonl") {
             let path = dir + "/" + name
+            // Terminal-thread forks are side questions on a pane session,
+            // not conversations — they never list.
+            if TerminalThreadStore.shared.isFork(file: path) { continue }
             let attributes = (try? fm.attributesOfItem(atPath: path)) ?? [:]
             let mtime = attributes[.modificationDate] as? Date ?? .distantPast
             let size = (attributes[.size] as? Int) ?? 0
