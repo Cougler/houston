@@ -11,5 +11,17 @@ app.setActivationPolicy(.regular)
 // System / Light / Dark, from settings (nil follows the system). All chrome
 // colors are dynamic (`Theme`), so the override restyles everything.
 app.appearance = HoustonSettings.read().nsAppearance
+// Headless editor checks (see `DocumentSelfTest`) — exits without a window.
+if ProcessInfo.processInfo.environment["HOUSTON_DOC_SELFTEST"] == "1" {
+    exit(DocumentSelfTest.run())
+}
+// Headless chat-renderer checks (see `ChatRenderSelfTest`).
+if ProcessInfo.processInfo.environment["HOUSTON_CHAT_SELFTEST"] == "1" {
+    exit(ChatRenderSelfTest.run())
+}
+// Headless Inbox parser checks (see `InboxSelfTest`).
+if ProcessInfo.processInfo.environment["HOUSTON_INBOX_SELFTEST"] == "1" {
+    exit(InboxSelfTest.run())
+}
 MainMenu.install(into: app)
 app.run()

@@ -131,6 +131,29 @@ enum GitWorktrees {
         return candidate
     }
 
+    /// A pull request's head as a KEPT worktree (`<repo>-pr-N` on branch
+    /// `pr-N`), for working on it in a terminal or chat — unlike the
+    /// review's throwaway checkout. Re-running on an existing branch
+    /// re-fetches and checks the branch out (or returns the worktree
+    /// that already has it). Blocks.
+    static func checkoutPull(number: Int, from path: String) -> Result<String, Failure> {
+        let repo = mainRepo(ofWorktree: path) ?? path
+        let branch = "pr-\(number)"
+        if let existing = linked(of: repo).first(where: { $0.branch == branch }) {
+            return .success(existing.path)
+        }
+        let ref = "refs/houston/pr/\(number)"
+        let fetch = git(["fetch", "--quiet", "origin", "+refs/pull/\(number)/head:" + ref], in: repo)
+        guard fetch.ok else { return .failure(Failure(message: "Couldn't fetch the pull request: " + fetch.output)) }
+        let dest = siblingPath(repo: repo, branch: branch)
+        let exists = git(["show-ref", "--verify", "--quiet", "refs/heads/" + branch], in: repo).ok
+        let add = exists
+            ? git(["worktree", "add", dest, branch], in: repo)
+            : git(["worktree", "add", "-b", branch, dest, ref], in: repo)
+        guard add.ok else { return .failure(Failure(message: add.output)) }
+        return .success(dest)
+    }
+
     /// Uncommitted changes (including untracked files) in a checkout.
     static func isDirty(_ path: String) -> Bool {
         let result = git(["status", "--porcelain"], in: path)

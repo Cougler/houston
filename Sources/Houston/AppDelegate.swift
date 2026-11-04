@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         MainWindowController.present()
         Self.logLifecycle("launched")
         UpdateChecker.shared.start()
+        ClaudeAuthStore.shared.start()
     }
 
     /// Amber dot beside the menubar glyph while any session needs the user.
@@ -151,15 +152,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let path = response.notification.request.content
-            .userInfo["path"] as? String
+        let info = response.notification.request.content.userInfo
+        let path = info["path"] as? String
+        let inbox = info["inbox"] as? Int
         Task { @MainActor in
             MainWindowController.present()
             if let path {
+                var userInfo: [String: Any] = ["path": path]
+                if let inbox { userInfo["inbox"] = inbox }
                 NotificationCenter.default.post(
                     name: .houstonOpenProject,
                     object: nil,
-                    userInfo: ["path": path]
+                    userInfo: userInfo
                 )
             }
         }

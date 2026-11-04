@@ -357,6 +357,10 @@ struct ChatBrowserView: View {
     /// insets by it (via safeAreaInset) and the "fill the viewport" floor
     /// subtracts it, so a short chat still reads from the top.
     @State private var composerHeight: CGFloat = 120
+    /// The "Commit everything now?" card after a turn that edited files
+    /// and left the tree dirty (file count, the prompt as the message
+    /// hint). Cleared by Not now, by done, or by the next send.
+    @State private var changesCard: (files: Int, hint: String?)?
 
     /// The selection is derived synchronously from the file path — going
     /// through a directory listing first flashed the empty state over
@@ -570,12 +574,10 @@ struct ChatBrowserView: View {
                 let blockThreads = ChatThread.blockThreads(
                     counts: ChatThread.counts(in: messages), in: flow
                 )
-                let visible = Array(flow.suffix(historyShown)).filter { message in
-                    message.blocks.contains { block in
-                        if case .tool = block { return false }
-                        return true
-                    }
-                }
+                // Tool-only messages stay: the steps are the content
+                // (2026-10-21, desktop parity — tool work shows in the
+                // finished transcript too, collapsed).
+                let visible = Array(flow.suffix(historyShown))
                 GeometryReader { geo in
                     ScrollViewReader { proxy in
                         ScrollView {
@@ -602,14 +604,17 @@ struct ChatBrowserView: View {
                                     .foregroundStyle(Theme.link)
                                     .frame(maxWidth: .infinity)
                                 }
-                                ForEach(visible) { message in
+                                ForEach(Array(visible.enumerated()), id: \.element.id) { index, message in
                                     MessageView(
                                         message: message, harness: ref.harness,
-                                        showTools: false,
                                         blockThreads: blockThreads,
                                         onThread: { anchor in
                                             openThread(ref: ref, anchor: anchor)
-                                        }
+                                        },
+                                        actions: messageActions(
+                                            ref, message: message,
+                                            previous: index > 0 ? visible[index - 1] : nil
+                                        )
                                     )
                                     .id(message.id)
                                 }
@@ -635,6 +640,15 @@ struct ChatBrowserView: View {
                                     ) {
                                         reloadThenClear(ref, session)
                                     }
+                                }
+                                if let card = changesCard {
+                                    ChangesCard(
+                                        path: activeProject,
+                                        harness: ref.harness.rawValue,
+                                        fileCount: card.files,
+                                        hint: card.hint,
+                                        onDismiss: { changesCard = nil }
+                                    )
                                 }
                                 Color.clear.frame(height: 1).id("chat-bottom")
                                     .background(GeometryReader { sentinel in
@@ -1039,8 +1053,45 @@ struct ChatBrowserView: View {
 
     /// Same harness resumes in place; the other harness transplants the
     /// transcript into a fresh native session first, then continues there.
+    /// The toolbar under a finished message. Retry re-sends the prompt
+    /// (the message itself for a user turn, the user turn before it for a
+    /// reply) with the chat's current model — a new turn, since a
+    /// persistent session can't un-say a reply; Edit puts a user turn's
+    /// text back in the composer; Branch forks the chat.
+    private func messageActions(
+        _ ref: ChatSessionRef, message: ChatMessage, previous: ChatMessage?
+    ) -> MessageActions {
+        let prompt: String? = message.role == .user
+            ? ChatArchive.flatten(message)
+            : previous.flatMap { $0.role == .user ? ChatArchive.flatten($0) : nil }
+        let busy = hub.sessions[ref.filePath]?.running == true
+        var actions = MessageActions()
+        if let prompt, !prompt.isEmpty, !busy,
+           !prompt.hasPrefix(ChatArchive.handoffNote) {
+            let model = ChatModelChoice.remembered(for: ref.filePath)
+                ?? hub.sessions[ref.filePath]?.lastModel
+                ?? .fallback(for: ref.harness)
+            actions.onRetry = { handleSend(ref, text: prompt, model: model) }
+            if message.role == .user {
+                actions.onEdit = {
+                    NotificationCenter.default.post(
+                        name: .houstonComposerSetDraft, object: nil,
+                        userInfo: ["key": ref.filePath, "text": prompt]
+                    )
+                }
+            }
+        }
+        if message.role == .assistant {
+            actions.onBranch = {
+                ChatRowActions.duplicate(ref, project: activeProject, asBranch: true)
+            }
+        }
+        return actions
+    }
+
     private func handleSend(_ ref: ChatSessionRef, text: String, model: ChatModelChoice) {
         sendScrollTick += 1
+        changesCard = nil
         if model.harness == ref.harness {
             hub.session(for: ref, project: activeProject)
                 .send(text: text, model: model)
@@ -1124,6 +1175,23 @@ struct ChatBrowserView: View {
         let token = loadToken
         let userText = session.pendingUserText
         let finalText = Self.finalAssistantText(session)
+        // Did this turn edit files? Offer to commit once it's absorbed.
+        let edited = session.liveBlocks.contains { block in
+            if case let .tool(call) = block { return call.kind == .edit || call.kind == .write }
+            return false
+        }
+        if edited, session.lastError == nil {
+            let project = activeProject
+            let hint = userText.flatMap { ChatThread.question(ofUserText: $0) ?? $0 }
+            Task {
+                let count = await Task.detached(priority: .utility) {
+                    GitActions.changedFiles(in: project).count
+                }.value
+                if count > 0, hub.sessions[ref.filePath]?.running != true {
+                    withAnimation(.easeOut(duration: 0.2)) { changesCard = (count, hint) }
+                }
+            }
+        }
         Task {
             var parsed: [ChatMessage] = []
             for attempt in 0..<15 {
@@ -1501,11 +1569,11 @@ enum ChatRowActions {
                 switch block {
                 case let .text(t): t
                 case let .code(c, lang): "```" + (lang ?? "") + "\n" + c + "\n```"
-                case let .tool(name, detail):
-                    detail.isEmpty ? "*[\(name)]*" : "*[\(name): \(detail)]*"
+                case let .tool(call): "*[\(call.chipText)]*"
                 case let .capsule(title, _): "*[Capsule: \(title)]*"
                 case let .fragment(title, _): "*[Fragment: \(title)]*"
                 case let .image(path): "![image](\(path))"
+                case .imageData: "*[attached image]*"
                 }
             }.joined(separator: "\n\n")
             return heading + "\n\n" + body
@@ -1624,21 +1692,14 @@ private struct LiveTurnView: View {
     }
 
     /// Carried exchanges are FINISHED turns waiting on the re-read, so
-    /// they render the way it will show them: parsed block shape, steps
-    /// folded away, a steps-only reply skipped.
+    /// they render the way it will show them: parsed block shape.
     private var carried: [ChatMessage] {
-        ChatThread.strippingExchanges(session.carriedTurns).compactMap { message in
+        ChatThread.strippingExchanges(session.carriedTurns).map { message in
             guard message.role == .assistant else { return message }
-            let blocks = ChatArchive.parsedShape(message.blocks)
-            guard Self.hasProse(blocks) else { return nil }
-            return ChatMessage(id: message.id, role: .assistant, blocks: blocks)
-        }
-    }
-
-    private static func hasProse(_ blocks: [ChatMessage.Block]) -> Bool {
-        blocks.contains { block in
-            if case .tool = block { return false }
-            return true
+            return ChatMessage(
+                id: message.id, role: .assistant,
+                blocks: ChatArchive.parsedShape(message.blocks)
+            )
         }
     }
 
@@ -1658,7 +1719,7 @@ private struct LiveTurnView: View {
             // caught up — without these, the earlier message vanished.
             // Thread exchanges stay out of the main flow here too.
             ForEach(carried) { message in
-                MessageView(message: message, harness: harness, showTools: false)
+                MessageView(message: message, harness: harness)
             }
             if let pending = session.pendingUserText, !threadTurn {
                 // Through userBlocks so an attached capsule shows as its
@@ -1674,17 +1735,14 @@ private struct LiveTurnView: View {
             // the text still streaming as its tail. Two views (blocks, then
             // stream) each drew their own header, and every finished text
             // block jumped from one to the other — the flicker.
-            // Steps show only while the turn runs: a finished transcript
-            // is prose only, so they fold away the moment the turn ends —
-            // together with the working row, as ONE settle — instead of
-            // seconds later when the re-read lands (the turn-end jump).
+            // Steps stay after the turn ends (2026-10-21): the finished
+            // transcript shows them too, so the turn-end swap moves
+            // nothing.
             let replyBlocks = liveReplyBlocks
-            if !threadTurn,
-               session.running ? !replyBlocks.isEmpty : Self.hasProse(replyBlocks) {
+            if !threadTurn, !replyBlocks.isEmpty {
                 MessageView(
                     message: ChatMessage(role: .assistant, blocks: replyBlocks),
                     harness: harness,
-                    showTools: session.running,
                     showsHeader: !extendsReply
                 )
                 // Message spacing (28) down to block spacing (12).
@@ -1694,9 +1752,13 @@ private struct LiveTurnView: View {
                 ApprovalCard(
                     request: approval,
                     onAllow: { session.respond(to: approval, allow: true) },
-                    onAuto: session.canSwitchToAuto
+                    onAuto: session.canSwitchToAuto && approval.kind == .permission
                         ? { session.allowAndSwitchToAuto(approval) } : nil,
-                    onDeny: { session.respond(to: approval, allow: false) }
+                    onDeny: { session.respond(to: approval, allow: false) },
+                    onAnswer: harness == .claude
+                        ? { session.answer(approval, answers: $0) } : nil,
+                    onReject: harness == .claude
+                        ? { session.reject(approval, feedback: $0) } : nil
                 )
             }
             if session.running || session.hasBackgroundAgent || session.turnImminent {
@@ -1708,40 +1770,7 @@ private struct LiveTurnView: View {
                 // A background subagent keeps the row up between turns:
                 // Claude ends the turn while the agent works on, and a
                 // bare transcript there read as "done" (2026-10-01).
-                HStack(spacing: 10) {
-                    LiquidThinkingView()
-                        .frame(width: 56, height: 56)
-                        .accessibilityHidden(true)
-                    Group {
-                        if !session.running {
-                            // Between turns: the subagent's own progress
-                            // line, or the turn Claude is about to start.
-                            Text((session.backgroundActivity
-                                ?? (session.turnImminent ? "Thinking" : "Subagent working")) + "…")
-                        } else if let tokens = session.thinkingTokens {
-                            // The summary's first sentence names the step
-                            // ("Planning the wave physics"); the token
-                            // count rides beside it as progress.
-                            Text(session.thinkingLabel ?? "Thinking…")
-                                + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
-                                    .foregroundColor(Theme.textSecondary.opacity(0.7))
-                        } else {
-                            // What it's doing now: the running tool in
-                            // plain words, "Writing" while the reply
-                            // streams. Before the first event of a turn
-                            // the model is reading the prompt — thinking.
-                            Text(session.activity.map { $0 + "…" } ?? "Thinking…")
-                        }
-                    }
-                    .font(Theme.Fonts.body)
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(2)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                }
-                // Pull the blob's internal breathing room back so it sits
-                // on the row's leading edge like the spinner did.
-                .padding(.leading, -12)
+                TurnActivityRow(session: session)
             } else if !session.backgroundTasks.isEmpty {
                 // A background shell (a build, a dev server) outliving the
                 // turn: a quiet line, not the blob — it can run for hours,
@@ -1777,12 +1806,16 @@ private struct LiveTurnView: View {
                         )
                         HStack(spacing: Theme.Space.s) {
                             Button {
-                                PromptDelivery.login(
-                                    session.harness,
-                                    project: session.projectPath
-                                )
+                                if session.harness == .claude {
+                                    ClaudeAuthStore.shared.signIn(project: session.projectPath)
+                                } else {
+                                    PromptDelivery.login(
+                                        session.harness,
+                                        project: session.projectPath
+                                    )
+                                }
                             } label: {
-                                Text("Sign in from Terminal")
+                                Text("Sign in again")
                                     .font(Theme.Fonts.secondaryMedium)
                                     .foregroundStyle(Theme.text)
                                     .padding(.horizontal, Theme.Space.s)
@@ -1797,7 +1830,12 @@ private struct LiveTurnView: View {
                             }
                             .buttonStyle(.plain)
                             .help("Opens the project's terminal and runs the "
-                                + "provider's sign-in; send again once you're in")
+                                + "provider's sign-in; retry once you're in")
+                            Button("Retry") { session.retryLast() }
+                                .buttonStyle(.plain)
+                                .font(Theme.Fonts.body)
+                                .foregroundStyle(Theme.link)
+                                .help("Send the last message again")
                             Button("Dismiss") { session.dismissError() }
                                 .buttonStyle(.plain)
                                 .font(Theme.Fonts.body)
@@ -1835,6 +1873,65 @@ private struct LiveTurnView: View {
         .onChange(of: session.pendingUserText) { onGrow() }
         .onChange(of: session.approval != nil) { onGrow() }
         .onChange(of: session.queued.count) { onGrow() }
+    }
+}
+
+/// The live turn's activity row: the liquid-chrome blob (THE activity
+/// indicator — no spinner anywhere in a turn) plus what the agent is
+/// doing in plain words. ONE implementation for the main transcript and
+/// the thread panel: the panel had its own copy that still said a bare
+/// "Working…" for every non-thinking step (2026-10-20) — exactly the
+/// regression the 2026-09-28 note warns about. Thinking adds the CLI's
+/// live token estimate (the terminal's "Thinking… 7.8k tokens"); a long
+/// think used to read as a hang. A background subagent keeps the row up
+/// between turns: Claude ends the turn while the agent works on, and a
+/// bare transcript there read as "done" (2026-10-01).
+struct TurnActivityRow: View {
+    @ObservedObject var session: ChatAgentSession
+    var blobSize: CGFloat = 56
+
+    /// The step's name without its sentence-ending mark, so the ellipsis
+    /// the row adds doesn't follow a period.
+    private var thinkingName: String {
+        let label = session.thinkingLabel ?? "Thinking"
+        return label.trimmingCharacters(in: CharacterSet(charactersIn: ".!?"))
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            LiquidThinkingView()
+                .frame(width: blobSize, height: blobSize)
+                .accessibilityHidden(true)
+            Group {
+                if !session.running {
+                    // Between turns: the subagent's own progress line, or
+                    // the turn Claude is about to start.
+                    Text((session.backgroundActivity
+                        ?? (session.turnImminent ? "Thinking" : "Subagent working")) + "…")
+                } else if let tokens = session.thinkingTokens {
+                    // The summary's first sentence names the step
+                    // ("Planning the wave physics"); the token count
+                    // rides beside it as progress.
+                    Text(thinkingName + "…")
+                        + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
+                            .foregroundColor(Theme.textSecondary.opacity(0.7))
+                } else {
+                    // What it's doing now: the running tool in plain
+                    // words, "Writing" while the reply streams. Before
+                    // the first event of a turn the model is reading the
+                    // prompt — thinking.
+                    Text(session.activity.map { $0 + "…" } ?? "Thinking…")
+                }
+            }
+            .font(Theme.Fonts.body)
+            .foregroundStyle(Theme.textSecondary)
+            .lineLimit(2)
+            .monospacedDigit()
+            .contentTransition(.numericText())
+        }
+        // Pull the blob's internal breathing room back so it sits on the
+        // row's leading edge like the spinner did.
+        .padding(.leading, -(blobSize * 0.21).rounded())
     }
 }
 
@@ -2059,23 +2156,88 @@ private struct ContextMeter: View {
     }
 }
 
-/// The agent asked to use a tool — the same decision the terminal would
+/// The agent asked for something — the same decision the terminal would
 /// prompt for, rendered in the chat. Deliberately light (2026-09-28): no
-/// border, just the composer's own wash behind it. "Auto" allows this one
-/// and moves the chat to Auto edits, so the next edit doesn't ask.
+/// border, just the composer's own wash behind it. Three shapes
+/// (2026-10-21): a permission (the typed call — diff, command — with
+/// Allow / Auto / Deny; "Auto" allows this one and moves the chat to
+/// Auto edits), a question (options as buttons, multi-select, an Other
+/// field; the picks go back as the tool's answer), and a plan (the
+/// markdown with Approve / Reject + feedback).
 struct ApprovalCard: View {
     let request: ChatAgentSession.ApprovalRequest
     let onAllow: () -> Void
     /// nil when the harness's permission mode isn't Houston's to set.
     let onAuto: (() -> Void)?
     let onDeny: () -> Void
+    /// Question answers (nil = the harness can't take them; the card
+    /// falls back to Allow/Deny).
+    var onAnswer: (([String: String]) -> Void)? = nil
+    /// Plan rejection with feedback.
+    var onReject: ((String) -> Void)? = nil
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            switch request.kind {
+            case .question where onAnswer != nil && !(request.call?.questions.isEmpty ?? true):
+                QuestionCard(
+                    questions: request.call?.questions ?? [],
+                    onAnswer: onAnswer ?? { _ in },
+                    onDismiss: onDeny
+                )
+            case .plan where onReject != nil:
+                PlanCard(
+                    plan: request.call?.content ?? "",
+                    onApprove: onAllow,
+                    onReject: onReject ?? { _ in }
+                )
+            default:
+                permissionBody
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // The composer's wash, no stroke — it reads as part of the turn,
+        // not a dialog dropped into it.
+        .background(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .fill(Theme.sidebarFill.opacity(0.6))
+        )
+    }
+
+    private var permissionBody: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(request.title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.text)
-            if !request.detail.isEmpty {
+            if let call = request.call {
+                // The typed call: an edit's diff, a command, a path —
+                // what the terminal's prompt would print.
+                switch call.kind {
+                case .edit, .write:
+                    if let diff = call.diff {
+                        DiffView(diff: diff, path: call.filePath)
+                    }
+                case .shell:
+                    if let command = call.command {
+                        CodeCardLite(text: command, label: "command")
+                    }
+                default:
+                    if !call.detail.isEmpty {
+                        Text(call.detail)
+                            .font(Theme.Fonts.monoSmall)
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(6)
+                            .textSelection(.enabled)
+                    } else if let path = call.filePath {
+                        Text((path as NSString).abbreviatingWithTildeInPath)
+                            .font(Theme.Fonts.monoSmall)
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            } else if !request.detail.isEmpty {
                 Text(request.detail)
                     .font(Theme.Fonts.monoSmall)
                     .foregroundStyle(Theme.textSecondary)
@@ -2083,15 +2245,7 @@ struct ApprovalCard: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: 6) {
-                Button(action: onAllow) {
-                    Text("Allow")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Theme.ctaFill))
-                }
-                .buttonStyle(.plain)
+                ApprovalButton(label: "Allow", primary: true, action: onAllow)
                 if let onAuto {
                     Button(action: onAuto) {
                         HStack(spacing: 4) {
@@ -2117,20 +2271,218 @@ struct ApprovalCard: View {
                         .foregroundStyle(Theme.textSecondary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
             .padding(.top, 2)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        // The composer's wash, no stroke — it reads as part of the turn,
-        // not a dialog dropped into it.
-        .background(
-            RoundedRectangle(cornerRadius: Theme.radiusSurface)
-                .fill(Theme.sidebarFill.opacity(0.6))
-        )
+    }
+}
+
+/// A filled or quiet action button for the approval cards.
+struct ApprovalButton: View {
+    let label: String
+    var primary = false
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(primary ? .white : Theme.text)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .fill(primary ? Theme.ctaFill : Theme.rowHovered)
+                )
+                .opacity(enabled ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+/// AskUserQuestion, answered in the chat: each question's options as
+/// pick buttons (several for a multi-select), an "Other" field, Submit
+/// once every question has an answer.
+struct QuestionCard: View {
+    let questions: [ToolCall.Question]
+    let onAnswer: ([String: String]) -> Void
+    let onDismiss: () -> Void
+
+    /// question text → picked labels.
+    @State private var picks: [String: Set<String>] = [:]
+    @State private var other: [String: String] = [:]
+
+    private func answer(for question: ToolCall.Question) -> String? {
+        let typed = (other[question.text] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen = question.options.map(\.label).filter { picks[question.text]?.contains($0) == true }
+        let parts = chosen + (typed.isEmpty ? [] : [typed])
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    private var complete: Bool {
+        questions.allSatisfy { answer(for: $0) != nil }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(questions) { question in
+                VStack(alignment: .leading, spacing: 6) {
+                    if !question.header.isEmpty {
+                        Text(question.header.uppercased())
+                            .font(Theme.Fonts.label)
+                            .kerning(0.5)
+                            .foregroundStyle(Theme.heading)
+                    }
+                    Text(question.text)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(question.options) { option in
+                        let on = picks[question.text]?.contains(option.label) == true
+                        Button {
+                            var set = picks[question.text] ?? []
+                            if question.multiSelect {
+                                if on { set.remove(option.label) } else { set.insert(option.label) }
+                            } else {
+                                set = on ? [] : [option.label]
+                            }
+                            picks[question.text] = set
+                        } label: {
+                            HStack(alignment: .top, spacing: 8) {
+                                LucideIcon(
+                                    on ? "circle-check" : "circle", size: 13
+                                )
+                                .foregroundStyle(on ? Theme.link : Theme.textSecondary.opacity(0.6))
+                                .padding(.top, 1)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(option.label)
+                                        .font(Theme.Fonts.bodyMedium)
+                                        .foregroundStyle(Theme.text)
+                                    if !option.description.isEmpty {
+                                        Text(option.description)
+                                            .font(Theme.Fonts.secondary)
+                                            .foregroundStyle(Theme.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(8)
+                            .background(
+                                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                                    .fill(on ? Theme.link.opacity(0.1) : Theme.rowHovered.opacity(0.6))
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    TextField(
+                        "Other…",
+                        text: Binding(
+                            get: { other[question.text] ?? "" },
+                            set: { other[question.text] = $0 }
+                        ),
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.plain)
+                    .font(Theme.Fonts.body)
+                    .lineLimit(1...4)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .fill(Theme.attachedWellFill)
+                    )
+                }
+            }
+            HStack(spacing: 6) {
+                ApprovalButton(label: "Submit", primary: true, enabled: complete) {
+                    var answers: [String: String] = [:]
+                    for question in questions {
+                        answers[question.text] = answer(for: question) ?? ""
+                    }
+                    onAnswer(answers)
+                }
+                Button(action: onDismiss) {
+                    Text("Skip")
+                        .font(Theme.Fonts.secondaryMedium)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                }
+                .buttonStyle(.plain)
+                .help("Decline to answer; the agent continues without it")
+            }
+        }
+    }
+}
+
+/// ExitPlanMode: the plan as markdown, Approve to let the agent start,
+/// Reject with a note on what to change.
+struct PlanCard: View {
+    let plan: String
+    let onApprove: () -> Void
+    let onReject: (String) -> Void
+
+    @State private var feedback = ""
+    @State private var rejecting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                LucideIcon("list-ordered", size: 13)
+                Text("Plan")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(Theme.text)
+            if plan.isEmpty {
+                Text("The agent is ready to start work.")
+                    .font(Theme.Fonts.body)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                MarkdownBlockView(text: plan, color: Theme.chatProse)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                            .fill(Theme.attachedWellFill)
+                    )
+            }
+            if rejecting {
+                TextField("What should change?", text: $feedback, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Fonts.body)
+                    .lineLimit(1...5)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .fill(Theme.attachedWellFill)
+                    )
+            }
+            HStack(spacing: 6) {
+                if rejecting {
+                    ApprovalButton(label: "Send feedback", primary: true) { onReject(feedback) }
+                    Button("Back") { rejecting = false }
+                        .buttonStyle(.plain)
+                        .font(Theme.Fonts.secondaryMedium)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    ApprovalButton(label: "Approve", primary: true, action: onApprove)
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) { rejecting = true }
+                    } label: {
+                        Text("Reject…")
+                            .font(Theme.Fonts.secondaryMedium)
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 }
 
@@ -2218,6 +2570,12 @@ private struct ChatComposer: View {
     @State private var suggestion = ""
     @State private var ghostTask: Task<Void, Never>?
     @State private var dropTargeted = false
+    /// Slash / @ completions for the token being typed (see
+    /// `ComposerCompletions`); empty = no list.
+    @State private var completions: [ComposerCompletion] = []
+    @State private var completionIndex = 0
+    @ObservedObject private var fileIndex = ProjectFileIndex.shared
+    @ObservedObject private var claudeAuth = ClaudeAuthStore.shared
     /// Images (or files) staged for the next send — shown as thumbnails,
     /// sent as quoted paths appended to the message text.
     @State private var attachments: [URL] = []
@@ -2282,6 +2640,34 @@ private struct ChatComposer: View {
                 }
                 .foregroundStyle(Theme.textDanger)
                 .transition(.opacity)
+            }
+            // Signed out of Claude (the CLI's own `auth status` says so):
+            // say it before the send fails, with the way back in.
+            if model.harness == .claude, claudeAuth.loggedIn == false {
+                HStack(spacing: 8) {
+                    LucideIcon("key", size: 12)
+                    Text("Claude is signed out.")
+                        .font(Theme.Fonts.secondary)
+                    Button {
+                        claudeAuth.signIn(project: projectPath ?? NSHomeDirectory())
+                    } label: {
+                        Text("Sign in again")
+                            .font(Theme.Fonts.secondaryMedium)
+                            .foregroundStyle(Theme.link)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Opens the project's terminal and runs claude /login")
+                }
+                .foregroundStyle(Theme.textWarning)
+                .transition(.opacity)
+            }
+            if !completions.isEmpty {
+                CompletionListView(
+                    items: completions,
+                    selected: min(completionIndex, completions.count - 1),
+                    onPick: accept
+                )
+                .padding(.bottom, 2)
             }
             // The card (Figma 778:1732 / 778:1733): in a transcript, a
             // compact 42px bar — one vertically centered line, growing
@@ -2436,6 +2822,15 @@ private struct ChatComposer: View {
                 guard !(window.firstResponder is NSTextView) else { return }
                 focusInput()
             }
+        }
+        // A message's "Edit and resend": the text lands here for editing.
+        .onReceive(
+            NotificationCenter.default.publisher(for: .houstonComposerSetDraft)
+        ) { note in
+            guard let key = note.userInfo?["key"] as? String, key == draftKey,
+                  let text = note.userInfo?["text"] as? String else { return }
+            draft = text
+            focusInput()
         }
         // Capsule-view insert buttons route here; drags land via onDrop
         // instead.
@@ -2815,19 +3210,48 @@ private struct ChatComposer: View {
                 // Shift+Enter breaks the line; plain Enter still submits
                 // via onSubmit.
                 .onKeyPress(keys: [.return], phases: .down) { press in
+                    if !completions.isEmpty, !press.modifiers.contains(.shift) {
+                        accept(completions[min(completionIndex, completions.count - 1)])
+                        return .handled
+                    }
                     guard press.modifiers.contains(.shift) else { return .ignored }
                     draft += "\n"
                     return .handled
                 }
                 .onKeyPress(.tab) {
+                    if !completions.isEmpty {
+                        accept(completions[min(completionIndex, completions.count - 1)])
+                        return .handled
+                    }
                     guard !suggestion.isEmpty else { return .ignored }
                     draft += suggestion
                     suggestion = ""
                     return .handled
                 }
+                .onKeyPress(.upArrow) {
+                    guard !completions.isEmpty else { return .ignored }
+                    completionIndex = (completionIndex - 1 + completions.count) % completions.count
+                    return .handled
+                }
+                .onKeyPress(.downArrow) {
+                    guard !completions.isEmpty else { return .ignored }
+                    completionIndex = (completionIndex + 1) % completions.count
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    guard !completions.isEmpty else { return .ignored }
+                    completions = []
+                    return .handled
+                }
                 .onChange(of: draft) { _, text in
                     promoteDroppedImagePaths(text)
-                    refreshGhost(text)
+                    refreshCompletions(text)
+                    // The ghost never competes with a completion list.
+                    if completions.isEmpty { refreshGhost(text) } else { suggestion = "" }
+                }
+                // The file index lands async; re-run the @ query when it does.
+                .onChange(of: fileIndex.files(for: projectPath ?? "").count) { _, _ in
+                    refreshCompletions(draft)
                 }
                 // A finished turn changes the tail (a question appears or
                 // the old one clears) — re-derive the empty-field ghost.
@@ -2844,6 +3268,34 @@ private struct ChatComposer: View {
         .padding(.bottom, attached ? 0 : 8)
         .padding(.horizontal, 2)
         .frame(minHeight: attached ? nil : 58, alignment: .topLeading)
+    }
+
+    /// Re-derive the completion list for the token at the end of the
+    /// draft. Slash commands are the harness's; files are the project's.
+    private func refreshCompletions(_ text: String) {
+        guard let context = CompletionContext.detect(in: text) else {
+            if !completions.isEmpty { completions = [] }
+            return
+        }
+        let items = ComposerCompletions.items(
+            for: context, harness: model.harness, project: projectPath
+        )
+        if items != completions {
+            completions = items
+            completionIndex = 0
+        }
+    }
+
+    /// Replace the typed token with the pick (+ a space) and close the list.
+    private func accept(_ item: ComposerCompletion) {
+        guard let context = CompletionContext.detect(in: draft) else {
+            completions = []
+            return
+        }
+        let trigger = item.kind == .command ? "/" : "@"
+        draft.replaceSubrange(context.range, with: trigger + item.insert + " ")
+        completions = []
+        inputFocused = true
     }
 
     /// Focus the field, and keep trying: right after a click on a sidebar
@@ -3352,23 +3804,33 @@ struct MessageView: View {
     /// Present = reply paragraphs are threadable: hover shows "ask about
     /// this", and existing threads wear their reply-count chips.
     var onThread: ((String) -> Void)? = nil
+    /// Present = a finished message with the toolbar (copy / retry / edit
+    /// / branch) under it on hover. nil for live and carried turns.
+    var actions: MessageActions? = nil
 
     @ObservedObject var style = ChatStyleStore.shared
+    @State private var hovered = false
 
     var body: some View {
         if message.role == .user {
             // The user's turn: a brand-orange card pushed right; white
             // text — chatUserFill is picked to hold 4.5:1 under it.
-            HStack {
-                Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: 8) {
-                    blocksView
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack {
+                    Spacer(minLength: 0)
+                    VStack(alignment: .leading, spacing: 8) {
+                        blocksView
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(style.bubble))
+                    .frame(maxWidth: 500, alignment: .trailing)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 13)
-                .background(RoundedRectangle(cornerRadius: Theme.radiusFloat).fill(style.bubble))
-                .frame(maxWidth: 500, alignment: .trailing)
+                if let actions {
+                    MessageToolbar(message: message, actions: actions, visible: hovered)
+                }
             }
+            .onHover { hovered = $0 }
         } else {
             // The agent's turn: plain rich text on the page. 12pt between
             // blocks — thoughts, tool folds, and prose need air to read
@@ -3381,8 +3843,13 @@ struct MessageView: View {
                         .foregroundStyle(Theme.heading)
                 }
                 blocksView
+                if let actions {
+                    MessageToolbar(message: message, actions: actions, visible: hovered)
+                        .padding(.top, -6)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .onHover { hovered = $0 }
         }
     }
 
@@ -3412,7 +3879,7 @@ struct MessageView: View {
     /// disclosure the user can expand; a lone tool stays a plain chip.
     private enum Piece: Identifiable {
         case block(Int, ChatMessage.Block)
-        case toolRun(Int, [(name: String, detail: String)])
+        case toolRun(Int, [ToolCall])
 
         var id: String {
             switch self {
@@ -3432,7 +3899,7 @@ struct MessageView: View {
 
     private var pieces: [Piece] {
         var out: [Piece] = []
-        var run: [(name: String, detail: String)] = []
+        var run: [ToolCall] = []
         var runStart = 0
         func flush() {
             guard !run.isEmpty else { return }
@@ -3440,10 +3907,10 @@ struct MessageView: View {
             run = []
         }
         for (index, block) in message.blocks.enumerated() {
-            if case let .tool(name, detail) = block {
+            if case let .tool(call) = block {
                 guard showTools else { continue }
                 if run.isEmpty { runStart = index }
-                run.append((name, detail))
+                run.append(call)
             } else {
                 flush()
                 out.append(.block(index, block))
@@ -3468,54 +3935,15 @@ struct MessageView: View {
     }
 
     @ViewBuilder
-    private func toolRunView(
-        start: Int, run: [(name: String, detail: String)]
-    ) -> some View {
-        if run.count == 1 {
-            toolChip(run[0])
-        } else {
-            let expanded = expandedRuns.contains(start)
-            VStack(alignment: .leading, spacing: 5) {
-                Button {
-                    if expanded {
-                        expandedRuns.remove(start)
-                    } else {
-                        expandedRuns.insert(start)
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        LucideIcon("chevron-right", size: 10)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                        LucideIcon("wrench", size: 12)
-                        Text("\(run.count) steps")
-                            .font(Theme.Fonts.mono)
-                    }
-                    .foregroundStyle(Theme.textSecondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(expanded ? "Hide the steps" : "Show the steps")
-                if expanded {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(run.enumerated()), id: \.offset) { _, tool in
-                            toolChip(tool)
-                        }
-                    }
-                    .padding(.leading, 14)
-                }
-            }
-        }
-    }
-
-    private func toolChip(_ tool: (name: String, detail: String)) -> some View {
-        HStack(spacing: 6) {
-            // Thinking steps wear a brain, tool calls the wrench.
-            LucideIcon(tool.name == "Thinking" ? "brain" : "wrench", size: 12)
-            Text(tool.detail.isEmpty ? tool.name : "\(tool.name) · \(tool.detail)")
-                .font(Theme.Fonts.mono)
-                .lineLimit(1)
-        }
-        .foregroundStyle(Theme.textSecondary)
+    private func toolRunView(start: Int, run: [ToolCall]) -> some View {
+        ToolRunView(
+            calls: run,
+            expanded: Binding(
+                get: { expandedRuns.contains(start) },
+                set: { if $0 { expandedRuns.insert(start) } else { expandedRuns.remove(start) } }
+            ),
+            dimmed: isNarration(start)
+        )
     }
 
     /// "Ask About Selected Text": thread the highlighted run when it can
@@ -3622,7 +4050,9 @@ struct MessageView: View {
         case let .fragment(title, _):
             FragmentChip(title: title, accent: message.role == .user)
         case let .image(path):
-            ChatImageBlock(path: path)
+            ChatImageBlock(source: .file(path))
+        case let .imageData(data, _):
+            ChatImageBlock(source: .data(data, id: block.id))
         }
     }
 
@@ -3834,17 +4264,67 @@ private struct ThreadableBlock<Content: View>: View {
 /// still travels in the message text for the CLI). Click opens the file;
 /// a deleted temp file degrades to a filename chip.
 private struct ChatImageBlock: View {
-    let path: String
+    /// A file the composer attached (rendered live from disk), or the
+    /// bytes a transcript line carries (a paste — Claude stores it
+    /// base64 in the message, there is no file).
+    enum Source {
+        case file(String)
+        case data(Data, id: String)
+    }
+    let source: Source
 
-    /// Decoded thumbnails, keyed by path — transcripts re-render often
-    /// and screenshots are megabytes; decode each at most once.
+    /// Decoded thumbnails, keyed by path or block id — transcripts
+    /// re-render often and screenshots are megabytes; decode each at
+    /// most once. Bounded: a long chat of pastes would otherwise pin
+    /// every one in memory for the app's lifetime.
     @MainActor private static var cache: [String: NSImage] = [:]
 
+    private var key: String {
+        switch source {
+        case let .file(path): path
+        case let .data(_, id): id
+        }
+    }
+
     private var image: NSImage? {
-        if let hit = Self.cache[path] { return hit }
-        guard let loaded = NSImage(contentsOfFile: path) else { return nil }
-        Self.cache[path] = loaded
+        if let hit = Self.cache[key] { return hit }
+        let loaded: NSImage? = switch source {
+        case let .file(path): NSImage(contentsOfFile: path)
+        case let .data(data, _): NSImage(data: data)
+        }
+        guard let loaded else { return nil }
+        if Self.cache.count > 64 { Self.cache.removeAll() }
+        Self.cache[key] = loaded
         return loaded
+    }
+
+    private var path: String {
+        if case let .file(path) = source { return path }
+        return ""
+    }
+
+    /// Click opens the picture in Preview: the file itself, or the
+    /// pasted bytes written out once under the temp dir.
+    private func open() {
+        switch source {
+        case let .file(path):
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        case let .data(data, id):
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("HoustonImages", isDirectory: true)
+            try? FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+            let name = id.replacingOccurrences(of: ":", with: "-")
+                .replacingOccurrences(of: "-", with: "_")
+            let file = dir.appendingPathComponent("\(name).png")
+            if !FileManager.default.fileExists(atPath: file.path) {
+                let png = NSBitmapImageRep(data: data)?
+                    .representation(using: .png, properties: [:]) ?? data
+                guard (try? png.write(to: file)) != nil else { return }
+            }
+            NSWorkspace.shared.open(file)
+        }
     }
 
     var body: some View {
@@ -3862,10 +4342,9 @@ private struct ChatImageBlock: View {
                     RoundedRectangle(cornerRadius: Theme.radiusSurface)
                         .strokeBorder(Color.black.opacity(0.15), lineWidth: 1)
                 )
-                .onTapGesture {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
-                }
-                .help((path as NSString).abbreviatingWithTildeInPath)
+                .onTapGesture { open() }
+                .help(path.isEmpty
+                    ? "Pasted image" : (path as NSString).abbreviatingWithTildeInPath)
         } else {
             HStack(spacing: 5) {
                 LucideIcon("image", size: 12)
@@ -4013,14 +4492,14 @@ private struct CodeCard: View {
 /// numbered lists (with nesting), quotes, and standalone links as
 /// clickable cards. Inline styling (bold, code, links) rides
 /// AttributedString on each piece.
-private struct MarkdownBlockView: View {
+struct MarkdownBlockView: View {
     let text: String
     let color: Color
     /// On the user bubble — links and inline code adapt to the custom
     /// bubble color instead of assuming the page background.
     var accent: Bool = false
 
-    private enum Part: Identifiable {
+    enum Part: Identifiable, Equatable {
         case paragraph(String)
         case heading(Int, String)
         case bullet(indent: Int, text: String)
@@ -4029,6 +4508,11 @@ private struct MarkdownBlockView: View {
         case linkCard(URL)
         /// A run of `$ command` lines — a shell snippet, not prose.
         case shell(String)
+        /// A pipe table: header cells (empty when the table had no
+        /// delimiter row), per-column alignment, body rows.
+        case table(header: [String], aligns: [TextAlignment], rows: [[String]])
+        /// A thematic break (`---`).
+        case rule
 
         var id: String {
             switch self {
@@ -4039,6 +4523,8 @@ private struct MarkdownBlockView: View {
             case let .quote(t): "q:\(t.hashValue)"
             case let .linkCard(u): "l:\(u.absoluteString)"
             case let .shell(t): "s:\(t.hashValue)"
+            case let .table(h, _, r): "t:\(h.hashValue):\(r.count)"
+            case .rule: "hr"
             }
         }
     }
@@ -4070,6 +4556,7 @@ private struct MarkdownBlockView: View {
         switch part {
         case .bullet, .numbered: return 8
         case .heading: return 6
+        case .rule: return 4
         default: return 16
         }
     }
@@ -4116,7 +4603,71 @@ private struct MarkdownBlockView: View {
             LinkCard(url: url)
         case let .shell(commands):
             CodeCard(code: commands, lang: "shell")
+        case let .table(header, aligns, rows):
+            tableView(header: header, aligns: aligns, rows: rows)
+        case .rule:
+            Rectangle()
+                .fill(color.opacity(0.18))
+                .frame(height: 1)
+                .padding(.vertical, 6)
         }
+    }
+
+    /// A pipe table as a grid: header strip, hairline between rows,
+    /// cells wrapping within the column (no sideways scroll — a wide
+    /// table gets narrow columns, like the desktop apps). Rendered
+    /// plain-text with its pipes before 2026-10-20.
+    private func tableView(
+        header: [String], aligns: [TextAlignment], rows: [[String]]
+    ) -> some View {
+        let columns = max(header.count, rows.map(\.count).max() ?? 0)
+        func cell(_ text: String, _ column: Int, header: Bool) -> some View {
+            let align = column < aligns.count ? aligns[column] : .leading
+            return Text(Self.inline(text, onAccent: accent))
+                .font(.system(size: 14, weight: header ? .semibold : .regular))
+                .foregroundStyle(color)
+                .tint(accent ? color : Theme.link)
+                .textSelection(.enabled)
+                .multilineTextAlignment(align)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: align == .center ? .center
+                        : (align == .trailing ? .trailing : .leading)
+                )
+        }
+        return Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            if !header.isEmpty {
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { column in
+                        cell(column < header.count ? header[column] : "", column, header: true)
+                            .background(color.opacity(accent ? 0.1 : 0.05))
+                    }
+                }
+                Rectangle().fill(color.opacity(0.18)).frame(height: 1)
+                    .gridCellUnsizedAxes(.horizontal)
+            }
+            ForEach(rows.indices, id: \.self) { row in
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { column in
+                        cell(column < rows[row].count ? rows[row][column] : "", column, header: false)
+                    }
+                }
+                if row < rows.count - 1 {
+                    Rectangle().fill(color.opacity(0.1)).frame(height: 1)
+                        .gridCellUnsizedAxes(.horizontal)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSurface))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.radiusSurface)
+                .strokeBorder(color.opacity(0.18), lineWidth: 1)
+        )
+        .frame(maxWidth: accent ? nil : .infinity, alignment: .leading)
     }
 
     /// One run of prose. `spacing` is the extra leading between lines,
@@ -4167,11 +4718,7 @@ private struct MarkdownBlockView: View {
     /// Inline markdown, with bare URLs promoted to tappable links and
     /// `code` spans tinted monospace so they read as code inline.
     private static func inline(_ text: String, onAccent: Bool) -> AttributedString {
-        let linked = text.replacingOccurrences(
-            of: #"(?<![("\[<])(https?://[^\s)\]>"']+)"#,
-            with: "[$1]($1)",
-            options: .regularExpression
-        )
+        let linked = promotingURLs(text)
         guard var attr = try? AttributedString(
             markdown: linked,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -4186,10 +4733,86 @@ private struct MarkdownBlockView: View {
         return attr
     }
 
-    private static func parse(_ text: String) -> [Part] {
+    /// Bare URLs become links — outside inline code spans only (a URL
+    /// in backticks used to render as literal `[url](url)`), and
+    /// without the sentence's trailing punctuation.
+    static func promotingURLs(_ text: String) -> String {
+        func promote(_ prose: Substring) -> String {
+            String(prose).replacingOccurrences(
+                of: #"(?<![("\[<])(https?://[^\s)\]>"']*[^\s)\]>"'.,;:!?])"#,
+                with: "[$1]($1)",
+                options: .regularExpression
+            )
+        }
+        guard text.contains("http") else { return text }
+        var out = ""
+        var rest = Substring(text)
+        while let tick = rest.firstIndex(of: "`") {
+            out += promote(rest[..<tick])
+            let afterTick = rest.index(after: tick)
+            guard let close = rest[afterTick...].firstIndex(of: "`") else {
+                return out + rest[tick...]
+            }
+            out += rest[tick...close]
+            rest = rest[rest.index(after: close)...]
+        }
+        return out + promote(rest)
+    }
+
+    /// One pipe-table row's cells: the outer pipes dropped, `\|` kept
+    /// as a literal pipe.
+    private static func tableCells(_ line: String) -> [String] {
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        for char in line {
+            if escaped {
+                current.append(char == "|" ? "|" : "\\\(char)")
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else if char == "|" {
+                cells.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        cells.append(current)
+        if cells.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeFirst() }
+        if cells.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A delimiter row (`|---|:--:|`) → per-column alignment; nil when
+    /// the row isn't one.
+    private static func tableAlignments(_ cells: [String]) -> [TextAlignment]? {
+        guard !cells.isEmpty else { return nil }
+        var out: [TextAlignment] = []
+        for cell in cells {
+            guard cell.range(of: #"^:?-+:?$"#, options: .regularExpression) != nil
+            else { return nil }
+            let left = cell.hasPrefix(":"), right = cell.hasSuffix(":")
+            out.append(left && right ? .center : (right ? .trailing : .leading))
+        }
+        return out
+    }
+
+    private static func tablePart(_ lines: [String]) -> Part {
+        let rows = lines.map(tableCells)
+        if rows.count >= 2, let aligns = tableAlignments(rows[1]) {
+            return .table(header: rows[0], aligns: aligns, rows: Array(rows.dropFirst(2)))
+        }
+        return .table(header: [], aligns: [], rows: rows)
+    }
+
+    static func parse(_ text: String) -> [Part] {
         var parts: [Part] = []
         var paragraph: [String] = []
         var shell: [String] = []
+        var table: [String] = []
+        /// The part index of the list item an indented line continues.
+        var openItem: Int?
         func flush() {
             let joined = paragraph.joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4200,15 +4823,28 @@ private struct MarkdownBlockView: View {
             if !shell.isEmpty { parts.append(.shell(shell.joined(separator: "\n"))) }
             shell = []
         }
+        func flushTable() {
+            if !table.isEmpty { parts.append(tablePart(table)) }
+            table = []
+        }
         for rawLine in text.components(separatedBy: "\n") {
             let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
             // Consecutive "$ command" lines gather into one shell snippet.
             if trimmed.hasPrefix("$ ") {
-                flush()
+                flush(); flushTable()
+                openItem = nil
                 shell.append(String(trimmed.dropFirst(2)))
                 continue
             }
             flushShell()
+            // Consecutive pipe rows gather into one table.
+            if trimmed.hasPrefix("|"), trimmed.dropFirst().contains("|") {
+                flush()
+                openItem = nil
+                table.append(trimmed)
+                continue
+            }
+            flushTable()
             if trimmed.isEmpty { flush(); continue }
             let leading = rawLine.prefix { $0 == " " }.count
             let indent = min(leading / 2, 4)
@@ -4217,11 +4853,20 @@ private struct MarkdownBlockView: View {
                 of: #"^https?://\S+$"#, options: .regularExpression
             ) != nil, let url = URL(string: trimmed) {
                 flush()
+                openItem = nil
                 parts.append(.linkCard(url))
+            } else if trimmed.range(
+                of: #"^([-*_])( ?\1){2,}$"#, options: .regularExpression
+            ) != nil {
+                // `---` is a rule, not a paragraph of dashes.
+                flush()
+                openItem = nil
+                parts.append(.rule)
             } else if let match = trimmed.range(
-                of: #"^#{1,4} "#, options: .regularExpression
+                of: #"^#{1,6} "#, options: .regularExpression
             ) {
                 flush()
+                openItem = nil
                 let level = trimmed.distance(from: trimmed.startIndex, to: match.upperBound) - 1
                 parts.append(.heading(level, String(trimmed[match.upperBound...])))
             } else if let match = trimmed.range(
@@ -4231,6 +4876,7 @@ private struct MarkdownBlockView: View {
                 parts.append(.bullet(
                     indent: indent, text: String(trimmed[match.upperBound...])
                 ))
+                openItem = parts.count - 1
             } else if let match = trimmed.range(
                 of: #"^\d{1,3}[.)] "#, options: .regularExpression
             ) {
@@ -4241,15 +4887,31 @@ private struct MarkdownBlockView: View {
                         .trimmingCharacters(in: .whitespaces),
                     text: String(trimmed[match.upperBound...])
                 ))
+                openItem = parts.count - 1
             } else if trimmed.hasPrefix("> ") {
                 flush()
+                openItem = nil
                 parts.append(.quote(String(trimmed.dropFirst(2))))
+            } else if leading >= 2, let item = openItem, paragraph.isEmpty {
+                // An indented line under a list item continues the item
+                // (the explanation under "1. **Step**"); it used to fall
+                // out as its own flush-left paragraph.
+                switch parts[item] {
+                case let .bullet(indent, body):
+                    parts[item] = .bullet(indent: indent, text: body + "\n" + trimmed)
+                case let .numbered(indent, marker, body):
+                    parts[item] = .numbered(indent: indent, marker: marker, text: body + "\n" + trimmed)
+                default:
+                    paragraph.append(rawLine)
+                }
             } else {
+                openItem = nil
                 paragraph.append(rawLine)
             }
         }
         flush()
         flushShell()
+        flushTable()
         return parts
     }
 }
@@ -4295,5 +4957,273 @@ private struct LinkCard: View {
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .help(url.absoluteString)
+    }
+}
+
+
+// MARK: - Headless self-test (HOUSTON_CHAT_SELFTEST=1)
+
+/// Checks the chat renderer's two parsers — `ChatArchive.splitMarkdown`
+/// (fences) and `MarkdownBlockView.parse` (blocks) — against the shapes
+/// real replies take. `HOUSTON_CHAT_SELFTEST=1 .build/debug/Houston`
+/// prints results and exits non-zero on a failure; run it after touching
+/// either parser.
+enum ChatRenderSelfTest {
+    @MainActor
+    static func run() -> Int32 {
+        var failures = 0
+        func expect<T: Equatable>(_ name: String, _ got: T, _ want: T) {
+            if got == want {
+                print("ok   \(name)")
+            } else {
+                failures += 1
+                print("FAIL \(name)\n--- want\n\(want)\n--- got\n\(got)")
+            }
+        }
+        func shape(_ blocks: [ChatMessage.Block]) -> [String] {
+            blocks.map { block in
+                switch block {
+                case let .text(t): "text(\(t))"
+                case let .code(c, lang): "code[\(lang ?? "")](\(c))"
+                default: "other"
+                }
+            }
+        }
+
+        // Fences.
+        expect("plain fence", shape(ChatArchive.splitMarkdown(
+            "Before\n```swift\n    let x = 1\n```\nAfter")),
+            ["text(Before)", "code[swift](    let x = 1)", "text(After)"])
+        expect("fence inside a list item dedents by the fence's indent",
+            shape(ChatArchive.splitMarkdown("1. Run:\n   ```bash\n   cd ~/x\n     nested\n   ```\n2. Done")),
+            ["text(1. Run:)", "code[bash](cd ~/x\n  nested)", "text(2. Done)"])
+        expect("longer fence keeps an inner ``` as code",
+            shape(ChatArchive.splitMarkdown("````md\n```js\nx\n```\n````\ntail")),
+            ["code[md](```js\nx\n```)", "text(tail)"])
+        expect("tilde fence", shape(ChatArchive.splitMarkdown("~~~\na\n~~~")), ["code[](a)"])
+        expect("info string first word", shape(ChatArchive.splitMarkdown("```bash title=x\na\n```")),
+            ["code[bash](a)"])
+        expect("unclosed fence while streaming is code",
+            shape(ChatArchive.splitMarkdown("Here:\n```py\nprint(")), ["text(Here:)", "code[py](print()"])
+        expect("inline backticks are not a fence",
+            shape(ChatArchive.splitMarkdown("use ```x``` here")), ["text(use ```x``` here)"])
+
+        // Blocks.
+        typealias P = MarkdownBlockView.Part
+        expect("table with header", MarkdownBlockView.parse(
+            "Intro\n\n| A | B |\n|---|:-:|\n| 1 | 2 |\n| 3 | 4 |\n\nOutro"),
+            [.paragraph("Intro"),
+             .table(header: ["A", "B"], aligns: [.leading, .center], rows: [["1", "2"], ["3", "4"]]),
+             .paragraph("Outro")])
+        expect("table without delimiter row", MarkdownBlockView.parse("| a | b |\n| c | d |"),
+            [.table(header: [], aligns: [], rows: [["a", "b"], ["c", "d"]])])
+        expect("escaped pipe in a cell", MarkdownBlockView.parse("| a \\| b | c |\n|---|---|\n| 1 | 2 |"),
+            [.table(header: ["a | b", "c"], aligns: [.leading, .leading], rows: [["1", "2"]])])
+        expect("rule", MarkdownBlockView.parse("a\n\n---\n\nb"),
+            [.paragraph("a"), .rule, .paragraph("b")])
+        expect("h5", MarkdownBlockView.parse("##### Deep"), [.heading(5, "Deep")])
+        expect("indented continuation joins the item",
+            MarkdownBlockView.parse("1. **Step**\n   detail here\n2. Next"),
+            [.numbered(indent: 0, marker: "1.", text: "**Step**\ndetail here"),
+             .numbered(indent: 0, marker: "2.", text: "Next")])
+        expect("continuation after a blank line still joins",
+            MarkdownBlockView.parse("- item\n\n  more\n\nPara"),
+            [.bullet(indent: 0, text: "item\nmore"), .paragraph("Para")])
+        expect("nested bullet stays a bullet", MarkdownBlockView.parse("- a\n  - b"),
+            [.bullet(indent: 0, text: "a"), .bullet(indent: 1, text: "b")])
+        expect("flush-left line after a list is a paragraph",
+            MarkdownBlockView.parse("- a\nplain"), [.bullet(indent: 0, text: "a"), .paragraph("plain")])
+        expect("bare url line is a card", MarkdownBlockView.parse("https://x.y/z").count, 1)
+
+        // Inline URL promotion.
+        let promoted = MarkdownBlockView.promotingURLs("see https://a.b/c. and `https://d.e` ok")
+        expect("url promotion skips code and trailing period", promoted,
+            "see [https://a.b/c](https://a.b/c). and `https://d.e` ok")
+
+        // Transcript: pasted images are base64 `image` blocks on the user
+        // line (the TUI's paste and Houston's own sends), beside text or
+        // alone. Tiny valid PNG (1×1), as the CLI stores it.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        let image = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"\(png)\"}}"
+        let lines = [
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"look /tmp/shot.png\"},\(image)]}}",
+            "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Image: source: /x/1.png]\"}]}}",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"A red square.\"}]}}",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[\(image)]}}",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Same one.\"}]}}",
+        ]
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("houston-chat-selftest-\(UUID().uuidString.prefix(6)).jsonl")
+        try? lines.joined(separator: "\n").write(to: file, atomically: true, encoding: .utf8)
+        let messages = ChatArchive.transcript(ChatSessionRef(
+            harness: .claude, filePath: file.path, title: "t", modified: Date()
+        ))
+        try? FileManager.default.removeItem(at: file)
+        func kinds(_ m: ChatMessage) -> String {
+            (m.role == .user ? "U:" : "A:") + m.blocks.map { block in
+                switch block {
+                case .text: "text"
+                case .image: "path"
+                case .imageData: "bytes"
+                default: "other"
+                }
+            }.joined(separator: ",")
+        }
+        expect("pasted images render from the stored bytes, paths not doubled, paste-only turn kept",
+            messages.map(kinds), ["U:bytes,text", "A:text", "U:bytes", "A:text"])
+
+        // Attachment encoding: small web formats pass through; anything
+        // else is resampled to the API's 1568px maximum.
+        let dir = FileManager.default.temporaryDirectory
+        let small = dir.appendingPathComponent("houston-small.png")
+        try? Data(base64Encoded: png)?.write(to: small)
+        expect("small png passes through", ImageAttachment.encode(path: small.path)?.base64, png)
+        let big = NSImage(size: NSSize(width: 3200, height: 1800), flipped: false) { rect in
+            NSColor.systemTeal.setFill(); rect.fill(); return true
+        }
+        let tiff = dir.appendingPathComponent("houston-big.tiff")
+        try? big.tiffRepresentation?.write(to: tiff)
+        let encoded = ImageAttachment.encode(path: tiff.path)
+        let decoded = encoded.flatMap { Data(base64Encoded: $0.base64) }.flatMap { NSBitmapImageRep(data: $0) }
+        expect("big tiff resamples to png", encoded?.mediaType, "image/png")
+        expect("longest side capped", decoded.map { max($0.pixelsWide, $0.pixelsHigh) } ?? -1, 1568)
+        try? FileManager.default.removeItem(at: small)
+        try? FileManager.default.removeItem(at: tiff)
+
+        // Tool calls: the Claude adapter on the verified wire shapes
+        // (2026-10-21 probe), the diff engine, and transcript pairing of
+        // a tool_use with the tool_result + toolUseResult on a later line.
+        let edit = ToolCall.fromClaude(id: "t1", name: "Edit", input: [
+            "file_path": "/x/a.txt", "old_string": "hello", "new_string": "hello world",
+        ])
+        expect("edit call typed from input", [edit.kind.rawValue, edit.title, "\(edit.diff?.added ?? -1)/\(edit.diff?.removed ?? -1)"],
+            ["edit", "Edit a.txt", "1/1"])
+        var bash = ToolCall.fromClaude(id: "t2", name: "Bash", input: ["command": "cat a.txt", "description": "Print contents"])
+        bash.applyClaudeResult(
+            block: ["type": "tool_result", "tool_use_id": "t2", "content": "hello world", "is_error": false],
+            structured: ["stdout": "hello world", "stderr": "warn", "interrupted": false]
+        )
+        expect("bash result merges stdout and stderr", [bash.title, bash.command ?? "", bash.output ?? "", "\(bash.status == .done)"],
+            ["Print contents", "cat a.txt", "hello world\nwarn", "true"])
+        var read = ToolCall.fromClaude(id: "t3", name: "Read", input: ["file_path": "/x/a.txt"])
+        read.applyClaudeResult(block: ["type": "tool_result", "tool_use_id": "t3", "content": "1\thello world\n2\t"], structured: nil)
+        expect("read result strips line-number prefixes", read.output ?? "", "hello world")
+        let between = FileDiff.between("a\nb\nc\n", "a\nB\nc\nd\n")
+        expect("line diff", between.hunks[0].lines.map { ($0.kind == .added ? "+" : ($0.kind == .removed ? "-" : " ")) + $0.text },
+            [" a", "-b", "+B", " c", "+d"])
+        let patch = FileDiff.fromStructuredPatch([[
+            "oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 1, "lines": [" x", "-hello", "+hello world"],
+        ]])
+        expect("structured patch", [patch?.hunks.first?.oldStart ?? 0, patch?.added ?? 0, patch?.removed ?? 0], [3, 1, 1])
+        let question = ToolCall.fromClaude(id: "t4", name: "AskUserQuestion", input: ["questions": [[
+            "question": "Which?", "header": "Pick", "multiSelect": false,
+            "options": [["label": "A", "description": "first"], ["label": "B", "description": ""]],
+        ]]])
+        expect("question typed", [question.kind.rawValue, question.questions.first?.options.map(\.label).joined() ?? ""], ["question", "AB"])
+        let todo = ToolCall.fromClaude(id: "t5", name: "TodoWrite", input: ["todos": [
+            ["content": "one", "status": "completed"], ["content": "two", "status": "in_progress"],
+        ]])
+        expect("todo typed", todo.title, "Plan · 1 of 2 done")
+
+        let toolLines = [
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"edit it\"}}",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"On it.\"},{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Edit\",\"input\":{\"file_path\":\"/x/a.txt\",\"old_string\":\"hello\",\"new_string\":\"hello world\"}}]}}",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"The file has been updated.\"}]},\"toolUseResult\":{\"filePath\":\"/x/a.txt\",\"structuredPatch\":[{\"oldStart\":7,\"oldLines\":1,\"newStart\":7,\"newLines\":1,\"lines\":[\"-hello\",\"+hello world\"]}]}}",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Done.\"}]}}",
+        ]
+        let toolFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("houston-chat-tools-\(UUID().uuidString.prefix(6)).jsonl")
+        try? toolLines.joined(separator: "\n").write(to: toolFile, atomically: true, encoding: .utf8)
+        let toolMessages = ChatArchive.transcript(ChatSessionRef(
+            harness: .claude, filePath: toolFile.path, title: "t", modified: Date()
+        ))
+        try? FileManager.default.removeItem(at: toolFile)
+        let reply = toolMessages.last
+        var pairedPatchStart = -1
+        var pairedStatus = ""
+        var unansweredStatus = ""
+        if let blocks = reply?.blocks {
+            for block in blocks {
+                if case let .tool(call) = block {
+                    if call.id == "toolu_1" {
+                        pairedPatchStart = call.diff?.hunks.first?.oldStart ?? -1
+                        pairedStatus = "\(call.status)"
+                    }
+                    if call.id == "toolu_2" { unansweredStatus = "\(call.status)" }
+                }
+            }
+        }
+        expect("tool results pair onto their calls, result lines are not messages",
+            [toolMessages.count, reply?.blocks.count ?? 0, pairedPatchStart], [2, 4, 7])
+        expect("paired call done, unanswered call settles", [pairedStatus, unansweredStatus], ["done", "done"])
+
+        // Completions.
+        let slash = CompletionContext.detect(in: "/sta")
+        expect("slash context", [slash?.kind == .command ? "command" : "none", slash?.query ?? ""], ["command", "sta"])
+        let at = CompletionContext.detect(in: "look at @Sour")
+        expect("@ context", [at?.kind == .file ? "file" : "none", at?.query ?? ""], ["file", "Sour"])
+        expect("no context after a space or mid-word slash", [
+            CompletionContext.detect(in: "/start ") == nil, CompletionContext.detect(in: "a/b") == nil,
+        ], [true, true])
+        expect("fuzzy prefers basename prefix",
+            (ComposerCompletions.fuzzyScore("Sources/Houston/Views/ChatView.swift", query: "chatv") ?? 0)
+                > (ComposerCompletions.fuzzyScore("Sources/Chat/Views/Other.swift", query: "chatv") ?? 0), true)
+
+        // Auth status: the CLI's JSON, with a chatty line ahead of it.
+        let authJSON = Data("warning: something\n{\"loggedIn\": false, \"authMethod\": \"none\"}\n".utf8)
+        expect("auth status parses past a chatty prefix",
+            ClaudeAuthStore.parse(authJSON).map { "\($0.loggedIn)/\($0.authMethod)" } ?? "nil", "false/none")
+        expect("auth status rejects non-JSON", ClaudeAuthStore.parse(Data("nope".utf8)) == nil, true)
+        // Informative: the real probe on this machine (nil = CLI not found).
+        print("info auth probe: \(ClaudeAuthStore.probe().map { "loggedIn=\($0.loggedIn) method=\($0.authMethod)" } ?? "nil")")
+
+        // Git actions on a throwaway repo: commit all, default branch,
+        // merge a feature branch into it and come back, conflict abort.
+        let repo = FileManager.default.temporaryDirectory
+            .appendingPathComponent("houston-git-\(UUID().uuidString.prefix(6))").path
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        _ = GitActions.run(["init", "-q", "-b", "main"], in: repo)
+        _ = GitActions.run(["config", "user.email", "t@example.com"], in: repo)
+        _ = GitActions.run(["config", "user.name", "T"], in: repo)
+        try? "one\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+        expect("changed files before commit", GitActions.changedFiles(in: repo), ["a.txt"])
+        expect("commit all", GitActions.commitAll(in: repo, message: "Add a").ok, true)
+        expect("clean after commit", GitActions.changedFiles(in: repo).count, 0)
+        expect("default branch", GitActions.defaultBranch(in: repo) ?? "nil", "main")
+        _ = GitActions.run(["switch", "-c", "feature", "-q"], in: repo)
+        try? "two\n".write(toFile: repo + "/b.txt", atomically: true, encoding: .utf8)
+        _ = GitActions.commitAll(in: repo, message: "Add b")
+        expect("merge into main and come back",
+            "\(GitActions.mergeIntoDefault(in: repo))|\(GitActions.currentBranch(in: repo) ?? "")",
+            "merged(into: \"main\")|feature")
+        expect("main has the merge", GitActions.run(["log", "--oneline", "main"], in: repo).output.contains("Add b"), true)
+        // Conflict: both branches change a.txt.
+        try? "feature\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+        _ = GitActions.commitAll(in: repo, message: "feature a")
+        _ = GitActions.run(["switch", "main", "-q"], in: repo)
+        try? "main\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+        _ = GitActions.commitAll(in: repo, message: "main a")
+        _ = GitActions.run(["switch", "feature", "-q"], in: repo)
+        expect("conflicting merge aborts and returns",
+            "\(GitActions.mergeIntoDefault(in: repo))|\(GitActions.currentBranch(in: repo) ?? "")|\(GitActions.changedFiles(in: repo).count)",
+            "conflicts(with: \"main\")|feature|0")
+        expect("dirty tree refuses to merge", {
+            try? "x\n".write(toFile: repo + "/c.txt", atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(atPath: repo + "/c.txt") }
+            if case .failed = GitActions.mergeIntoDefault(in: repo) { return true }
+            return false
+        }(), true)
+        expect("push without a remote fails with a reason", GitActions.push(in: repo).ok, false)
+        expect("fallback subject from the prompt",
+            GitActions.fallbackSubject(hint: "fix the chat image rendering please.", files: ["a"]),
+            "Fix the chat image rendering please")
+        expect("fallback subject from files",
+            GitActions.fallbackSubject(hint: "hi", files: ["x/a.swift", "b.swift", "c", "d"]),
+            "Update a.swift, b.swift, c and 1 more")
+        try? FileManager.default.removeItem(atPath: repo)
+
+        print(failures == 0 ? "all chat render checks passed" : "\(failures) chat render check(s) failed")
+        return failures == 0 ? 0 : 1
     }
 }

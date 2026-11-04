@@ -49,6 +49,8 @@ enum RightPanel: Equatable {
     /// target is self-contained (project, file, harness, anchor), so the
     /// panel works even if the chat behind it navigates away.
     case chatThread(ChatThreadTarget)
+    /// A project's Inbox automation policy (phase 3, 2026-11-04).
+    case inboxPolicy(project: String)
 }
 
 /// The project panel's segmented pages — Chat / Terminal / Server
@@ -155,6 +157,22 @@ struct MainWindowView: View {
         var sessionFile: String?
     }
     @State private var chatTarget: ChatTarget?
+    /// The document open as the workspace's surface (2026-10-20) — a
+    /// `.md` path from the project's `docs/` or the global folder. A
+    /// third surface beside chat and terminal; opening a chat or leaving
+    /// the project clears it.
+    @State private var docTarget: String?
+    @StateObject private var documents = DocumentStore.shared
+    @StateObject private var inbox = GitHubInboxStore.shared
+    @ObservedObject private var triageStore = InboxTriageStore.shared
+    /// The GitHub issue / pull request open as the workspace surface
+    /// (2026-11-04) — the Inbox module's page, beside chat, terminal
+    /// and documents. Exclusive with `docTarget`.
+    struct InboxTarget: Hashable {
+        var path: String
+        var number: Int
+    }
+    @State private var inboxTarget: InboxTarget?
     /// Within a project's workspace (chatTarget set): whether the detail
     /// surface shows the selected TERMINAL instead of the chat. The top
     /// bar and side panel stay either way — chat and terminal are two
@@ -431,6 +449,7 @@ struct MainWindowView: View {
             statusFeed.start()
             notify.start()
             tracked.start()
+            triageStore.start()
             terminals.startAgentPolling()
             terminals.detectInstalledAgents()
             chatIndex.refreshAll(store.pinnedProjects)
@@ -479,6 +498,8 @@ struct MainWindowView: View {
             // terminal you opened from a chat returns you to that chat.
             if let path = newValue?.projectPath, path != chatTarget?.path {
                 chatTarget = nil
+                docTarget = nil
+                inboxTarget = nil
             }
             if let path = newValue?.projectPath { chatIndex.refresh(path) }
             // Navigation does NOT dismiss the sheet (docked or floating) —
@@ -511,12 +532,23 @@ struct MainWindowView: View {
                 terminals.focusTerminal(path: path, tab: selection?.tabID)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .houstonWorkOnPull)) { note in
+            if let path = note.userInfo?["path"] as? String,
+               let number = note.userInfo?["number"] as? Int {
+                workOnPull(number: number, in: path)
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .houstonOpenProject)) { note in
             if let path = note.userInfo?["path"] as? String {
                 // An optional "tab" targets a specific nested shell (the
                 // chat login flow opens a fresh tab when the main pane is
                 // busy); without it the project's main terminal is fine.
-                if let raw = note.userInfo?["tab"] as? String,
+                // An "inbox" number lands on that PR's page instead (the
+                // policy's needs-you banner).
+                if let number = note.userInfo?["inbox"] as? Int {
+                    select(.project(path))
+                    openInboxItem(project: path, number: number)
+                } else if let raw = note.userInfo?["tab"] as? String,
                    let tab = UUID(uuidString: raw) {
                     select(.shell(path: path, tab: tab))
                 } else {
@@ -1305,7 +1337,7 @@ struct MainWindowView: View {
             }
         case let .chats(project):
             chatIndex.refresh(project, force: true)
-        case .servers, .server, .tasks, .capsules, .chatThread:
+        case .servers, .server, .tasks, .capsules, .chatThread, .inboxPolicy:
             break
         }
     }
@@ -1461,6 +1493,8 @@ struct MainWindowView: View {
             // Leaving the project (or the workspace) folds the CHATS
             // section back to its first page.
             if old?.path != new?.path { chatsPagesRevealed = 0 }
+            documents.watch(new?.path)
+            inbox.watch(new?.path)
         }
         // Once the close animation lands, drop the sheet's render
         // fallback — a closed sheet keeps building `lastRightPanel`'s
@@ -1638,6 +1672,7 @@ struct MainWindowView: View {
         case .capsules: "CAPSULES"
         case let .chats(project): name(of: project).uppercased()
         case .chatThread: "THREAD"
+        case .inboxPolicy: "AUTOMATION"
         case nil: ""
         }
     }
@@ -1783,6 +1818,9 @@ struct MainWindowView: View {
             .transition(Self.pageParent)
         case let .chatThread(target):
             ChatThreadPanel(target: target)
+                .transition(Self.pageChild)
+        case let .inboxPolicy(project):
+            InboxPolicyPanel(project: project)
                 .transition(Self.pageChild)
         case let .server(sid):
             // Resolve by live id first, then through the recent entry the id
@@ -2896,12 +2934,16 @@ struct MainWindowView: View {
                             .sessions[ref.filePath]?.phase else { return false }
                         return phase != .idle
                     }(),
-                    selected: chatTarget?.sessionFile == ref.filePath
+                    selected: docTarget == nil && inboxTarget == nil && chatTarget?.sessionFile == ref.filePath
                 ) {
                     withAnimation(Theme.quick) { barDropdown = nil }
                     openChat(project: path, file: ref.filePath)
                 }
             }
+        case .inbox:
+            inboxRows(path, dismiss: true)
+        case .docs:
+            docRows(path, dismiss: true)
         case .tasks:
             ProjectTaskRows(store: AnnotationStores.store(for: path), projectPath: path)
         }
@@ -3325,7 +3367,8 @@ struct MainWindowView: View {
                     onLogoutMCP: { mcp.logout(server: $0, path: path) },
                     hiddenItems: Set(settings.statusBarHiddenItems),
                     sessionRunning: terminals.agents[path] != nil,
-                    agent: terminals.agents[path]
+                    agent: terminals.agents[path],
+                    projectPath: path
                 )
                 .onAppear { mcp.refreshIfStale(path: path) }
             }
@@ -3558,6 +3601,28 @@ struct MainWindowView: View {
                     terminalCard(path)
                     chatHeaderBar(chatTarget.path)
                 }
+            } else if let inboxTarget {
+                VStack(spacing: 0) {
+                    chatHeaderBar(chatTarget.path)
+                    InboxItemView(
+                        project: inboxTarget.path,
+                        number: inboxTarget.number,
+                        store: inbox,
+                        onClose: { closeInboxItem() }
+                    )
+                    .id(inboxTarget)
+                }
+            } else if let docTarget {
+                VStack(spacing: 0) {
+                    chatHeaderBar(chatTarget.path)
+                    DocumentEditorView(
+                        path: docTarget,
+                        subtitle: documentSubtitle(docTarget),
+                        onRename: { renameDocument(docTarget, to: $0) },
+                        onClose: { closeDocument() }
+                    )
+                    .id(docTarget)
+                }
             } else {
                 VStack(spacing: 0) {
                     chatHeaderBar(chatTarget.path)
@@ -3775,6 +3840,8 @@ struct MainWindowView: View {
     private func openChat(project: String, file: String) {
         chatTarget = ChatTarget(path: project, sessionFile: file.isEmpty ? nil : file)
         detailShowsTerminal = false
+        docTarget = nil
+        inboxTarget = nil
         // Click a chat → type immediately (a re-click on the open chat
         // changes no state, so the composer's onAppear can't cover it).
         NotificationCenter.default.post(name: .houstonFocusComposer, object: nil)
@@ -3791,6 +3858,8 @@ struct MainWindowView: View {
         // just summons the workspace panel.
         let entering = chatTarget?.path != path
         if entering {
+            docTarget = nil
+            inboxTarget = nil
             // Coming back to a project lands ON a chat, not the blank
             // chat home: the one mid-turn or waiting on the user first
             // (2026-09-26 — clicking away and back shows the work), else
@@ -4050,6 +4119,8 @@ struct MainWindowView: View {
         case .servers: startProjectDevServer(path)
         case .terminals: newTerminal(in: path)
         case .chats: newChat(in: path)
+        case .inbox: newIssue(in: path)
+        case .docs: newDocument(in: DocumentStore.docsDir(for: path))
         case .tasks:
             NotificationCenter.default.post(name: .houstonFocusTaskInput, object: path)
         }
@@ -4061,6 +4132,8 @@ struct MainWindowView: View {
         case .servers: "Start the dev server"
         case .terminals: "Open a terminal in this project"
         case .chats: "Start a new chat"
+        case .inbox: "New issue on GitHub"
+        case .docs: "New document"
         case .tasks: "Add a task"
         }
     }
@@ -4118,6 +4191,12 @@ struct MainWindowView: View {
                 }
                 if shownPanelItems.contains(.chats) {
                     moduleCard { subChatsSection(path) }
+                }
+                if shownPanelItems.contains(.inbox) {
+                    moduleCard { subInboxSection(path) }
+                }
+                if shownPanelItems.contains(.docs) {
+                    moduleCard { subDocsSection(path) }
                 }
                 if shownPanelItems.contains(.tasks) {
                     moduleCard { subTasksSection(path) }
@@ -4215,6 +4294,8 @@ struct MainWindowView: View {
             ForEach(
                 WorkspaceItem.allCases.filter {
                     !shownPanelItems.contains($0) && ($0 != .servers || liveServers)
+                        // Inbox only once the repo is known to be on GitHub.
+                        && ($0 != .inbox || inbox.status(for: path) != .notGitHub)
                 },
                 id: \.self
             ) { item in
@@ -4295,6 +4376,16 @@ struct MainWindowView: View {
                     label: "Chats",
                     dotColor: busy ? Theme.dotActive : Theme.dotIdle
                 ) { toggleBarDropdown(item) }
+            case .inbox:
+                let open = inbox.items(for: path).count
+                let needsYou = triageStore.needsYou(project: path)
+                headerChip(
+                    icon: "inbox",
+                    label: open > 0 ? "Inbox · \(open)" : "Inbox",
+                    dotColor: needsYou > 0 ? Theme.dotDegraded : nil
+                ) { toggleBarDropdown(item) }
+            case .docs:
+                headerChip(icon: "file-text", label: "Docs") { toggleBarDropdown(item) }
             case .tasks:
                 let open = AnnotationStores.store(for: path).open.count
                 headerChip(
@@ -4322,6 +4413,8 @@ struct MainWindowView: View {
         guard chatTarget?.path != path else { return }
         chatTarget = ChatTarget(path: path, sessionFile: nil)
         detailShowsTerminal = false
+        docTarget = nil
+        inboxTarget = nil
         chatIndex.refresh(path, force: true)
     }
 
@@ -4382,6 +4475,9 @@ struct MainWindowView: View {
             dirty: git.rowStatuses[path]?.isDirty == true,
             status: info?.moduleStatus ?? "",
             worktrees: worktreeRows(for: path),
+            path: path,
+            info: info,
+            onChanged: { git.refresh() },
             onBranchMenu: { popBranchMenu(path) },
             onInitialize: {
                 closeBarDropdown()
@@ -4742,7 +4838,7 @@ struct MainWindowView: View {
                     title: chatTitler.displayTitle(ref),
                     busy: ChatSessionHub.shared.sessions[ref.filePath]
                         .map { $0.phase != .idle } ?? false,
-                    selected: chatTarget?.sessionFile == ref.filePath
+                    selected: docTarget == nil && inboxTarget == nil && chatTarget?.sessionFile == ref.filePath
                 ) { openChat(project: path, file: ref.filePath) }
                 // Same menu as the chat page's rows — one definition.
                 .contextMenu { chatContextMenu(project: path, ref: ref) }
@@ -4756,6 +4852,164 @@ struct MainWindowView: View {
     }
 
     private static let chatsPageSize = 5
+
+    /// The project's documents as a module card: its `docs/*.md`, then
+    /// the GLOBAL group shared by every project. Rows open the editor
+    /// as the workspace surface.
+    @ViewBuilder
+    private func subDocsSection(_ path: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            SubSectionHeader(
+                title: "DOCS", addHelp: "New document",
+                onAdd: { newDocument(in: DocumentStore.docsDir(for: path)) },
+                onMoveToBar: { moveToBar(.docs) }
+            )
+            docRows(path, dismiss: false)
+        }
+    }
+
+    /// The rows both homes share (side-panel card, bar dropdown).
+    @ViewBuilder
+    private func docRows(_ path: String, dismiss: Bool) -> some View {
+        let project = documents.docs(for: path)
+        if project.isEmpty {
+            dropdownEmpty("No documents yet")
+        }
+        ForEach(project) { ref in
+            docRow(ref, dismiss: dismiss)
+        }
+        DocGroupLabel(title: "GLOBAL", addHelp: "New global document") {
+            newDocument(in: DocumentStore.globalDir)
+        }
+        if documents.globalDocs.isEmpty {
+            dropdownEmpty("No global documents")
+        }
+        ForEach(documents.globalDocs) { ref in
+            docRow(ref, dismiss: dismiss)
+        }
+    }
+
+    /// The repo's open pull requests and issues as a module card.
+    @ViewBuilder
+    private func subInboxSection(_ path: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            SubSectionHeader(
+                title: "INBOX", addHelp: "New issue on GitHub",
+                onAdd: { newIssue(in: path) },
+                onMoveToBar: { moveToBar(.inbox) }
+            )
+            inboxRows(path, dismiss: false)
+        }
+    }
+
+    /// The rows both homes share (side-panel card, bar dropdown).
+    @ViewBuilder
+    private func inboxRows(_ path: String, dismiss: Bool) -> some View {
+        InboxModuleRows(
+            project: path, store: inbox,
+            selectedNumber: inboxTarget?.path == path ? inboxTarget?.number : nil
+        ) { item in
+            if dismiss { withAnimation(Theme.quick) { barDropdown = nil } }
+            openInboxItem(project: path, number: item.number)
+        }
+        if inbox.repos[path] != nil {
+            InboxAutomationRow(project: path) {
+                if dismiss { withAnimation(Theme.quick) { barDropdown = nil } }
+                toggleRightPanel(.inboxPolicy(project: path))
+            }
+        }
+    }
+
+    /// "Work on it": the PR as a kept worktree, selected like any project.
+    private func workOnPull(number: Int, in path: String) {
+        Task {
+            let result = await Task.detached {
+                GitWorktrees.checkoutPull(number: number, from: path)
+            }.value
+            switch result {
+            case let .success(dest):
+                git.refreshWorktrees()
+                select(.project(dest))
+            case let .failure(failure):
+                showGitError("Couldn't check out the pull request", failure.message)
+            }
+        }
+    }
+
+    /// Open an issue / PR as the workspace surface.
+    private func openInboxItem(project: String, number: Int) {
+        if chatTarget?.path != project {
+            chatTarget = ChatTarget(path: project, sessionFile: nil)
+        }
+        detailShowsTerminal = false
+        docTarget = nil
+        inboxTarget = InboxTarget(path: project, number: number)
+    }
+
+    private func closeInboxItem() {
+        inboxTarget = nil
+    }
+
+    /// GitHub's own new-issue form — Houston never writes to GitHub.
+    private func newIssue(in path: String) {
+        guard let repo = inbox.repos[path],
+              let url = URL(string: repo.url + "/issues/new") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func docRow(_ ref: DocRef, dismiss: Bool) -> some View {
+        SubSidebarRow(title: ref.title, selected: docTarget == ref.path) {
+            if dismiss { withAnimation(Theme.quick) { barDropdown = nil } }
+            openDocument(ref.path)
+        }
+        .contextMenu {
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: ref.path)])
+            }
+            Button("Move to Trash") {
+                if docTarget == ref.path { closeDocument() }
+                documents.trash(ref.path)
+            }
+        }
+    }
+
+    /// Open a document as the workspace surface. Its project (or, for a
+    /// global doc, the current workspace) hosts the top bar.
+    private func openDocument(_ path: String) {
+        let project = DocumentStore.project(of: path)
+            ?? chatTarget?.path ?? selection?.projectPath
+        guard let project else { return }
+        if chatTarget?.path != project {
+            chatTarget = ChatTarget(path: project, sessionFile: nil)
+        }
+        detailShowsTerminal = false
+        inboxTarget = nil
+        docTarget = path
+    }
+
+    private func newDocument(in dir: String) {
+        guard let ref = documents.create(in: dir) else { return }
+        openDocument(ref.path)
+    }
+
+    private func closeDocument() {
+        docTarget = nil
+        inboxTarget = nil
+    }
+
+    private func renameDocument(_ path: String, to title: String) {
+        guard let moved = documents.rename(path, to: title) else { return }
+        if docTarget == path { docTarget = moved }
+    }
+
+    /// "docs/Spec.md" under its project, "Global" for the shared folder.
+    private func documentSubtitle(_ path: String) -> String {
+        if let project = DocumentStore.project(of: path) {
+            return "docs/" + (path as NSString).lastPathComponent
+                + (chatTarget?.path == project ? "" : " · " + displayProjectName(project))
+        }
+        return "Global · " + (path as NSString).lastPathComponent
+    }
 
     /// The project's open tasks, as a module card: the same rows the bar
     /// dropdown shows (check to complete, click to open the tasks sheet).
@@ -6687,7 +6941,7 @@ private struct AttentionRing: View {
 /// (as a labeled chip) or the side panel (as a section). Order here is
 /// the display order in both.
 enum WorkspaceItem: String, CaseIterable {
-    case branches, servers, terminals, chats, tasks
+    case branches, servers, terminals, chats, inbox, docs, tasks
 }
 
 /// A module card's header (2026-09-23 mock): caps title on the left,
@@ -6720,6 +6974,28 @@ private struct SubSectionHeader: View {
         }
         .padding(.leading, 8)
         .frame(height: 28)
+    }
+}
+
+/// A sub-group label inside a module's rows (the Docs card's GLOBAL
+/// group): small caps title with its own "+".
+private struct DocGroupLabel: View {
+    let title: String
+    let addHelp: String
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .kerning(0.8)
+                .foregroundStyle(Theme.heading)
+            Spacer(minLength: 8)
+            PanelControlButton(icon: "plus", help: addHelp, action: onAdd)
+        }
+        .padding(.leading, 8)
+        .padding(.top, 6)
+        .frame(height: 30)
     }
 }
 

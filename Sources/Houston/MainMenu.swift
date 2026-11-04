@@ -211,6 +211,38 @@ enum MainMenu {
         viewItem.submenu = viewMenu
         main.addItem(viewItem)
 
+        // Format menu — the document editor's commands. Every item sends
+        // a `DocTextView` selector down the responder chain, so AppKit
+        // enables them only while a document has focus. The editor also
+        // claims the shortcuts that collide with ours (⌘B sidebar, ⌘K
+        // clear, ⌘S tasks) in `performKeyEquivalent` — the view gets the
+        // event before the menu does.
+        let formatItem = NSMenuItem()
+        let formatMenu = NSMenu(title: "Format")
+        func format(_ title: String, _ selector: String, _ key: String, _ mods: NSEvent.ModifierFlags) {
+            let item = NSMenuItem(title: title, action: Selector((selector)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = mods
+            formatMenu.addItem(item)
+        }
+        format("Bold", "toggleDocBold:", "b", [.command])
+        format("Italic", "toggleDocItalic:", "i", [.command])
+        format("Strikethrough", "toggleDocStrike:", "x", [.command, .shift])
+        format("Inline Code", "toggleDocCode:", "e", [.command])
+        format("Link…", "setDocLink:", "k", [.command])
+        formatMenu.addItem(.separator())
+        format("Paragraph", "setDocParagraph:", "0", [.command, .option])
+        format("Heading 1", "setDocHeading1:", "1", [.command, .option])
+        format("Heading 2", "setDocHeading2:", "2", [.command, .option])
+        format("Heading 3", "setDocHeading3:", "3", [.command, .option])
+        formatMenu.addItem(.separator())
+        format("Bulleted List", "setDocBullet:", "8", [.command, .shift])
+        format("Numbered List", "setDocNumbered:", "7", [.command, .shift])
+        format("Quote", "setDocQuote:", ".", [.command, .shift])
+        format("Code Block", "setDocCodeBlock:", "c", [.command, .option])
+        format("Divider", "insertDocRule:", "", [])
+        formatItem.submenu = formatMenu
+        main.addItem(formatItem)
+
         // Settings menu — the footer gear's options, reachable from the menu
         // bar. Rebuilt on every open so it always reflects the settings file.
         let settingsItem = NSMenuItem()

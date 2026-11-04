@@ -11,6 +11,8 @@ struct HoustonEvent: Identifiable, Equatable {
         case trackedDue
         /// New commits landed on the watched project's branch.
         case commit
+        /// A pull request in the Inbox crossed the policy's line.
+        case inboxNeedsYou
     }
 
     let id = UUID()
@@ -21,6 +23,8 @@ struct HoustonEvent: Identifiable, Equatable {
     let detail: String
     /// Clicking the row jumps here, when the event has a home.
     let projectPath: String?
+    /// For `.inboxNeedsYou`: the PR to open.
+    var inboxNumber: Int? = nil
 }
 
 /// The bell's feed: an in-session log of what happened while the user wasn't
@@ -44,7 +48,8 @@ final class EventFeed: ObservableObject {
         _ kind: HoustonEvent.Kind,
         title: String,
         detail: String,
-        projectPath: String? = nil
+        projectPath: String? = nil,
+        inboxNumber: Int? = nil
     ) {
         events.insert(
             HoustonEvent(
@@ -52,7 +57,8 @@ final class EventFeed: ObservableObject {
                 date: Date(),
                 title: title,
                 detail: detail,
-                projectPath: projectPath
+                projectPath: projectPath,
+                inboxNumber: inboxNumber
             ),
             at: 0
         )

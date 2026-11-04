@@ -100,14 +100,10 @@ final class AgentTransport: @unchecked Sendable {
         return path
     }
 
-    func start(
-        binary: String, arguments: [String], cwd: String,
-        extraEnvironment: [String: String] = [:]
-    ) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    /// The environment every CLI spawn gets (chat processes, the auth
+    /// probe): the app's own, scrubbed of inherited Claude Code markers
+    /// and with the user's real shell PATH.
+    static func spawnEnvironment(extra: [String: String] = [:]) -> [String: String] {
         // Same scrub as terminal panes: an inherited child-session marker
         // silently disables transcript saving, and the transcript IS the
         // chat.
@@ -117,12 +113,24 @@ final class AgentTransport: @unchecked Sendable {
         }
         // Provider API keys ride the spawn env (codex reads them via
         // `env_key`) — never written to any config file.
-        env.merge(extraEnvironment) { _, new in new }
+        env.merge(extra) { _, new in new }
         // The user's real shell PATH: node-shim CLIs (codex) die without
         // it when the app was launched with a minimal environment.
-        if let shellPATH = Self.userShellPATH() {
+        if let shellPATH = userShellPATH() {
             env["PATH"] = shellPATH
         }
+        return env
+    }
+
+    func start(
+        binary: String, arguments: [String], cwd: String,
+        extraEnvironment: [String: String] = [:]
+    ) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let env = Self.spawnEnvironment(extra: extraEnvironment)
         process.environment = env
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = stdin
@@ -212,11 +220,21 @@ final class AgentTransport: @unchecked Sendable {
 @MainActor
 final class ChatAgentSession: ObservableObject, Identifiable {
     struct ApprovalRequest: Identifiable, Equatable {
+        /// What the agent is asking for — the card renders each
+        /// differently (2026-10-21): a permission shows the typed call
+        /// (the diff, the command) with Allow/Auto/Deny; a question shows
+        /// its options and sends the picks back as the tool's answer; a
+        /// plan shows the markdown with Approve/Reject.
+        enum Kind: Equatable { case permission, question, plan }
         let id: String
         let title: String
         let detail: String
         /// Claude: the tool input to echo back on allow (JSON).
         let claudeInputJSON: String?
+        var kind: Kind = .permission
+        /// The call being approved, typed, when the harness gave enough
+        /// to type it (Claude always does).
+        var call: ToolCall? = nil
         /// Codex: the raw JSON-RPC id to echo in the response.
         let codexIDRaw: String?
         /// Gemini (ACP): the request's raw JSON-RPC id, plus the option
@@ -471,6 +489,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         // reload. Carry it until a transcript re-read absorbs it.
         carryLiveTurn()
         pendingUserText = text
+        lastPrompt = text
         liveBlocks = []
         resetStream()
         activity = nil
@@ -559,18 +578,44 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         )
     }
 
-    func respond(to request: ApprovalRequest, allow: Bool) {
+    /// Answer an AskUserQuestion: the picks per question (labels, several
+    /// joined for a multi-select, or the typed "Other" text) go back as
+    /// `updatedInput.answers` keyed by the question's text — the SDK's
+    /// answer shape — on an allow.
+    func answer(_ request: ApprovalRequest, answers: [String: String]) {
+        respond(to: request, allow: true, extraInput: ["answers": answers])
+    }
+
+    /// Reject a plan with the user's reason, so the model revises instead
+    /// of guessing why.
+    func reject(_ request: ApprovalRequest, feedback: String) {
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        respond(
+            to: request, allow: false,
+            message: trimmed.isEmpty
+                ? "The user rejected the plan. Ask what to change."
+                : "The user rejected the plan with this feedback: " + trimmed
+        )
+    }
+
+    func respond(
+        to request: ApprovalRequest, allow: Bool,
+        extraInput: [String: Any] = [:], message: String? = nil
+    ) {
         guard approval?.id == request.id else { return }
         approval = nil
         switch harness {
         case .claude:
             var inner: [String: Any] = allow
                 ? ["behavior": "allow"]
-                : ["behavior": "deny", "message": "User denied this in Houston"]
+                : ["behavior": "deny", "message": message ?? "User denied this in Houston"]
             if allow, let json = request.claudeInputJSON,
                let data = json.data(using: .utf8),
-               let input = try? JSONSerialization.jsonObject(with: data) {
+               var input = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                for (key, value) in extraInput { input[key] = value }
                 inner["updatedInput"] = input
+            } else if allow, !extraInput.isEmpty {
+                inner["updatedInput"] = extraInput
             }
             transport?.write([
                 "type": "control_response",
@@ -652,9 +697,21 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         let hints = [
             "login", "log in", "logged in", "logged out", "sign in",
             "api key", "unauthorized", "401", "authentication",
-            "not authenticated", "credential", "oauth",
+            "not authenticated", "credential", "oauth", "token expired",
+            "expired", "forbidden", "403",
         ]
         return hints.contains { message.contains($0) }
+    }
+
+    /// The prompt of the last turn this session started — what "Retry"
+    /// re-sends after a failed (signed-out) turn.
+    private(set) var lastPrompt: String?
+
+    /// Send the last prompt again (after signing back in).
+    func retryLast() {
+        guard let lastPrompt, let lastModel, !running else { return }
+        lastError = nil
+        send(text: lastPrompt, model: lastModel)
     }
 
     /// Absorb the finished turn (the transcript re-read now shows it).
@@ -726,12 +783,52 @@ final class ChatAgentSession: ObservableObject, Identifiable {
 
     private func sendClaude(text: String, model: ChatModelChoice) {
         guard ensureClaudeTransport(model: model) else { return }
+        // Attached images go as real `image` blocks (see
+        // `ImageAttachment`): the model sees the picture in the message
+        // itself, like a paste in the TUI or Claude desktop, instead of
+        // a bare path it has to Read. Encoding resamples big screenshots
+        // off the main thread; the live bubble meanwhile renders the
+        // paths from `pendingUserText`, and the transcript re-read swaps
+        // in the stored bytes — same pictures, no jump.
+        let split = ChatArchive.imagePaths(in: text)
+        guard !split.paths.isEmpty else {
+            writeClaudeUser([["type": "text", "text": text]])
+            return
+        }
+        let paths = split.paths
+        Task { [weak self] in
+            let encoded = await Task.detached(priority: .userInitiated) {
+                paths.map { ($0, ImageAttachment.encode(path: $0)) }
+            }.value
+            guard let self else { return }
+            var prose = split.prose
+            var images: [[String: Any]] = []
+            for (path, image) in encoded {
+                if let image {
+                    images.append(["type": "image", "source": [
+                        "type": "base64",
+                        "media_type": image.mediaType,
+                        "data": image.base64,
+                    ]])
+                } else {
+                    // Not a bitmap the system decodes (SVG, a broken
+                    // file): the path stays in the text, the old route.
+                    prose += (prose.isEmpty ? "" : " ")
+                        + (path.contains(" ") ? "\"\(path)\"" : path)
+                }
+            }
+            var content: [[String: Any]] = []
+            if !prose.isEmpty { content.append(["type": "text", "text": prose]) }
+            content += images
+            if content.isEmpty { content = [["type": "text", "text": text]] }
+            self.writeClaudeUser(content)
+        }
+    }
+
+    private func writeClaudeUser(_ content: [[String: Any]]) {
         transport?.write([
             "type": "user",
-            "message": [
-                "role": "user",
-                "content": [["type": "text", "text": text]],
-            ],
+            "message": ["role": "user", "content": content],
         ])
     }
 
@@ -891,21 +988,42 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 case "tool_use":
                     let name = block["name"] as? String ?? "tool"
                     let input = block["input"] as? [String: Any]
-                    liveBlocks.append(.tool(name: name, detail: Self.toolDetail(input)))
+                    liveBlocks.append(.tool(ToolCall.fromClaude(
+                        id: block["id"] as? String ?? UUID().uuidString,
+                        name: name, input: input ?? [:]
+                    )))
                     activity = Self.toolActivity(name, input)
                 case "thinking":
                     // A finished thinking block becomes a step in the
                     // run (same as the transcript parser), so the
                     // accordion shows what each think was about.
-                    if let text = block["thinking"] as? String {
-                        let brief = ChatArchive.thinkingBrief(text)
-                        if !brief.isEmpty {
-                            liveBlocks.append(.tool(name: "Thinking", detail: brief))
-                        }
+                    if let text = block["thinking"] as? String,
+                       !ChatArchive.thinkingBrief(text).isEmpty {
+                        liveBlocks.append(.tool(.thinking(text: text)))
                     }
                 default:
                     break
                 }
+            }
+        case "user":
+            // A tool's result (verified live 2026-10-21): `tool_result`
+            // blocks keyed by the call id, plus the structured
+            // `tool_use_result` beside the message — the same object the
+            // transcript stores as `toolUseResult`. Lands on the call's
+            // card in the live turn; subagent results (a parent id) are
+            // the subagent's business.
+            guard o["parent_tool_use_id"] as? String == nil,
+                  let message = o["message"] as? [String: Any],
+                  let content = message["content"] as? [[String: Any]] else { return }
+            for block in content where block["type"] as? String == "tool_result" {
+                guard let id = block["tool_use_id"] as? String,
+                      let index = liveBlocks.firstIndex(where: {
+                          if case let .tool(call) = $0 { return call.id == id }
+                          return false
+                      }),
+                      case var .tool(call) = liveBlocks[index] else { continue }
+                call.applyClaudeResult(block: block, structured: o["tool_use_result"])
+                liveBlocks[index] = .tool(call)
             }
         case "control_request":
             guard let id = o["request_id"] as? String,
@@ -917,11 +1035,26 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 let inputJSON = input
                     .flatMap { try? JSONSerialization.data(withJSONObject: $0) }
                     .flatMap { String(data: $0, encoding: .utf8) }
+                // AskUserQuestion and ExitPlanMode reach the client as
+                // permission requests for those tools (the SDK's own
+                // route): the answer rides back as `updatedInput`, a
+                // rejected plan as a deny with the feedback.
+                let call = ToolCall.fromClaude(
+                    id: request["tool_use_id"] as? String ?? id, name: tool, input: input ?? [:]
+                )
+                let kind: ApprovalRequest.Kind = switch tool {
+                case "AskUserQuestion": .question
+                case "ExitPlanMode": .plan
+                default: .permission
+                }
                 approval = ApprovalRequest(
                     id: id,
-                    title: "Allow \(tool)?",
+                    title: kind == .permission ? "Allow \(call.title)?"
+                        : (kind == .plan ? "Ready to start?" : "Claude has a question"),
                     detail: Self.toolDetail(input),
                     claudeInputJSON: inputJSON,
+                    kind: kind,
+                    call: call,
                     codexIDRaw: nil
                 )
             } else {
@@ -958,8 +1091,20 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 }
             }
             let subtype = o["subtype"] as? String
-            endTurn(error: (subtype == "success" || interrupting)
-                ? nil : "The turn failed (\(subtype ?? "unknown")).")
+            // The CLI's own words first ("Invalid API key · Please run
+            // /login"): `result` carries the message on an error subtype,
+            // `errors` the list — a bare "(error_during_execution)" hid
+            // every auth failure from `needsLogin` (2026-10-23).
+            var detail = (o["result"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if detail.isEmpty, let errors = o["errors"] as? [String] {
+                detail = errors.joined(separator: " ")
+            }
+            let failed = !(subtype == "success" || interrupting)
+                || (o["is_error"] as? Bool == true && !interrupting)
+            endTurn(error: failed
+                ? (detail.isEmpty ? "The turn failed (\(subtype ?? "unknown"))." : detail)
+                : nil)
         default:
             break
         }
@@ -1171,24 +1316,52 @@ final class ChatAgentSession: ObservableObject, Identifiable {
                 }
                 streamText = ""
             case "commandExecution":
-                liveBlocks.append(.tool(
-                    name: "Shell", detail: item["command"] as? String ?? ""
-                ))
+                let command = item["command"] as? String ?? ""
+                var call = ToolCall(
+                    id: item["id"] as? String ?? UUID().uuidString, name: "Shell",
+                    kind: .shell, title: "Run " + ChatArchive.condense(command),
+                    detail: command, status: .done
+                )
+                call.command = command
+                // Present when the app-server reports it; absent fields
+                // leave the card at its chip.
+                if let out = item["aggregatedOutput"] as? String, !out.isEmpty {
+                    let (kept, cut) = ToolCall.capped(out)
+                    call.output = kept
+                    call.outputTruncated = cut
+                }
+                if let code = item["exitCode"] as? Int, code != 0 {
+                    call.isError = true
+                    call.status = .failed
+                }
+                liveBlocks.append(.tool(call))
             case "fileChange":
-                let changes = (item["changes"] as? [[String: Any]])?.count ?? 0
-                liveBlocks.append(.tool(
-                    name: "Edit",
-                    detail: changes > 0 ? "\(changes) file(s)" : ""
-                ))
+                let changes = item["changes"] as? [[String: Any]] ?? []
+                let paths = changes.compactMap { $0["path"] as? String }
+                    .map { ($0 as NSString).lastPathComponent }
+                var call = ToolCall(
+                    id: item["id"] as? String ?? UUID().uuidString, name: "Edit",
+                    kind: .edit,
+                    title: paths.count == 1 ? "Edit " + paths[0]
+                        : (paths.isEmpty ? "Edited files" : "Edited \(paths.count) files"),
+                    detail: paths.joined(separator: ", "), status: .done
+                )
+                // A unified diff string per change, when the server
+                // provides one.
+                let diffs = changes.compactMap { $0["diff"] as? String }
+                if !diffs.isEmpty { call.output = diffs.joined(separator: "\n") }
+                liveBlocks.append(.tool(call))
             case "mcpToolCall":
-                liveBlocks.append(.tool(
+                liveBlocks.append(.tool(.simple(
+                    id: item["id"] as? String ?? UUID().uuidString,
                     name: item["tool"] as? String ?? "MCP",
                     detail: item["server"] as? String ?? ""
-                ))
+                )))
             case "webSearch":
-                liveBlocks.append(.tool(
-                    name: "WebSearch", detail: item["query"] as? String ?? ""
-                ))
+                liveBlocks.append(.tool(.simple(
+                    id: item["id"] as? String ?? UUID().uuidString,
+                    name: "WebSearch", detail: item["query"] as? String ?? "", kind: .search
+                )))
             default:
                 break
             }
@@ -1471,10 +1644,20 @@ final class ChatAgentSession: ObservableObject, Identifiable {
             let title = update["title"] as? String
                 ?? (update["kind"] as? String ?? "Tool")
             activity = title
-            let block = ChatMessage.Block.tool(
+            let acpKind: ToolCall.Kind = switch update["kind"] as? String {
+            case "read": .read
+            case "edit", "delete", "move": .edit
+            case "search": .search
+            case "execute": .shell
+            case "fetch": .fetch
+            case "think": .think
+            default: .other
+            }
+            let block = ChatMessage.Block.tool(ToolCall(
+                id: update["toolCallId"] as? String ?? UUID().uuidString,
                 name: acpToolName(update["kind"] as? String),
-                detail: title
-            )
+                kind: acpKind, title: title, status: .done
+            ))
             liveBlocks.append(block)
             acpTurnBlocks.append(block)
         case "usage_update":
@@ -1669,7 +1852,14 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         flushStream()
         currentTurnID = nil
         lastUsed = Date()
-        if let error { lastError = error }
+        if let error {
+            lastError = error
+            // A signed-out failure: re-check the CLI's auth so the composer
+            // and status bar offer sign-in too, not just this card.
+            if harness == .claude, needsLogin {
+                ClaudeAuthStore.shared.noteAuthFailure()
+            }
+        }
         completedTurns += 1
         ChatSessionHub.shared.noteActivity()
         // The transcript now holds the finished exchange — put it in the
@@ -1733,7 +1923,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
 
     /// A tool call in plain words for the loader row. `input` is nil when
     /// only the name is known yet (the block just opened).
-    static func toolActivity(_ name: String, _ input: [String: Any]?) -> String {
+    nonisolated static func toolActivity(_ name: String, _ input: [String: Any]?) -> String {
         func str(_ key: String) -> String? {
             (input?[key] as? String).flatMap { $0.isEmpty ? nil : $0 }
         }
@@ -1764,7 +1954,7 @@ final class ChatAgentSession: ObservableObject, Identifiable {
         }
     }
 
-    private static func toolDetail(_ input: [String: Any]?) -> String {
+    nonisolated private static func toolDetail(_ input: [String: Any]?) -> String {
         guard let input else { return "" }
         for key in ["description", "file_path", "command", "pattern", "query", "url"] {
             if let value = input[key] as? String, !value.isEmpty {

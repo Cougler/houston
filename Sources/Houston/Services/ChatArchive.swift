@@ -44,8 +44,9 @@ struct ChatMessage: Identifiable {
         case text(String)
         /// Fenced code with the fence's language hint, when it had one.
         case code(String, lang: String?)
-        /// A tool invocation, compressed to a chip: name + one-line detail.
-        case tool(name: String, detail: String)
+        /// A tool invocation — the harness-neutral `ToolCall` (name,
+        /// kind, diff, command, output…), rendered as an expandable step.
+        case tool(ToolCall)
         /// A capsule attachment marker — rendered as a capsule chip
         /// (short title; click opens the capsule view on `file`).
         case capsule(title: String, file: String)
@@ -57,15 +58,21 @@ struct ChatMessage: Identifiable {
         /// text (both CLIs read images straight off disk), but the chat
         /// renders a thumbnail, not the path.
         case image(path: String)
+        /// An image pasted into the message itself. Claude's transcript
+        /// stores pasted images as base64 `image` content blocks (the
+        /// TUI's paste, and Houston's own sends since 2026-10-20), so
+        /// the bytes are the only copy — there is no file to point at.
+        case imageData(Data, mediaType: String)
 
         var id: String {
             switch self {
             case let .text(s): "t:\(s.hashValue)"
             case let .code(s, _): "c:\(s.hashValue)"
-            case let .tool(name, detail): "x:\(name):\(detail.hashValue)"
+            case let .tool(call): "x:\(call.id)"
             case let .capsule(_, file): "cap:\(file.hashValue)"
             case let .fragment(title, _): "frag:\(title.hashValue)"
             case let .image(path): "img:\(path.hashValue)"
+            case let .imageData(data, _): "imgd:\(data.count):\(data.prefix(256).hashValue)"
             }
         }
     }
@@ -192,8 +199,14 @@ enum ChatArchive {
                 encoded.append(["t": "text", "v": text])
             case let .code(code, lang):
                 encoded.append(["t": "code", "v": code, "lang": lang ?? ""])
-            case let .tool(name, detail):
-                encoded.append(["t": "tool", "name": name, "detail": detail])
+            case let .tool(call):
+                var entry: [String: Any] = [
+                    "t": "tool", "name": call.name, "detail": call.detail,
+                    "kind": call.kind.rawValue, "title": call.title,
+                ]
+                if let command = call.command { entry["command"] = command }
+                if let output = call.output { entry["output"] = output }
+                encoded.append(entry)
             default:
                 break
             }
@@ -244,10 +257,17 @@ enum ChatArchive {
                     let lang = (raw["lang"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     blocks.append(.code(raw["v"] as? String ?? "", lang: lang))
                 case "tool":
-                    blocks.append(.tool(
-                        name: raw["name"] as? String ?? "Tool",
-                        detail: raw["detail"] as? String ?? ""
-                    ))
+                    let name = raw["name"] as? String ?? "Tool"
+                    let detail = raw["detail"] as? String ?? ""
+                    var call = ToolCall(
+                        id: "acp-\(messages.count)-\(blocks.count)", name: name,
+                        kind: ToolCall.Kind(rawValue: raw["kind"] as? String ?? "") ?? .other,
+                        title: raw["title"] as? String ?? (detail.isEmpty ? name : name + " · " + detail),
+                        detail: detail, status: .done
+                    )
+                    call.command = raw["command"] as? String
+                    call.output = raw["output"] as? String
+                    blocks.append(.tool(call))
                 default:
                     break
                 }
@@ -702,6 +722,9 @@ enum ChatArchive {
 
     private static func claudeTranscript(path: String) -> [ChatMessage] {
         var messages: [ChatMessage] = []
+        // tool_use id → where its call sits, so the tool_result on a later
+        // line (a `user` line with no words of the user's) lands on it.
+        var pendingCalls: [String: (message: Int, block: Int)] = [:]
         scanLines(path: path, maxBytes: .max) { obj in
             // Sidechains are subagent traffic; meta lines are harness
             // bookkeeping — neither is part of the conversation.
@@ -711,12 +734,44 @@ enum ChatArchive {
                   let message = obj["message"] as? [String: Any] else { return true }
             switch type {
             case "user":
+                // Tool results: `tool_result` blocks keyed by the call's
+                // id, with the structured `toolUseResult` beside the
+                // message (Edit's structuredPatch, Bash's stdout…).
+                var sawResult = false
+                for block in contentBlocks(message)
+                where block["type"] as? String == "tool_result" {
+                    sawResult = true
+                    guard let id = block["tool_use_id"] as? String,
+                          let at = pendingCalls.removeValue(forKey: id),
+                          at.message < messages.count,
+                          at.block < messages[at.message].blocks.count,
+                          case var .tool(call) = messages[at.message].blocks[at.block]
+                    else { continue }
+                    call.applyClaudeResult(block: block, structured: obj["toolUseResult"])
+                    messages[at.message].blocks[at.block] = .tool(call)
+                }
+                if sawResult { return true }
+                // Pasted images ride the line as base64 `image` blocks
+                // beside (or instead of) the text. A paste-only message
+                // has no text at all — it used to vanish from the chat.
+                let images = claudeUserImages(message)
                 if let text = claudeUserText(obj) {
                     if text.hasPrefix(handoffPrefix) {
                         append(.user, blocks: [.text(handoffNote)], into: &messages)
                     } else {
-                        append(.user, blocks: userBlocks(text), into: &messages)
+                        var blocks = userBlocks(text)
+                        if !images.isEmpty {
+                            // The pasted bytes ARE the picture; a path
+                            // left in the text would draw it twice.
+                            blocks.removeAll {
+                                if case .image = $0 { return true }
+                                return false
+                            }
+                        }
+                        append(.user, blocks: images + blocks, into: &messages)
                     }
+                } else if !images.isEmpty {
+                    append(.user, blocks: images, into: &messages)
                 }
             case "assistant":
                 var blocks: [ChatMessage.Block] = []
@@ -728,31 +783,49 @@ enum ChatArchive {
                             blocks += splitMarkdown(text)
                         }
                     case "tool_use":
-                        let name = block["name"] as? String ?? "tool"
-                        blocks.append(.tool(
-                            name: name,
-                            detail: toolDetail(input: block["input"] as? [String: Any])
-                        ))
+                        blocks.append(.tool(ToolCall.fromClaude(
+                            id: block["id"] as? String ?? UUID().uuidString,
+                            name: block["name"] as? String ?? "tool",
+                            input: block["input"] as? [String: Any] ?? [:]
+                        )))
                     case "thinking":
                         // A thinking block is a STEP like a tool call
                         // (2026-09-27): its summary's first line becomes
                         // the chip, so the run reads "Thinking · Planning
                         // the wave physics" instead of hiding the work.
-                        if let text = block["thinking"] as? String {
-                            let brief = thinkingBrief(text)
-                            if !brief.isEmpty {
-                                blocks.append(.tool(name: "Thinking", detail: brief))
-                            }
+                        if let text = block["thinking"] as? String,
+                           !thinkingBrief(text).isEmpty {
+                            blocks.append(.tool(.thinking(text: text)))
                         }
                     default:
                         break
                     }
                 }
-                if !blocks.isEmpty { append(.assistant, blocks: blocks, into: &messages) }
+                if !blocks.isEmpty {
+                    append(.assistant, blocks: blocks, into: &messages)
+                    // Register the calls at their final positions (append
+                    // may have merged them into the previous message).
+                    let index = messages.count - 1
+                    for (offset, block) in messages[index].blocks.enumerated() {
+                        if case let .tool(call) = block, call.status == .running,
+                           call.kind != .think {
+                            pendingCalls[call.id] = (index, offset)
+                        }
+                    }
+                }
             default:
                 break
             }
             return true
+        }
+        // A call whose result never came (an interrupted turn) isn't
+        // running any more.
+        for (_, at) in pendingCalls
+        where at.message < messages.count && at.block < messages[at.message].blocks.count {
+            if case var .tool(call) = messages[at.message].blocks[at.block] {
+                call.status = .done
+                messages[at.message].blocks[at.block] = .tool(call)
+            }
         }
         return messages
     }
@@ -834,7 +907,15 @@ enum ChatArchive {
                 detail = String(detail.dropFirst(prefix.count))
             }
         }
-        return .tool(name: String(name), detail: condense(detail))
+        let kind: ToolCall.Kind = switch String(name) {
+        case "Bash", "Shell": .shell
+        case "Edit", "Write", "MultiEdit": .edit
+        case "Read": .read
+        case "Grep", "Glob", "WebSearch": .search
+        case "WebFetch": .fetch
+        default: .other
+        }
+        return .tool(.simple(name: String(name), detail: condense(detail), kind: kind))
     }
 
     // MARK: - Cross-harness transplants
@@ -1031,8 +1112,7 @@ enum ChatArchive {
             switch block {
             case let .text(text): text
             case let .code(code, lang): "```" + (lang ?? "") + "\n" + code + "\n```"
-            case let .tool(name, detail):
-                detail.isEmpty ? "[\(name)]" : "[\(name): \(detail)]"
+            case let .tool(call): "[\(call.chipText)]"
             case let .capsule(title, file):
                 "[Capsule \"\(title)\" @ \(file)] An earlier chat from this "
                     + "project, attached as context — read or grep its "
@@ -1042,6 +1122,8 @@ enum ChatArchive {
             // The path IS the wire format — re-sends and transplants
             // keep the image readable by the CLI.
             case let .image(path): path
+            // Bytes don't transplant; the target model gets a marker.
+            case .imageData: "[attached image]"
             }
         }.joined(separator: "\n\n")
     }
@@ -1111,6 +1193,21 @@ enum ChatArchive {
         }
         guard !parts.isEmpty else { return nil }
         return cleanUserText(parts.joined(separator: "\n"))
+    }
+
+    /// Base64 `image` blocks on a Claude user line, decoded for the
+    /// thumbnail. Only top-level blocks: an image inside a tool_result
+    /// (a screenshot a tool took) is the tool's output, not the user's.
+    private static func claudeUserImages(_ message: [String: Any]) -> [ChatMessage.Block] {
+        contentBlocks(message).compactMap { block in
+            guard block["type"] as? String == "image",
+                  let source = block["source"] as? [String: Any],
+                  source["type"] as? String == "base64",
+                  let encoded = source["data"] as? String,
+                  let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters),
+                  !data.isEmpty else { return nil }
+            return .imageData(data, mediaType: source["media_type"] as? String ?? "image/png")
+        }
     }
 
     /// Strips harness wrappers out of user text: system reminders and
@@ -1274,53 +1371,113 @@ enum ChatArchive {
     private static func extractImages(
         _ text: String
     ) -> (images: [ChatMessage.Block], prose: String) {
+        let split = imagePaths(in: text)
+        return (split.paths.map { .image(path: $0) }, split.prose)
+    }
+
+    /// The attached image paths in a composed message (absolute, tilde
+    /// expanded) and the prose without them. The send path uses this to
+    /// turn the paths into real image blocks for Claude.
+    static func imagePaths(in text: String) -> (paths: [String], prose: String) {
         guard let imagePathRegex, text.contains("/") else { return ([], text) }
         let ns = text as NSString
         let matches = imagePathRegex.matches(
             in: text, range: NSRange(location: 0, length: ns.length)
         )
         guard !matches.isEmpty else { return ([], text) }
-        var images: [ChatMessage.Block] = []
+        var paths: [String] = []
         var prose = text
         for match in matches {
             let raw = ns.substring(with: match.range)
             var path = raw
             if path.hasPrefix("\"") { path = String(path.dropFirst().dropLast()) }
-            images.append(.image(path: (path as NSString).expandingTildeInPath))
+            paths.append((path as NSString).expandingTildeInPath)
             prose = prose.replacingOccurrences(of: raw, with: "")
         }
-        return (images, prose.trimmingCharacters(in: .whitespacesAndNewlines))
+        return (paths, prose.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Splits fenced code out of markdown so the view can render it as a
-    /// monospace card instead of mangled inline text.
+    /// monospace card instead of mangled inline text. Fences follow
+    /// CommonMark (2026-10-20): ``` or ~~~, three or more, and only a
+    /// bare fence of the same character at least as long closes one — so
+    /// a ``` inside a ```` block (markdown samples, the README-in-a-reply
+    /// case) stays code instead of ending the card early and spilling
+    /// the rest as prose. Code keeps its indentation: the old whole-block
+    /// trim ate the first line's leading spaces, so an indented snippet
+    /// started flush-left while the lines under it kept theirs.
     static func splitMarkdown(_ text: String) -> [ChatMessage.Block] {
         var blocks: [ChatMessage.Block] = []
-        var inCode = false
-        var fenceLang: String?
         var current: [String] = []
-        func flush() {
+        var fence: (char: Character, length: Int, indent: Int, lang: String?)?
+        func flushText() {
             let joined = current.joined(separator: "\n")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !joined.isEmpty {
-                blocks.append(inCode ? .code(joined, lang: fenceLang) : .text(joined))
+            if !joined.isEmpty { blocks.append(.text(joined)) }
+            current = []
+        }
+        func flushCode(_ open: (char: Character, length: Int, indent: Int, lang: String?)) {
+            // Only the fence's own indent comes off each line (a fence
+            // inside a list item), and only blank edge lines go.
+            var lines = current.map { line -> String in
+                let lead = line.prefix { $0 == " " }.count
+                return String(line.dropFirst(min(lead, open.indent)))
+            }
+            while lines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+                lines.removeFirst()
+            }
+            while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+                lines.removeLast()
+            }
+            if !lines.isEmpty {
+                blocks.append(.code(lines.joined(separator: "\n"), lang: open.lang))
             }
             current = []
         }
         for line in text.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                flush()
-                inCode.toggle()
-                let hint = String(trimmed.dropFirst(3))
-                    .trimmingCharacters(in: .whitespaces)
-                fenceLang = inCode && !hint.isEmpty ? hint : nil
-            } else {
-                current.append(line)
+            if let marker = fenceMarker(trimmed) {
+                if let open = fence {
+                    if marker.char == open.char, marker.length >= open.length,
+                       marker.rest.trimmingCharacters(in: .whitespaces).isEmpty {
+                        flushCode(open)
+                        fence = nil
+                    } else {
+                        current.append(line)
+                    }
+                } else {
+                    flushText()
+                    // The info string's first word is the language
+                    // ("bash title=x" → bash).
+                    let hint = marker.rest.trimmingCharacters(in: .whitespaces)
+                        .split(separator: " ").first.map(String.init) ?? ""
+                    fence = (
+                        marker.char, marker.length,
+                        line.prefix { $0 == " " }.count,
+                        hint.isEmpty ? nil : hint
+                    )
+                }
+                continue
             }
+            current.append(line)
         }
-        flush()
+        // An unclosed fence (a reply still streaming) is still code.
+        if let open = fence { flushCode(open) } else { flushText() }
         return blocks
+    }
+
+    /// A fence line's marker: its character, run length and whatever
+    /// follows (the info string). A backtick fence can't carry backticks
+    /// after it — that's an inline code span, not a fence.
+    private static func fenceMarker(
+        _ trimmed: String
+    ) -> (char: Character, length: Int, rest: String)? {
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        let length = trimmed.prefix { $0 == first }.count
+        guard length >= 3 else { return nil }
+        let rest = String(trimmed.dropFirst(length))
+        if first == "`", rest.contains("`") { return nil }
+        return (first, length, rest)
     }
 
     /// Live-turn blocks in the shape the parser gives the same reply once

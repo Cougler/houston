@@ -13,6 +13,11 @@ struct BranchesModuleRows: View {
     /// Every other checkout of this repo: the main one (when this is a
     /// worktree) and the linked ones.
     let worktrees: [WorktreeRowModel]
+    /// The project path + its live git info, for the plain-language
+    /// action rows (commit / push / pull / merge). nil hides them.
+    var path: String? = nil
+    var info: GitInfo? = nil
+    var onChanged: () -> Void = {}
     let onBranchMenu: () -> Void
     let onInitialize: () -> Void
     let onOpen: (WorktreeRowModel) -> Void
@@ -29,6 +34,9 @@ struct BranchesModuleRows: View {
                     .lineLimit(1)
                     .padding(.horizontal, 8)
                     .padding(.bottom, 2)
+            }
+            if let path, let info, info.isRepo {
+                GitPlainRows(path: path, info: info, onChanged: onChanged)
             }
             if !worktrees.isEmpty {
                 Text("WORKTREES")

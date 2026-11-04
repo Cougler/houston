@@ -294,6 +294,142 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   whatever the main checkout has out, and ABORTS on conflict (offering to
   redo it in a terminal) rather than leave main mid-merge. Git follows
   the workspace (`chatTarget.path`), not just the terminal selection.
+- **Documents (2026-10-20): a native rich-text editor over plain `.md`
+  files.** `WorkspaceItem.docs` is a workspace module like Chats — bar
+  chip "Docs" / side-panel card "DOCS" — listing the project's
+  `<project>/docs/*.md` (in the repo, readable by agents, nothing
+  Houston-specific) plus a GLOBAL group from one shared folder
+  (`HoustonSettings.globalDocsDir`, default `~/Documents/Houston`). A
+  row opens the editor as the workspace's third surface (`docTarget`,
+  beside chat and terminal; opening a chat or leaving the project
+  clears it). Chosen NATIVE over hosting Hierarch's TipTap editor in a
+  WKWebView (two toolchains, theme/focus/drag bridging, a web process
+  per view) — nothing of Hierarch's editor carries over; the model is
+  Hierarch's `DocBlock` idea rebuilt. Pieces: `MarkdownDocument`
+  (pure-Foundation parser/serializer for the subset — headings, lists
+  with nesting, quotes, fenced code, rules, bold/italic/strike/code/
+  links; tables and HTML blocks survive VERBATIM as `.raw` blocks, and
+  any unrecognised line is kept as paragraph text, never dropped),
+  `DocumentStore` (directory index, polled 2s while a workspace is
+  open, create/rename/trash), `DocumentEditorView.swift` (`DocTextView`
+  + `DocLayoutManager` + `DocStyle` + `DocText` bridge + the SwiftUI
+  shell with the format strip). **The text storage carries semantics,
+  not looks**: `.docBlock` (a `DocBlockKind.token` string on the whole
+  paragraph, anchored on its NEWLINE — the character that survives
+  typing at the paragraph's start) and `.docInline` (a bitmask); fonts,
+  indents and colors are re-derived by `DocStyle.restyle` in the
+  storage delegate on every edit, and list markers / quote bars / code
+  backgrounds / rules are DRAWN by `DocLayoutManager`, never stored as
+  characters. An inserted newline must wear the current paragraph's
+  kind (`insertNewline` sets it explicitly — the typing attributes may
+  lag the cursor). Input rules match TipTap's: `# `, `- `, `1. `, `> `,
+  "```" and `---`⏎ convert the paragraph; Enter on an empty item
+  leaves the list; Tab/⇧Tab nest; backspace at a block's start demotes
+  it, and joining two paragraphs keeps the FIRST one's kind. Copy
+  writes markdown to the pasteboard (paste into a chat and the list
+  stays a list); paste parses multi-line markdown into structure.
+  Autosave is a 0.6s debounce + ⌘S + on unmount; the model re-reads
+  the file when its mtime moves and the editor is clean (agents edit
+  docs too). The Format menu's items are responder-chain selectors on
+  `DocTextView` — enabled only while a document has focus; ⌘B/⌘K/⌘S
+  collide with sidebar/clear/tasks and the editor claims them first in
+  `performKeyEquivalent` (views see key equivalents before the menu).
+  `HOUSTON_DOC_SELFTEST=1 .build/debug/Houston` runs a headless check
+  of the bridge and the key handling (`DocumentSelfTest`) — run it
+  after touching any of this; it's the only test the package has.
+  Hard breaks inside a paragraph are U+2028 (⇧⏎), serialised as a
+  trailing `\`. Soft-wrapped source lines join on save — editing a
+  hand-wrapped file re-flows its paragraphs; that's accepted.
+- **GitHub Inbox (2026-11-04): the repo's open issues and pull requests
+  as a workspace module.** `WorkspaceItem.inbox` — bar chip "Inbox · N"
+  / side-panel card "INBOX" — lists every open issue and PR of the
+  workspace's `origin` (`GitHubInboxStore`, `Services/GitHubInbox.swift`),
+  read through the user's own `gh` login (`gh api`, resolved and spawned
+  like the chat CLIs: `AgentTransport.resolveBinary` +
+  `spawnEnvironment`), so "signed in" means what the terminal means. ONE
+  request a minute per watched project (`issues?state=open` carries PRs
+  too, `pull_request` key; first 100 by updated), cached under
+  `Application Support/Houston/inbox/<munged>.json` so a relaunch lists
+  at once. A row opens the item as the workspace's fourth surface
+  (`inboxTarget`, exclusive with `docTarget`): `InboxItemView`
+  (`Views/InboxModule.swift`) — facts line, PR size/checks/reviews/merge
+  state (`pulls/N`, `pulls/N/reviews`, `commits/<sha>/check-runs`), the
+  body and comments as `MarkdownBlockView`, and the diff from `gh pr
+  diff` split per file by `FileDiff.parseUnified` into the chat's
+  `DiffView`. **Read-only by design** — the only outward actions are
+  links into GitHub (the "+" opens the new-issue form). The chip hides
+  when origin isn't github.com; a missing or signed-out `gh` shows the
+  reason in the rows. This is the first step of the ticket-processing
+  direction (review / policy / escalation come after it — see the
+  memory note); nothing automated yet. `HOUSTON_INBOX_SELFTEST=1
+  .build/debug/Houston` checks the remote parser, the diff splitter and
+  the item decoder; add `HOUSTON_INBOX_LIVE=owner/repo#pr` for a real
+  round trip through gh (verified 2026-11-04 on ghostty-org/ghostty).
+- **PR review (phase 2, 2026-11-04): one headless review by one Claude
+  model, in a throwaway worktree, verdict as structured output.**
+  `PullReviewStore` / `PullReviewRunner` (`Services/PullReview.swift`),
+  the REVIEW section on the PR page (`PullReviewSection` /
+  `ReviewVerdictCard` in `Views/InboxModule.swift`). The worker is
+  `claude -p` — one process, one PR, one JSON answer — NOT a chat
+  session: no conversation to keep warm, no permission UI. Read-only by
+  flag: `--permission-mode dontAsk` + `--allowedTools Read Grep Glob
+  Bash(git diff|log|show|status:*)` + `--disallowedTools Edit Write …`;
+  the prompt tells it so (read the tests, don't run them). Pipeline:
+  `git fetch origin +refs/pull/N/head:refs/houston/pr/N` → `git
+  worktree add --detach <project>-pr-N` (it shows under the project in
+  the sidebar while the review runs) → claude in that cwd with the
+  prompt + diff-vs-merge-base on STDIN (a variadic `--allowedTools`
+  swallows a trailing prompt argument — verified) → `--json-schema`
+  verdict lands in the `result` event's `structured_output` (verified
+  on 2.1.318; it arrives via a `StructuredOutput` tool turn, so never
+  cap `--max-turns` at 1) → worktree removed, ref deleted. Progress
+  reads the stream: `assistant` tool_use → activity words
+  (`ChatAgentSession.toolActivity`, now `nonisolated`) + the step list;
+  `system/thinking_tokens` → the count. Runs persist to
+  `Application Support/Houston/inbox/reviews/<slug>-<N>.json` (newest
+  first, 20 kept) with cost / duration / turns / head SHA — the seed of
+  the phase-5 ledger. **Nothing is posted to GitHub**; the card's only
+  outward action is Copy-as-markdown. Verified end to end 2026-11-04
+  with `HOUSTON_INBOX_SELFTEST=1 HOUSTON_REVIEW_LIVE=<clone>#<pr>[@model]`
+  on a local bare origin carrying `refs/pull/1/head` (haiku found both
+  planted bugs and chose `needs_human` for a money change, 11s, $0.01);
+  the sandbox classifier refuses to run it over a downloaded repo, so
+  keep the fixture local. A real GitHub PR round trip is unrun (no PR
+  on Cougler/houston).
+- **Policy + triage + escalation (phase 3, 2026-11-04).** `ReviewPolicy`
+  / `ReviewPolicyStore` / `TriageEngine` / `InboxTriageStore`
+  (`Services/ReviewPolicy.swift`); UI in `Views/InboxModule.swift`
+  (`InboxPolicyPanel` = the AUTOMATION right sheet, `RightPanel.
+  inboxPolicy`, opened from the INBOX module's last row
+  `InboxAutomationRow`; `InboxTriageLine` above the PR page's REVIEW;
+  triage glyphs on rows; amber dot on the Inbox chip). A per-project
+  policy (`Application Support/Houston/inbox/policy/<munged>.json`,
+  automation OFF by default): auto-review each open PR's head once,
+  optional SECOND model, skip drafts, and the needs-you lines —
+  max diff lines (over it the run is SKIPPED before the model spends
+  anything, `ReviewRun.skipped`), risk ≥ N, confidence < N, sensitive
+  path substrings, checks not green, conflicts, and model DISAGREEMENT
+  (approve/comment vs request_changes/needs_human). The rules are
+  pure (`TriageEngine.triage`) and measured on what the review SAW
+  (`git diff --numstat` from the worktree → `linesChanged` /
+  `changedPaths` on the run), never on GitHub's counters, so verdict
+  and rules describe one commit; the Inbox listing now carries
+  `headSHA`/`baseRef` from the `pulls` endpoint (second request per
+  poll) so runs key by head. `InboxTriageStore` debounces the three
+  stores' `objectWillChange`, keeps `triage[project][number]`, starts
+  ONE review at a time across all projects (a head that failed twice
+  is left alone), and escalates once per head+reasons (remembered in
+  `inbox/escalated.json`): `EventFeed` `.inboxNeedsYou` + a banner
+  (`NotifyStore.deliverInboxBanner`, userInfo `path` + `inbox` →
+  `AppDelegate.didReceive` → `.houstonOpenProject` with `inbox` →
+  `openInboxItem`) + the menubar dot (`NotifyStore.refreshBadge` ORs in
+  `needsYouCount`). "Work on it" (`.houstonWorkOnPull` →
+  `GitWorktrees.checkoutPull`): the PR as a KEPT worktree
+  `<repo>-pr-N` on branch `pr-N`, selected like any project — the
+  escalation lands you in a terminal/chat in the PR's tree. The rules
+  are covered by `HOUSTON_INBOX_SELFTEST`; the automation loop itself
+  (poll → schedule → escalate) is UNRUN live — it needs a GitHub repo
+  with open PRs, and Cougler/houston has none.
 - `NotifyFeed` / `NotifyStore` — "needs you" notifications off Claude Code's
   `Notification` (permission request / idle waiting) and `Stop` (turn done)
   hooks. One script dumps each hook payload to
@@ -467,6 +603,125 @@ main.swift → AppDelegate (menubar item) → MainWindowController → MainWindo
   user message, so an autonomous turn MERGES into the previous reply:
   the live section draws it headerless at block spacing (`extendsReply`)
   and `committed` trims it by block (`trimmingLiveTail`).
+- **Chat rendering parity pass (2026-10-20) — four bugs, one rule each.**
+  (1) Pasted images are base64 `image` content blocks on the user line
+  (the TUI's paste; verified in real transcripts) and the parser read
+  only `text` blocks, so a pasted picture never rendered and a paste-
+  only message VANISHED. `ChatMessage.Block.imageData` carries the bytes;
+  `ChatImageBlock` draws file paths and bytes alike. (2) Houston's own
+  attachments now go to Claude the same way: `sendClaude` turns the
+  composer's paths into `image` blocks via `ImageAttachment` (resampled
+  to the API's 1568px cap off-main; SVG/undecodable keep the old path-
+  in-text route) — verified live 2026-10-20 (a red PNG block answered
+  "red"). The live bubble still renders the paths from `pendingUserText`;
+  the re-read swaps in the stored bytes, and the parser drops path
+  thumbnails when a line carries bytes so nothing doubles. (3) Fences
+  follow CommonMark in `splitMarkdown`: ``` or ~~~, closing fence same
+  char and at least as long (a ``` inside ```` stays code), indentation
+  KEPT (the whole-block trim ate the first line's leading spaces), only
+  the fence's own indent stripped. `MarkdownBlockView.parse` gained pipe
+  tables (`.table`, rendered as a wrapping `Grid`), `---` rules, h5/h6,
+  indented continuation lines joining their list item, and URL
+  promotion that skips code spans and trailing punctuation. (4) The
+  working row is ONE view, `TurnActivityRow` — the thread panel had a
+  private copy still saying a bare "Working…" for every non-thinking
+  step, and rendered the live reply as TWO `MessageView`s (the exact
+  flicker fixed in the main view). `HOUSTON_CHAT_SELFTEST=1
+  .build/debug/Houston` (`ChatRenderSelfTest`) checks all of this
+  headlessly — run it after touching either parser, the transcript
+  reader or the encoder.
+- **Tool work renders as cards, from a harness-neutral `ToolCall`
+  (2026-10-21, desktop parity).** `ChatMessage.Block.tool` carries a
+  `ToolCall` (`Services/ToolCall.swift`: kind, title, file, command,
+  diff, output, todos, questions, status), never a harness's raw event,
+  so the diff card / shell output / task list / plan card work for any
+  model that fills the fields and a name-only harness still gets a chip
+  (`ToolCall.simple`). Claude's adapter is built on VERIFIED shapes:
+  the stream delivers results as `user` events with `tool_use_result`
+  (Edit `structuredPatch`, Bash `stdout`/`stderr`, Read `file.content`),
+  the transcript line keeps the same object as `toolUseResult`;
+  `handleClaude`'s `user` case and `claudeTranscript`'s `pendingCalls`
+  pair them by `tool_use_id`. An Edit's diff is computed from the INPUT
+  first (`FileDiff.between`, LCS) so the approval prompt shows it before
+  the tool runs, then replaced by the patch. Steps now show in FINISHED
+  transcripts too (collapsed "N steps"; the task list opens itself) —
+  the old "prose only when done" rule is gone, which also means the
+  turn-end swap moves nothing because nothing folds. Views live in
+  `ToolCallViews.swift` (`ToolRunView` / `ToolCallView` / `DiffView` /
+  `ToolOutputBlock` / `TodoListView`). codex and ACP fill what their
+  events carry (command, aggregated output, exit code; ACP kind) —
+  their tool_result equivalents aren't wired, so those cards are
+  chips with a body only when the event had one.
+- **AskUserQuestion and ExitPlanMode arrive as permission requests and
+  answer through `updatedInput` (2026-10-21).** `ApprovalRequest.kind`
+  is `.permission` / `.question` / `.plan` with the typed `call`;
+  `ApprovalCard` renders `QuestionCard` (option buttons, multi-select,
+  Other field → `session.answer(_:answers:)` = allow + `updatedInput.
+  answers` keyed by question text, the SDK's shape) and `PlanCard`
+  (markdown + Approve / Reject with feedback → deny with the message).
+  Permissions show the typed call (an edit's DiffView, a command block)
+  — the card's "Auto" only on `.permission`. The answer shape is the
+  SDK's documented one, NOT yet exercised against a live
+  AskUserQuestion here.
+- **Message toolbars (`MessageToolbar.swift`) and composer completions
+  (`ComposerAutocomplete.swift`), 2026-10-21.** Each finished message
+  gets copy / retry / edit (user) / branch (assistant) on hover —
+  `MessageActions`, wired in `ChatBrowserView.messageActions`; retry is
+  a NEW turn with the prompt (a persistent session can't un-say a
+  reply), edit posts `.houstonComposerSetDraft` keyed by `draftKey`.
+  Completions: `/` as the first token lists `CommandCatalog` (skills +
+  `.claude/commands`, Claude only — add a harness case to extend), `@`
+  lists `ProjectFileIndex` (`git ls-files` incl. untracked, 30s TTL,
+  off-main; a bounded walk for non-repos). Both are expanded by the CLI
+  (`@path` attaches the file in print mode — verified live). The list
+  sits above the input; Return/Tab accept, ↑/↓ move, Esc closes; the
+  ghost suggestion yields while a list is open. `HOUSTON_CHAT_SELFTEST`
+  covers the adapter, the diff engine, transcript pairing and the
+  completion context.
+- **Signed-out Claude has a way back in (2026-10-23).** `ClaudeAuthStore`
+  (`Services/ClaudeAuth.swift`) is the one source of truth for "is the
+  CLI signed in": it runs `claude auth status` (JSON `loggedIn` /
+  `authMethod`, verified on 2.1.305) with `AgentTransport.
+  spawnEnvironment()` — the SAME scrub + shell PATH the chat spawns use,
+  so the answer matches what Houston's own processes see; env
+  credentials (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / a gateway
+  `ANTHROPIC_BASE_URL`, which the desktop app's shells carry) count as
+  signed in even when the CLI says "none" — at launch,
+  on activation, every 5 min, every 10 s while signed out (finishing the
+  terminal login flips the UI by itself), and on any auth-looking turn
+  failure. Offers: the composer's "Claude is signed out · Sign in again"
+  row, the status bar's signed-out pill (shown with or without a
+  session) plus a "Sign in to Claude again…" item in the model menu,
+  and the chat's failed-turn card ("Sign in again" + "Retry", which
+  re-sends `lastPrompt`). All go through `signIn(project:)` →
+  `PromptDelivery.login` (types `claude /login` into the project's
+  terminal). The root bug: `result` errors were reported as "The turn
+  failed (error_during_execution)" — the CLI's own text ("Invalid API
+  key · Please run /login") lives in `result`/`errors`, so `needsLogin`
+  never matched a real auth failure; `handleClaude` now carries that
+  text through.
+- **Git in words: commit / push / pull / merge, run by Houston itself
+  (2026-10-23).** `GitActions` (`Services/GitActions.swift`) runs the
+  four actions a non-git user needs directly (not typed into a
+  terminal), with `GIT_TERMINAL_PROMPT=0` so a credential prompt fails
+  fast instead of hanging: `commitAll` (add -A + commit), `push` (sets
+  the upstream when missing), `pull` (--ff-only), `mergeIntoDefault`
+  (switch to origin/HEAD's branch or main/master, merge --no-edit,
+  switch BACK — conflicts abort and return to the branch untouched;
+  a dirty tree refuses), `suggestCommitMessage` (on-device model from
+  the diff stat + the chat prompt; falls back to the prompt as a
+  subject, then file names). Two homes in `GitQuickActions.swift`:
+  `ChangesCard` — the chat's "Claude changed N files. Commit everything
+  now?" after a turn whose reply had Edit/Write calls and the tree is
+  dirty (`reloadThenClear` sets `changesCard`; Not now / done / the
+  next send clear it) → commit step with the suggested subject → "Push
+  to the remote now?" → done; and `GitPlainRows` in the Branches module
+  (under the status line): one row per thing to do, each with a line
+  on what it does and what it does NOT do ("nothing leaves your Mac").
+  The branch menu's command catalog is unchanged for everything else.
+  `HOUSTON_CHAT_SELFTEST` exercises the actions on a throwaway repo,
+  including the conflict abort. Push to a real remote is unexercised
+  (no remote in the test).
 - **The turn-end swap must move nothing.** The live turn is replaced by
   the re-read transcript a beat after it ends; every difference between
   the two renders is a visible jump. So the live reply renders in the

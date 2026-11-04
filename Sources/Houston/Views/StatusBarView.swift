@@ -34,8 +34,37 @@ struct StatusBarView: View {
     var sessionRunning = false
     /// The running harness — its model catalog fills the switcher.
     var agent: CodingAgent? = nil
+    /// The project the bar belongs to — where "Sign in again" opens the
+    /// login terminal.
+    var projectPath: String? = nil
     /// The context meter's account-limits popover.
     @State private var showLimits = false
+    @ObservedObject private var claudeAuth = ClaudeAuthStore.shared
+
+    /// The CLI reports signed out: a pill with the way back in, shown
+    /// whether or not a session is running — a signed-out CLI is why the
+    /// next one won't start.
+    private var signedOutPill: some View {
+        Button {
+            claudeAuth.signIn(project: projectPath ?? NSHomeDirectory())
+        } label: {
+            HStack(spacing: 5) {
+                LucideIcon("key", size: 12)
+                Text("Claude signed out · Sign in again")
+                    .font(Theme.Fonts.secondaryMedium)
+            }
+            .foregroundStyle(Theme.textWarning)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .fill(Theme.textWarning.opacity(0.12))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("The Claude CLI isn't signed in. Opens the project's terminal and runs claude /login.")
+    }
 
     /// The running harness's model catalog (see `CodingAgent.modelOptions`).
     private var models: [(label: String, arg: String)] {
@@ -50,6 +79,10 @@ struct StatusBarView: View {
             // tooltips keep it one hover away.
             let compact = geo.size.width < 620
             HStack(spacing: 0) {
+                if claudeAuth.loggedIn == false {
+                    signedOutPill
+                    Spacer(minLength: 12)
+                }
                 if !sessionRunning {
                     Spacer(minLength: 0)
                 } else if collapsed {
@@ -129,6 +162,12 @@ struct StatusBarView: View {
                     ], id: \.1) { level in
                         Button(level.0) { onSelectEffort(level.1) }
                     }
+                }
+                Divider()
+                // Always reachable: an expired login shows up as a failed
+                // turn, and the fix is one click, not a hunt for /login.
+                Button("Sign in to Claude again…") {
+                    claudeAuth.signIn(project: projectPath ?? NSHomeDirectory())
                 }
             }
         } label: {

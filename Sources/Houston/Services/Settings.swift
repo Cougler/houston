@@ -16,6 +16,9 @@ extension Notification.Name {
     /// A macOS notification was clicked — select this project
     /// (`userInfo["path"]`).
     static let houstonOpenProject = Notification.Name("HoustonOpenProject")
+    /// The PR page's "Work on it": check the pull request out into a
+    /// kept worktree and select it (`userInfo["path"]`, `["number"]`).
+    static let houstonWorkOnPull = Notification.Name("HoustonWorkOnPull")
     /// A left click landed in a terminal pane. The ghostty view consumes
     /// clicks before SwiftUI sees them, so dismissing the floating right
     /// sheet on terminal clicks needs this side channel.
@@ -135,6 +138,9 @@ struct HoustonSettings {
     /// provider), set from the composer's model menu. A new chat in the
     /// project opens on it; chats keep their own model once started.
     var projectDefaultModels: [String: [String: String]] = [:]
+    /// Where cross-project documents live (the Docs module's GLOBAL
+    /// group). Empty = `~/Documents/Houston`.
+    var globalDocsDir: String = ""
 
     static var defaults: HoustonSettings {
         HoustonSettings(
@@ -299,6 +305,9 @@ struct HoustonSettings {
         if let items = json["workspacePanelItems"] as? [String] {
             s.workspacePanelItems = items
         }
+        if let dir = json["globalDocsDir"] as? String {
+            s.globalDocsDir = dir
+        }
         if let f = json["windowFrame"] as? [Double], f.count == 4,
            f[2] >= 400, f[3] >= 300 {
             s.windowFrame = f
@@ -367,6 +376,7 @@ struct HoustonSettings {
         obj["knownServerPaths"] = s.knownServerPaths
         obj["starredProjects"] = s.starredProjects
         obj["projectDefaultModels"] = s.projectDefaultModels
+        obj["globalDocsDir"] = s.globalDocsDir
 
         let dir = ("~/Library/Application Support/Houston" as String).expandingTildePath
         let fm = FileManager.default

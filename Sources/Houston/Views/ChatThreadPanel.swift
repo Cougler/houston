@@ -494,56 +494,41 @@ private struct ThreadLiveSection: View {
                         harness: harness
                     )
                 }
-                if !session.liveBlocks.isEmpty {
+                // ONE message for the whole live reply, in the parser's
+                // block shape — same contract as the main transcript's
+                // live turn (see `LiveTurnView`): two views each drew
+                // their own header and every finished block jumped from
+                // the streaming one into the other, and a streamed code
+                // sample rendered as fenced prose until the re-read.
+                let replyBlocks = ChatArchive.parsedShape(
+                    session.streamText.isEmpty
+                        ? session.liveBlocks
+                        : session.liveBlocks + [.text(session.streamText)]
+                )
+                if !replyBlocks.isEmpty {
                     MessageView(
-                        message: ChatMessage(
-                            role: .assistant, blocks: session.liveBlocks
-                        ),
-                        harness: harness
-                    )
-                }
-                if !session.streamText.isEmpty {
-                    MessageView(
-                        message: ChatMessage(
-                            role: .assistant,
-                            blocks: [.text(session.streamText)]
-                        ),
-                        harness: harness
+                        message: ChatMessage(role: .assistant, blocks: replyBlocks),
+                        harness: harness,
+                        showTools: session.running
                     )
                 }
                 if showsApproval, let approval = session.approval {
                     ApprovalCard(
                         request: approval,
                         onAllow: { session.respond(to: approval, allow: true) },
-                        onAuto: session.canSwitchToAuto
+                        onAuto: session.canSwitchToAuto && approval.kind == .permission
                             ? { session.allowAndSwitchToAuto(approval) } : nil,
-                        onDeny: { session.respond(to: approval, allow: false) }
+                        onDeny: { session.respond(to: approval, allow: false) },
+                        onAnswer: harness == .claude
+                            ? { session.answer(approval, answers: $0) } : nil,
+                        onReject: harness == .claude
+                            ? { session.reject(approval, feedback: $0) } : nil
                     )
                 }
                 if session.running {
-                    // Same indicator as the main live turn: the liquid
-                    // blob, plus the thinking token count when the model
-                    // is in an extended-thinking block.
-                    HStack(spacing: 10) {
-                        LiquidThinkingView()
-                            .frame(width: 44, height: 44)
-                            .accessibilityHidden(true)
-                        Group {
-                            if let tokens = session.thinkingTokens {
-                                Text(session.thinkingLabel ?? "Thinking…")
-                                    + Text(tokens > 0 ? "  \(formatTokens(tokens)) tokens" : "")
-                                        .foregroundColor(Theme.textSecondary.opacity(0.7))
-                            } else {
-                                Text("Working…")
-                            }
-                        }
-                        .lineLimit(2)
-                        .font(Theme.Fonts.body)
-                        .foregroundStyle(Theme.textSecondary)
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                    }
-                    .padding(.leading, -9)
+                    // The main live turn's indicator, shared: the liquid
+                    // blob plus the running step in words.
+                    TurnActivityRow(session: session, blobSize: 44)
                 }
             }
         }

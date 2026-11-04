@@ -573,8 +573,33 @@ final class NotifyStore: ObservableObject {
         )
     }
 
-    private func badgeChanged() {
+    private func badgeChanged() { refreshBadge() }
+
+    /// The menubar's amber dot: any pane attention, or any PR the Inbox
+    /// policy says needs you.
+    func refreshBadge() {
         (NSApp.delegate as? AppDelegate)?
-            .setNeedsAttentionBadge(!attention.isEmpty)
+            .setNeedsAttentionBadge(!attention.isEmpty || InboxTriageStore.shared.needsYouCount > 0)
+    }
+
+    /// A banner for a pull request the policy escalated. Keyed by PR so
+    /// a re-escalation (new head, new reasons) replaces its predecessor.
+    /// The click lands on the PR page (`AppDelegate.didReceive` passes
+    /// `inbox` through `.houstonOpenProject`).
+    func deliverInboxBanner(project: String, number: Int, title: String, body: String) {
+        guard Self.canBanner, authorization != .denied else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.userInfo = ["path": project, "inbox": number]
+        content.threadIdentifier = project
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: "inbox-" + String(number) + "-" + project,
+                content: content,
+                trigger: nil
+            )
+        )
     }
 }

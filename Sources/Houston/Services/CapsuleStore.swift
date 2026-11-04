@@ -61,6 +61,9 @@ extension Notification.Name {
     /// Focus the visible chat's composer — posted when the user clicks a
     /// project or a chat, so they can type straight away.
     static let houstonFocusComposer = Notification.Name("houstonFocusComposer")
+    /// Replace a composer's draft (a message's "Edit and resend"). userInfo:
+    /// "key" — the composer's draftKey — and "text".
+    static let houstonComposerSetDraft = Notification.Name("houstonComposerSetDraft")
 }
 
 /// The capsule shelf, persisted to
